@@ -720,12 +720,15 @@ static int find_on_path(const char *name, char *out, size_t cap) {
 }
 
 /* The bundled typescript-language-server entry point, searched relative to our
- * binary: next to it when shipped (vendor/ alongside the executable) or one
- * level up in the source tree (build/wave + vendor/). 1 + path on success. */
+ * binary: inside a .app bundle (Contents/Resources/vendor/, the canonical spot
+ * for non-code payload), next to it when shipped flat (vendor/ alongside the
+ * executable), or one level up in the source tree (build/wave + vendor/).
+ * 1 + path on success. */
 static int ts_server_cli(char *out, size_t cap) {
     char dir[4096];
     if (!exe_dir(dir, sizeof dir)) return 0;
     static const char *rel[] = {
+        "../Resources/vendor/lsp/node_modules/typescript-language-server/lib/cli.mjs",
         "vendor/lsp/node_modules/typescript-language-server/lib/cli.mjs",
         "../vendor/lsp/node_modules/typescript-language-server/lib/cli.mjs",
         NULL,
@@ -742,7 +745,8 @@ static int ts_server_cli(char *out, size_t cap) {
 static int rg_binary(char *out, size_t cap) {
     char dir[4096];
     if (exe_dir(dir, sizeof dir)) {
-        static const char *rel[] = { "vendor/rg/rg", "../vendor/rg/rg", NULL };
+        static const char *rel[] = { "../Resources/vendor/rg/rg",
+                                     "vendor/rg/rg", "../vendor/rg/rg", NULL };
         for (int i = 0; rel[i]; i++) {
             snprintf(out, cap, "%s/%s", dir, rel[i]);
             if (access(out, X_OK) == 0) return 1;

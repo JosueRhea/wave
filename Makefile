@@ -9,9 +9,12 @@ CFLAGS  ?= -std=c11 -O2 -g -Wall -Wextra -Wno-unused-parameter
 CFLAGS  += -Isrc -Ivendor -Ivendor/tree-sitter/lib/include -Ivendor/tree-sitter/lib/src
 
 # GLFW via Homebrew; OpenGL + Cocoa frameworks for the window/context.
+# Link GLFW *statically* (the .a, by full path) so the shipped binary carries no
+# dependency on a Homebrew dylib — the .app must run on machines without brew,
+# and the hardened runtime's library validation rejects foreign-Team-ID dylibs.
 GLFW_PREFIX := $(shell brew --prefix glfw 2>/dev/null)
 GUI_CFLAGS  := -I$(GLFW_PREFIX)/include
-GUI_LIBS    := -L$(GLFW_PREFIX)/lib -lglfw \
+GUI_LIBS    := $(GLFW_PREFIX)/lib/libglfw3.a \
                -framework OpenGL -framework Cocoa -framework IOKit \
                -framework CoreVideo -framework CoreFoundation
 
@@ -220,13 +223,16 @@ bundle: app
 	@rm -rf $(APP)
 	@mkdir -p $(APP_BIN) $(APP_RES)
 	@cp $(BUILD)/wave $(APP_BIN)/wave
-	@mkdir -p $(APP_BIN)/vendor/lsp $(APP_BIN)/vendor/rg
-	@cp -R $(LSP_DIR)/node_modules $(APP_BIN)/vendor/lsp/
-	@cp $(LSP_DIR)/package.json $(APP_BIN)/vendor/lsp/
-	@cp $(RG_BIN) $(APP_BIN)/vendor/rg/rg
+	@# Vendored payload lives in Resources/ (the canonical spot for non-code
+	@# files) — NOT in MacOS/, where codesign would treat each .js as nested code
+	@# and refuse to sign. Wave resolves ../Resources/vendor at runtime.
+	@mkdir -p $(APP_RES)/vendor/lsp $(APP_RES)/vendor/rg
+	@cp -R $(LSP_DIR)/node_modules $(APP_RES)/vendor/lsp/
+	@cp $(LSP_DIR)/package.json $(APP_RES)/vendor/lsp/
+	@cp $(RG_BIN) $(APP_RES)/vendor/rg/rg
 	@# Drop the node_modules .bin symlink shims — unused at runtime (Wave spawns
 	@# cli.mjs directly) and they break codesign's bundle seal.
-	@rm -rf $(APP_BIN)/vendor/lsp/node_modules/.bin
+	@rm -rf $(APP_RES)/vendor/lsp/node_modules/.bin
 	@cp packaging/wave.icns $(APP_RES)/wave.icns
 	@sed 's/__VERSION__/$(VERSION)/g' packaging/Info.plist.in > $(APP)/Contents/Info.plist
 	@printf 'APPL????' > $(APP)/Contents/PkgInfo
@@ -235,7 +241,7 @@ bundle: app
 	@# + a secure timestamp (both required for notarization); otherwise ad-hoc.
 	@if [ -n "$(CODESIGN_ID)" ]; then \
 	    echo "  SIGN  $(CODESIGN_ID) (hardened runtime)"; \
-	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP_BIN)/vendor/rg/rg; \
+	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP_RES)/vendor/rg/rg; \
 	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP_BIN)/wave; \
 	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP); \
 	else \
