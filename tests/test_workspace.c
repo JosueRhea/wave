@@ -1,0 +1,98 @@
+/* test_workspace.c — scanning order and the collapse/expand visible view. */
+#include "test.h"
+#include "workspace.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* Build a small tree under a fresh temp dir:
+ *   root/
+ *     a/           (dir)
+ *       a1.txt
+ *       sub/       (dir)
+ *         deep.txt
+ *     b/           (dir)
+ *       b1.txt
+ *     top.txt
+ */
+static char *make_tree(void) {
+    static char root[256];
+    snprintf(root, sizeof root, "/tmp/wave_ws_test_%d", (int)getpid());
+    char p[512];
+    mkdir(root, 0755);
+    snprintf(p, sizeof p, "%s/a", root); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/a/sub", root); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/b", root); mkdir(p, 0755);
+    snprintf(p, sizeof p, "%s/a/a1.txt", root); fclose(fopen(p, "w"));
+    snprintf(p, sizeof p, "%s/a/sub/deep.txt", root); fclose(fopen(p, "w"));
+    snprintf(p, sizeof p, "%s/b/b1.txt", root); fclose(fopen(p, "w"));
+    snprintf(p, sizeof p, "%s/top.txt", root); fclose(fopen(p, "w"));
+    return root;
+}
+
+/* find the visible row whose name matches, or -1 */
+static int row_of(Workspace *w, const char *name) {
+    for (size_t i = 0; i < ws_visible_count(w); i++)
+        if (!strcmp(ws_visible(w, i)->name, name)) return (int)i;
+    return -1;
+}
+
+int main(void) {
+    char *root = make_tree();
+    Workspace *w = ws_open(root);
+    CHECK(w != NULL);
+
+    /* entries (pre-order): a, a/a1.txt, a/sub, a/sub/deep.txt, b, b/b1.txt,
+     * top.txt = 7 are all scanned... */
+    CHECK_EQ(ws_count(w), 7);
+    /* ...but folders start collapsed, so only the top-level rows show:
+     * a, b, top.txt = 3 */
+    CHECK_EQ(ws_visible_count(w), 3);
+    CHECK_STR(ws_visible(w, 0)->name, "a");
+    CHECK_EQ(ws_visible(w, 0)->is_dir, 1);
+    CHECK_EQ(ws_visible(w, 0)->collapsed, 1);
+    CHECK_EQ(row_of(w, "a1.txt"), -1);
+    CHECK_EQ(row_of(w, "b1.txt"), -1);
+    CHECK_EQ(row_of(w, "deep.txt"), -1);
+
+    /* expand "a": its direct children appear (a1.txt, sub), but "sub" is itself
+     * still collapsed so deep.txt stays hidden. -> a, a1.txt, sub, b, top.txt */
+    int ra = row_of(w, "a");
+    CHECK(ra >= 0);
+    ws_visible_toggle(w, (size_t)ra);
+    CHECK_EQ(ws_visible_count(w), 5);
+    CHECK_EQ(ws_visible(w, (size_t)row_of(w, "a"))->collapsed, 0);
+    CHECK(row_of(w, "a1.txt") >= 0);
+    CHECK(row_of(w, "sub") >= 0);
+    CHECK_EQ(row_of(w, "deep.txt"), -1);
+    CHECK(row_of(w, "b") >= 0);
+    CHECK_EQ(row_of(w, "b1.txt"), -1);          /* b still collapsed */
+
+    /* expand "sub": deep.txt finally appears. -> 6 visible */
+    ws_visible_toggle(w, (size_t)row_of(w, "sub"));
+    CHECK_EQ(ws_visible_count(w), 6);
+    CHECK(row_of(w, "deep.txt") >= 0);
+
+    /* collapse "a" again: its whole subtree (a1.txt, sub, deep.txt) disappears,
+     * "b" and "top.txt" remain. -> a, b, top.txt = 3 */
+    ws_visible_toggle(w, (size_t)row_of(w, "a"));
+    CHECK_EQ(ws_visible_count(w), 3);
+    CHECK_EQ(row_of(w, "a1.txt"), -1);
+    CHECK_EQ(row_of(w, "deep.txt"), -1);
+
+    /* collapsing a file is a no-op */
+    int rt = row_of(w, "top.txt");
+    ws_visible_toggle(w, (size_t)rt);
+    CHECK_EQ(ws_visible_count(w), 3);
+
+    /* expand "b": its child shows up independently of "a" */
+    ws_visible_toggle(w, (size_t)row_of(w, "b"));
+    CHECK(row_of(w, "b1.txt") >= 0);
+    CHECK_EQ(row_of(w, "a1.txt"), -1);          /* a still collapsed */
+
+    ws_free(w);
+    TEST_REPORT();
+}

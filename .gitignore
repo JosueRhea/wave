@@ -1,0 +1,11 @@
+build/
+vendor/tree-sitter/
+vendor/tree-sitter-c/
+vendor/tree-sitter-javascript/
+vendor/tree-sitter-typescript/
+vendor/lsp/node_modules/
+vendor/lsp/bun.lock
+vendor/rg/
+
+# macOS
+.DS_Store
