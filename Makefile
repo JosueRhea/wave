@@ -67,7 +67,8 @@ GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o $(BUILD)/main.o
 TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
-.PHONY: all app test clean vendor lsp rg distclean icon bundle dist
+.PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
+        dmg notarize release-macos
 
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
@@ -77,6 +78,16 @@ APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources
 DIST      := $(BUILD)/Wave-$(VERSION)-macos.zip
+DMG       := $(BUILD)/Wave-$(VERSION)-macos.dmg
+
+# Signing + notarization (ZENIT GROUP LLC). CODESIGN_ID auto-selects the
+# "Developer ID Application" identity if one is installed, else falls back to an
+# ad-hoc signature (runnable locally, but Gatekeeper-blocked when downloaded).
+# NOTARY_PROFILE is a stored notarytool credential (see `make notarize`).
+TEAM_ID       := D7HN42D467
+NOTARY_PROFILE ?= wave-notary
+CODESIGN_ID   ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
+                   | awk -F'"' '/Developer ID Application/{print $$2; exit}')
 
 all: $(BUILD)/libwave.a app
 
@@ -220,8 +231,17 @@ bundle: app
 	@sed 's/__VERSION__/$(VERSION)/g' packaging/Info.plist.in > $(APP)/Contents/Info.plist
 	@printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@touch $(APP)
-	@echo "  SIGN  ad-hoc ($(APP))"
-	@codesign --force --deep --sign - $(APP) >/dev/null 2>&1 || true
+	@# Sign inside-out. With a Developer ID identity, enable the hardened runtime
+	@# + a secure timestamp (both required for notarization); otherwise ad-hoc.
+	@if [ -n "$(CODESIGN_ID)" ]; then \
+	    echo "  SIGN  $(CODESIGN_ID) (hardened runtime)"; \
+	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP_BIN)/vendor/rg/rg; \
+	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP_BIN)/wave; \
+	    codesign --force --options runtime --timestamp --sign "$(CODESIGN_ID)" $(APP); \
+	else \
+	    echo "  SIGN  ad-hoc (no Developer ID cert — set up notarization for downloads)"; \
+	    codesign --force --deep --sign - $(APP) >/dev/null 2>&1 || true; \
+	fi
 
 # Zip the bundle for a GitHub release asset.
 dist: bundle
@@ -229,3 +249,44 @@ dist: bundle
 	@rm -f $(DIST)
 	@cd $(BUILD) && /usr/bin/ditto -c -k --keepParent Wave.app $(notdir $(DIST))
 	@echo "  ->    $(DIST)"
+
+# Submit the (Developer ID-signed) app to Apple's notary service and staple the
+# ticket onto Wave.app, so a downloaded copy opens with no Gatekeeper warning —
+# no right-click, no xattr. Requires:
+#   1. A "Developer ID Application" cert (Xcode > Settings > Accounts >
+#      ZENIT GROUP LLC > Manage Certificates > + > Developer ID Application).
+#   2. A stored notarytool credential named $(NOTARY_PROFILE), one-time:
+#        xcrun notarytool store-credentials $(NOTARY_PROFILE) \
+#          --apple-id gerencia@gzenit.com --team-id $(TEAM_ID) \
+#          --password <app-specific-password>      # appleid.apple.com > Sign-In & Security
+notarize: bundle
+	@if [ -z "$(CODESIGN_ID)" ]; then \
+	    echo "ERROR: no Developer ID Application cert found — create one in Xcode first."; exit 1; \
+	fi
+	@echo "  NOTARIZE submitting $(APP) as $(NOTARY_PROFILE)"
+	@/usr/bin/ditto -c -k --keepParent $(APP) $(BUILD)/notarize.zip
+	@xcrun notarytool submit $(BUILD)/notarize.zip --keychain-profile $(NOTARY_PROFILE) --wait
+	@xcrun stapler staple $(APP)
+	@rm -f $(BUILD)/notarize.zip
+	@echo "  ->    stapled $(APP)"
+
+# Build a drag-to-Applications .dmg from the current Wave.app (run after bundle,
+# or after notarize so the app inside is stapled).
+dmg:
+	@echo "  DMG   $(DMG)"
+	@rm -rf $(BUILD)/dmgroot $(DMG)
+	@mkdir -p $(BUILD)/dmgroot
+	@cp -R $(APP) $(BUILD)/dmgroot/
+	@ln -s /Applications $(BUILD)/dmgroot/Applications
+	@hdiutil create -volname "Wave" -srcfolder $(BUILD)/dmgroot \
+	    -ov -format UDZO $(DMG) >/dev/null
+	@rm -rf $(BUILD)/dmgroot
+	@echo "  ->    $(DMG)"
+
+# Full notarized macOS release: build + sign + notarize + staple, then a .dmg
+# whose embedded app is stapled (opens offline, zero warnings).
+release-macos:
+	@$(MAKE) bundle
+	@$(MAKE) notarize
+	@$(MAKE) dmg
+	@echo "  DONE  $(DMG) (notarized + stapled)"
