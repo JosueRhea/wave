@@ -45,6 +45,24 @@ batched OpenGL renderer, and (next) LuaJIT extensions.
 
 ![Wave rendering a highlighted C file](docs/screenshot.png)
 
+## Download
+
+Prebuilt macOS builds are on the [Releases](../../releases) page —
+**Apple Silicon (arm64), macOS 11+**.
+
+1. Download `Wave-<version>-macos.zip` and unzip it.
+2. Move `Wave.app` to `/Applications`.
+3. It's an alpha and **not notarized**, so Gatekeeper blocks it on first launch.
+   Right-click the app → **Open** → **Open**, or clear the quarantine flag:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Wave.app
+   ```
+
+To build from source instead, see [Build & run](#build--run). Packaging targets:
+`make bundle` assembles `Wave.app`; `make dist VERSION=x.y.z` produces the
+release zip; `make icon` regenerates the app icon.
+
 ## Architecture
 
 Headless core (no GUI dependency — this is what the tests link against):

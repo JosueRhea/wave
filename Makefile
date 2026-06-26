@@ -67,7 +67,16 @@ GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o $(BUILD)/main.o
 TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
-.PHONY: all app test clean vendor lsp rg distclean
+.PHONY: all app test clean vendor lsp rg distclean icon bundle dist
+
+# --- macOS packaging ----------------------------------------------------------
+# Version stamped into the bundle + artifact name. Override on release:
+#   make dist VERSION=0.1.0-alpha
+VERSION  ?= 0.1.0-alpha
+APP       := $(BUILD)/Wave.app
+APP_BIN   := $(APP)/Contents/MacOS
+APP_RES   := $(APP)/Contents/Resources
+DIST      := $(BUILD)/Wave-$(VERSION)-macos.zip
 
 all: $(BUILD)/libwave.a app
 
@@ -178,3 +187,45 @@ clean:
 
 distclean: clean
 	rm -rf $(TS_DIR) $(TS_C_DIR) $(LSP_DIR)/node_modules $(RG_DIR)
+
+# Regenerate packaging/wave.icns from the PIL master (needs python3 + Pillow).
+# The .icns is committed, so this is only needed when the icon design changes.
+icon:
+	@echo "  ICON  packaging/wave.icns"
+	@python3 packaging/icon.py packaging/icon-master.png
+	@rm -rf $(BUILD)/wave.iconset && mkdir -p $(BUILD)/wave.iconset
+	@for sz in 16 32 128 256 512; do \
+	    sips -z $$sz $$sz packaging/icon-master.png \
+	        --out $(BUILD)/wave.iconset/icon_$${sz}x$${sz}.png >/dev/null; \
+	    d=$$((sz*2)); sips -z $$d $$d packaging/icon-master.png \
+	        --out $(BUILD)/wave.iconset/icon_$${sz}x$${sz}@2x.png >/dev/null; \
+	done
+	@iconutil -c icns $(BUILD)/wave.iconset -o packaging/wave.icns
+
+# Assemble Wave.app: binary in Contents/MacOS, vendored lsp+rg beside it (Wave
+# resolves them relative to the executable), icon + Info.plist in place.
+bundle: app
+	@echo "  BUNDLE $(APP) ($(VERSION))"
+	@rm -rf $(APP)
+	@mkdir -p $(APP_BIN) $(APP_RES)
+	@cp $(BUILD)/wave $(APP_BIN)/wave
+	@mkdir -p $(APP_BIN)/vendor/lsp $(APP_BIN)/vendor/rg
+	@cp -R $(LSP_DIR)/node_modules $(APP_BIN)/vendor/lsp/
+	@cp $(LSP_DIR)/package.json $(APP_BIN)/vendor/lsp/
+	@cp $(RG_BIN) $(APP_BIN)/vendor/rg/rg
+	@# Drop the node_modules .bin symlink shims — unused at runtime (Wave spawns
+	@# cli.mjs directly) and they break codesign's bundle seal.
+	@rm -rf $(APP_BIN)/vendor/lsp/node_modules/.bin
+	@cp packaging/wave.icns $(APP_RES)/wave.icns
+	@sed 's/__VERSION__/$(VERSION)/g' packaging/Info.plist.in > $(APP)/Contents/Info.plist
+	@printf 'APPL????' > $(APP)/Contents/PkgInfo
+	@touch $(APP)
+	@echo "  SIGN  ad-hoc ($(APP))"
+	@codesign --force --deep --sign - $(APP) >/dev/null 2>&1 || true
+
+# Zip the bundle for a GitHub release asset.
+dist: bundle
+	@echo "  DIST  $(DIST)"
+	@rm -f $(DIST)
+	@cd $(BUILD) && /usr/bin/ditto -c -k --keepParent Wave.app $(notdir $(DIST))
+	@echo "  ->    $(DIST)"

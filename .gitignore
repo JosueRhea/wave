@@ -9,3 +9,7 @@ vendor/rg/
 
 # macOS
 .DS_Store
+
+# Generated icon master (regenerate with `make icon`; wave.icns is committed)
+packaging/icon-master.png
+packaging/*.iconset
