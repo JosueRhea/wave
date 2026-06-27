@@ -16,7 +16,8 @@ GLFW_PREFIX := $(shell brew --prefix glfw 2>/dev/null)
 GUI_CFLAGS  := -I$(GLFW_PREFIX)/include
 GUI_LIBS    := $(GLFW_PREFIX)/lib/libglfw3.a \
                -framework OpenGL -framework Cocoa -framework IOKit \
-               -framework CoreVideo -framework CoreFoundation
+               -framework CoreVideo -framework CoreFoundation \
+               -framework CoreServices
 
 VENDOR        := vendor
 LSP_DIR       := $(VENDOR)/lsp
@@ -53,7 +54,7 @@ TS_TS_TAG     := v0.21.2
 
 BUILD   := build
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
-CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c
+CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
 
 # tree-sitter runtime is a single translation unit (lib.c includes the rest).
@@ -64,10 +65,12 @@ TS_OBJ   := $(BUILD)/ts_lib.o $(BUILD)/ts_c_parser.o \
             $(BUILD)/ts_tsx_parser.o $(BUILD)/ts_tsx_scanner.o
 
 # GUI-only objects (need GLFW/GL headers; mac.o is Objective-C / Cocoa).
-GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o $(BUILD)/main.o \
-           $(BUILD)/mac.o
+GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o \
+           $(BUILD)/draw.o $(BUILD)/main.o $(BUILD)/mac.o
 
-TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search
+TEST_LIBS := -framework CoreServices -framework CoreFoundation
+
+TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
@@ -189,7 +192,7 @@ $(BUILD)/wave: $(GUI_OBJ) $(BUILD)/libwave.a
 
 # --- tests ---
 $(BUILD)/%: tests/%.c $(BUILD)/libwave.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libwave.a -o $@
+	$(CC) $(CFLAGS) $< $(BUILD)/libwave.a $(TEST_LIBS) -o $@
 
 test: $(TEST_BIN)
 	@echo "== running tests =="

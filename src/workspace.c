@@ -63,6 +63,34 @@ static void rebuild_visible(Workspace *w) {
     }
 }
 
+static void clear_entries(Workspace *w) {
+    for (size_t i = 0; i < w->count; i++) free(w->entries[i].rel);
+    free(w->entries);
+    free(w->visible);
+    w->entries = NULL;
+    w->visible = NULL;
+    w->count = w->cap = 0;
+    w->vcount = w->vcap = 0;
+}
+
+static int strptr_cmp(const void *a, const void *b) {
+    const char *const *sa = a;
+    const char *const *sb = b;
+    return strcmp(*sa, *sb);
+}
+
+static int rel_in_sorted(char **rels, size_t n, const char *rel) {
+    size_t lo = 0, hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int c = strcmp(rels[mid], rel);
+        if (c == 0) return 1;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return 0;
+}
+
 /* one directory's children, for sorting: dirs first, then case-folded name. */
 typedef struct { char *name; int is_dir; } Child;
 
@@ -128,11 +156,80 @@ Workspace *ws_open(const char *root) {
 
 void ws_free(Workspace *w) {
     if (!w) return;
-    for (size_t i = 0; i < w->count; i++) free(w->entries[i].rel);
-    free(w->entries);
-    free(w->visible);
+    clear_entries(w);
     free(w->root);
     free(w);
+}
+
+int ws_reload(Workspace *w) {
+    if (!w) return -1;
+    struct stat st;
+    if (stat(w->root, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+
+    char **expanded = NULL;
+    size_t expanded_n = 0, expanded_cap = 0;
+    for (size_t i = 0; i < w->count; i++) {
+        WsEntry *e = &w->entries[i];
+        if (!e->is_dir || e->collapsed) continue;
+        if (expanded_n == expanded_cap) {
+            expanded_cap = expanded_cap ? expanded_cap * 2 : 16;
+            expanded = realloc(expanded, expanded_cap * sizeof(char *));
+        }
+        expanded[expanded_n++] = strdup(e->rel);
+    }
+    if (expanded_n > 0)
+        qsort(expanded, expanded_n, sizeof(char *), strptr_cmp);
+
+    clear_entries(w);
+    scan(w, w->root, "", 0);
+    for (size_t i = 0; i < w->count; i++) {
+        WsEntry *e = &w->entries[i];
+        if (e->is_dir && rel_in_sorted(expanded, expanded_n, e->rel))
+            e->collapsed = 0;
+    }
+    rebuild_visible(w);
+
+    for (size_t i = 0; i < expanded_n; i++) free(expanded[i]);
+    free(expanded);
+    return 0;
+}
+
+WsReloadEffect ws_apply_reload(Workspace *w) {
+    WsReloadEffect effect = {0};
+    if (ws_reload(w) == 0) {
+        effect.ok = 1;
+        effect.refilter_palette = 1;
+        snprintf(effect.message, sizeof effect.message, "workspace updated");
+    } else {
+        snprintf(effect.message, sizeof effect.message, "workspace unavailable: %s",
+                 w ? ws_root(w) : "");
+    }
+    return effect;
+}
+
+WsOpenContext ws_open_context(const char *arg) {
+    WsOpenContext ctx = {0};
+    if (!arg || !*arg) return ctx;
+
+    struct stat st;
+    if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
+        ctx.workspace = ws_open(arg);
+        ctx.kind = ctx.workspace ? WS_OPEN_WORKSPACE : WS_OPEN_NONE;
+        return ctx;
+    }
+
+    char dir[4096];
+    snprintf(dir, sizeof dir, "%s", arg);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        ctx.workspace = ws_open(dir[0] ? dir : "/");
+    } else {
+        ctx.workspace = ws_open(".");
+    }
+    snprintf(ctx.file, sizeof ctx.file, "%s", arg);
+    ctx.kind = ctx.workspace ? WS_OPEN_FILE : WS_OPEN_NONE;
+    return ctx;
 }
 
 const char *ws_root(const Workspace *w) { return w->root; }
@@ -154,6 +251,24 @@ void ws_visible_toggle(Workspace *w, size_t vi) {
     if (!e->is_dir) return;
     e->collapsed = !e->collapsed;
     rebuild_visible(w);
+}
+
+WsClickAction ws_click_visible(Workspace *w, int row, int double_click) {
+    WsClickAction action = { WS_CLICK_NONE, NULL, row, 0 };
+    if (!w || row < 0) return action;
+    const WsEntry *e = ws_visible(w, (size_t)row);
+    if (!e) return action;
+
+    if (e->is_dir) {
+        ws_visible_toggle(w, (size_t)row);
+        action.kind = WS_CLICK_TOGGLE_DIR;
+        return action;
+    }
+
+    action.kind = WS_CLICK_OPEN_FILE;
+    action.entry = e;
+    action.preview = !double_click;
+    return action;
 }
 
 char *ws_fullpath(const Workspace *w, const char *rel) {

@@ -93,6 +93,70 @@ int main(void) {
     CHECK(row_of(w, "b1.txt") >= 0);
     CHECK_EQ(row_of(w, "a1.txt"), -1);          /* a still collapsed */
 
+    /* sidebar click actions: folders toggle in-place; files tell the caller
+     * whether to open a preview or pinned tab. */
+    int rb = row_of(w, "b");
+    CHECK(rb >= 0);
+    WsClickAction click = ws_click_visible(w, rb, 0);
+    CHECK_EQ(click.kind, WS_CLICK_TOGGLE_DIR);
+    CHECK_EQ(row_of(w, "b1.txt"), -1);
+    click = ws_click_visible(w, rb, 0);
+    CHECK_EQ(click.kind, WS_CLICK_TOGGLE_DIR);
+    int rb1 = row_of(w, "b1.txt");
+    CHECK(rb1 >= 0);
+    click = ws_click_visible(w, rb1, 0);
+    CHECK_EQ(click.kind, WS_CLICK_OPEN_FILE);
+    CHECK(click.entry != NULL);
+    CHECK_STR(click.entry->rel, "b/b1.txt");
+    CHECK_EQ(click.preview, 1);
+    click = ws_click_visible(w, rb1, 1);
+    CHECK_EQ(click.kind, WS_CLICK_OPEN_FILE);
+    CHECK_EQ(click.preview, 0);
+    click = ws_click_visible(w, -1, 0);
+    CHECK_EQ(click.kind, WS_CLICK_NONE);
+
+    /* reload after external tree changes: new files appear, removed files go
+     * away, and expanded directories stay expanded. */
+    char p[512];
+    snprintf(p, sizeof p, "%s/b/new.txt", root); fclose(fopen(p, "w"));
+    snprintf(p, sizeof p, "%s/top.txt", root); unlink(p);
+    CHECK_EQ(ws_reload(w), 0);
+    CHECK(row_of(w, "b1.txt") >= 0);            /* b stayed expanded */
+    CHECK(row_of(w, "new.txt") >= 0);
+    CHECK_EQ(row_of(w, "top.txt"), -1);
+    CHECK_EQ(row_of(w, "a1.txt"), -1);          /* a stayed collapsed */
+    WsReloadEffect reload = ws_apply_reload(w);
+    CHECK(reload.ok);
+    CHECK(reload.refilter_palette);
+    CHECK_STR(reload.message, "workspace updated");
+
     ws_free(w);
+
+    reload = ws_apply_reload(NULL);
+    CHECK(!reload.ok);
+    CHECK(!reload.refilter_palette);
+    CHECK_STR(reload.message, "workspace unavailable: ");
+
+    WsOpenContext ctx = ws_open_context(root);
+    CHECK_EQ(ctx.kind, WS_OPEN_WORKSPACE);
+    CHECK(ctx.workspace != NULL);
+    CHECK_STR(ws_root(ctx.workspace), root);
+    CHECK_STR(ctx.file, "");
+    ws_free(ctx.workspace);
+
+    snprintf(p, sizeof p, "%s/a/a1.txt", root);
+    ctx = ws_open_context(p);
+    CHECK_EQ(ctx.kind, WS_OPEN_FILE);
+    CHECK(ctx.workspace != NULL);
+    char parent[512];
+    snprintf(parent, sizeof parent, "%s/a", root);
+    CHECK_STR(ws_root(ctx.workspace), parent);
+    CHECK_STR(ctx.file, p);
+    ws_free(ctx.workspace);
+
+    ctx = ws_open_context(NULL);
+    CHECK_EQ(ctx.kind, WS_OPEN_NONE);
+    CHECK(ctx.workspace == NULL);
+
     TEST_REPORT();
 }

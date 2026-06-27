@@ -1,0 +1,77 @@
+/* test_popover.c - popover state and snapshot text helpers. */
+#include "test.h"
+#include "popover.h"
+
+#include <string.h>
+
+int main(void) {
+    Popover p;
+    popover_init(&p);
+
+    popover_set_encoded_base(&p, "one\\ntwo|three");
+    CHECK_STR(p.base, "one\ntwo\n\nthree");
+    CHECK_EQ(p.scroll, 0);
+
+    p.scroll = 4;
+    popover_set_encoded_base(&p, NULL);
+    CHECK_STR(p.base, "");
+    CHECK_EQ(p.scroll, 0);
+
+    popover_set_encoded_base(NULL, "ignored");
+
+    char encoded[5000];
+    memset(encoded, 'a', sizeof encoded);
+    encoded[sizeof encoded - 1] = '\0';
+    popover_set_encoded_base(&p, encoded);
+    CHECK_EQ(strlen(p.base), sizeof p.base - 2);
+    CHECK_EQ(p.base[sizeof p.base - 2], '\0');
+
+    popover_set_encoded_base(&p, "alpha|beta");
+    popover_set_loading(&p, 0);
+    popover_compose(&p, NULL);
+    CHECK(p.active);
+    CHECK_STR(p.text, "alpha\n\nbeta");
+
+    popover_show_base(&p, "base", 1);
+    CHECK(p.active);
+    CHECK(p.loading);
+    CHECK_STR(p.text, "base\n\nLoading...");
+    popover_show_hover(&p, "hover");
+    CHECK(p.active);
+    CHECK(!p.loading);
+    CHECK_STR(p.text, "base\n\nhover");
+
+    popover_close(&p);
+    popover_show_hover(&p, "ignored");
+    CHECK(!p.active);
+
+    popover_compose(&p, NULL);
+    popover_set_view(&p, 5, 2);
+    CHECK_EQ(popover_apply_normal_char(&p, 'j', 0), 1);
+    CHECK_EQ(p.scroll, 1);
+    CHECK_EQ(popover_apply_normal_char(&p, 'k', 0), 1);
+    CHECK_EQ(p.scroll, 0);
+    CHECK_EQ(popover_apply_normal_char(&p, 'g', 0), 0);
+    CHECK(p.active);
+    CHECK_EQ(popover_apply_normal_char(&p, 'x', 1), 0);
+    CHECK(p.active);
+    CHECK_EQ(popover_apply_normal_char(&p, 'x', 0), 0);
+    CHECK(!p.active);
+
+    popover_compose(&p, "hover");
+    popover_set_view(&p, 4, 2);
+    CHECK_EQ(popover_apply_key(&p, POPOVER_KEY_DOWN, 0), 1);
+    CHECK_EQ(p.scroll, 1);
+    CHECK_EQ(popover_apply_key(&p, POPOVER_KEY_UP, 0), 1);
+    CHECK_EQ(p.scroll, 0);
+    CHECK_EQ(popover_apply_key(&p, POPOVER_KEY_DOWN, 1), 0);
+    CHECK_EQ(p.scroll, 0);
+    CHECK(p.active);
+    CHECK_EQ(popover_apply_key(&p, POPOVER_KEY_ESCAPE, 0), 1);
+    CHECK(!p.active);
+    CHECK_EQ(popover_apply_key(&p, POPOVER_KEY_ESCAPE, 0), 0);
+    CHECK_EQ(popover_apply_normal_char(NULL, 'j', 0), 0);
+    CHECK_EQ(popover_apply_key(NULL, POPOVER_KEY_DOWN, 0), 0);
+
+    TEST_REPORT();
+}

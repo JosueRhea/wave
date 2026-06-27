@@ -21,9 +21,43 @@ typedef struct {
 
 typedef struct Workspace Workspace;
 
+typedef enum {
+    WS_CLICK_NONE,
+    WS_CLICK_TOGGLE_DIR,
+    WS_CLICK_OPEN_FILE,
+} WsClickKind;
+
+typedef struct {
+    WsClickKind kind;
+    const WsEntry *entry;
+    int row;
+    int preview;
+} WsClickAction;
+
+typedef enum {
+    WS_OPEN_NONE,
+    WS_OPEN_WORKSPACE,
+    WS_OPEN_FILE,
+} WsOpenKind;
+
+typedef struct {
+    WsOpenKind kind;
+    Workspace *workspace;
+    char file[4096];
+} WsOpenContext;
+
+typedef struct {
+    int ok;
+    int refilter_palette;
+    char message[256];
+} WsReloadEffect;
+
 /* Open `root` and scan it. Returns NULL if it isn't a readable directory. */
 Workspace *ws_open(const char *root);
 void ws_free(Workspace *w);
+int ws_reload(Workspace *w);
+WsReloadEffect ws_apply_reload(Workspace *w);
+WsOpenContext ws_open_context(const char *arg);
 
 const char *ws_root(const Workspace *w);
 size_t ws_count(const Workspace *w);
@@ -37,6 +71,11 @@ const WsEntry *ws_visible(const Workspace *w, size_t vi);
 /* Toggle the collapsed state of the directory at visible row `vi` (no-op for a
  * file or out-of-range row), then rebuild the visible list. */
 void ws_visible_toggle(Workspace *w, size_t vi);
+
+/* Apply the workspace-owned action for a visible sidebar row. Directories are
+ * toggled immediately; files report whether the caller should open as a preview
+ * (single click) or pinned tab (double click). */
+WsClickAction ws_click_visible(Workspace *w, int row, int double_click);
 
 /* Join the root with a relative path. Caller frees. */
 char *ws_fullpath(const Workspace *w, const char *rel);
