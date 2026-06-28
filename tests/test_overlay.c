@@ -23,6 +23,9 @@ int main(void) {
     overlay_move(&overlay, 1);
     CHECK_EQ(overlay.search.sel, 0);
     CHECK(!overlay_search_running(&overlay));
+    CHECK_EQ(overlay_settle_search(&overlay), 1);
+    overlay_set_search_selection(&overlay, 7);
+    CHECK_EQ(overlay.search.sel, 7);
 
     overlay_close(&overlay);
     CHECK_EQ(overlay_active(&overlay), OVERLAY_NONE);

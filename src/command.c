@@ -174,3 +174,8 @@ CommandRun command_run(const char *text, WaveConfig *config,
                       run.info, (int)sizeof run.info);
     return run;
 }
+
+CommandCloseAction command_close_action(CommandEffect effect) {
+    if (!effect.quit) return COMMAND_CLOSE_NONE;
+    return effect.quit_all ? COMMAND_CLOSE_WINDOW : COMMAND_CLOSE_TAB;
+}

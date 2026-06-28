@@ -9,6 +9,85 @@
 #include <mach-o/dyld.h>
 #endif
 
+WaveRuntimeOptions wave_runtime_options(const char *snapshot,
+                                        const char *wave_lsp,
+                                        const char *wave_persist,
+                                        const char *wave_scale) {
+    WaveRuntimeOptions opt = {0};
+    opt.snapshot = snapshot != NULL;
+    opt.lsp_disabled = opt.snapshot && !wave_lsp;
+    opt.blink = !opt.snapshot;
+    opt.persist = !opt.snapshot || wave_persist != NULL;
+    if (wave_scale) {
+        float v = (float)atof(wave_scale);
+        if (v > 0.1f) {
+            opt.has_scale_override = 1;
+            opt.scale_override = v;
+        }
+    }
+    return opt;
+}
+
+WaveRuntimeOpenList wave_runtime_open_list(const char *opens) {
+    WaveRuntimeOpenList list = {0};
+    if (!opens || !opens[0]) return list;
+
+    const char *start = opens;
+    for (const char *p = opens;; p++) {
+        if (*p != ':' && *p != '\0') continue;
+        size_t len = (size_t)(p - start);
+        if (len > 0) {
+            if (list.count >= WAVE_RUNTIME_MAX_OPEN_PATHS) {
+                list.truncated = 1;
+            } else {
+                if (len >= WAVE_RUNTIME_PATH_CAP) {
+                    len = WAVE_RUNTIME_PATH_CAP - 1;
+                    list.truncated = 1;
+                }
+                memcpy(list.paths[list.count], start, len);
+                list.paths[list.count][len] = '\0';
+                list.count++;
+            }
+        }
+        if (*p == '\0') break;
+        start = p + 1;
+    }
+    return list;
+}
+
+WaveRuntimeSnapshotScript wave_runtime_snapshot_script(
+    const char *opens, const char *typed, const char *keys,
+    const char *palette, const char *palette_query,
+    const char *search_query, const char *search_selection,
+    const char *popover_text, const char *popover_scroll) {
+    WaveRuntimeSnapshotScript script = {0};
+    script.opens = wave_runtime_open_list(opens);
+    script.typed = typed;
+    script.keys = keys;
+    script.palette = palette != NULL;
+    script.palette_query = palette_query;
+    script.search_query = search_query;
+    script.search_selection = wave_runtime_int_value(search_selection);
+    script.popover_text = popover_text;
+    script.popover_scroll = wave_runtime_int_value(popover_scroll);
+    return script;
+}
+
+int wave_runtime_int_value(const char *text) {
+    return text ? atoi(text) : 0;
+}
+
+double wave_runtime_wait_timeout(int lsp_active, int search_running) {
+    return (lsp_active || search_running) ? 0.03 : 0.1;
+}
+
+int wave_runtime_periodic_due(double now, double *next_time, double interval) {
+    if (!next_time) return 1;
+    if (now < *next_time) return 0;
+    *next_time = now + interval;
+    return 1;
+}
+
 char *path_to_uri(const char *path) {
     char abs[4096];
     if (path[0] == '/') snprintf(abs, sizeof abs, "%s", path);

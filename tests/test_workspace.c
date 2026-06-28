@@ -114,6 +114,20 @@ int main(void) {
     CHECK_EQ(click.preview, 0);
     click = ws_click_visible(w, -1, 0);
     CHECK_EQ(click.kind, WS_CLICK_NONE);
+    WsSidebarClickState sidebar_click = {0};
+    click = ws_click_visible_timed(w, &sidebar_click, rb1, 10.0, 0.4);
+    CHECK_EQ(click.kind, WS_CLICK_OPEN_FILE);
+    CHECK_EQ(click.preview, 1);
+    CHECK(sidebar_click.seen);
+    click = ws_click_visible_timed(w, &sidebar_click, rb1, 10.2, 0.4);
+    CHECK_EQ(click.kind, WS_CLICK_OPEN_FILE);
+    CHECK_EQ(click.preview, 0);
+    click = ws_click_visible_timed(w, &sidebar_click, rb1, 11.0, 0.4);
+    CHECK_EQ(click.kind, WS_CLICK_OPEN_FILE);
+    CHECK_EQ(click.preview, 1);
+    click = ws_click_visible_timed(w, &sidebar_click, -1, 11.1, 0.4);
+    CHECK_EQ(click.kind, WS_CLICK_NONE);
+    CHECK(sidebar_click.seen);
 
     /* reload after external tree changes: new files appear, removed files go
      * away, and expanded directories stay expanded. */
@@ -129,6 +143,14 @@ int main(void) {
     CHECK(reload.ok);
     CHECK(reload.refilter_palette);
     CHECK_STR(reload.message, "workspace updated");
+    reload = ws_apply_watch_event(w, 0);
+    CHECK(!reload.ok);
+    CHECK(!reload.refilter_palette);
+    CHECK_STR(reload.message, "");
+    reload = ws_apply_watch_event(w, 1);
+    CHECK(reload.ok);
+    CHECK(reload.refilter_palette);
+    CHECK_STR(reload.message, "workspace updated");
 
     ws_free(w);
 
@@ -136,6 +158,10 @@ int main(void) {
     CHECK(!reload.ok);
     CHECK(!reload.refilter_palette);
     CHECK_STR(reload.message, "workspace unavailable: ");
+    reload = ws_apply_watch_event(NULL, 1);
+    CHECK(!reload.ok);
+    CHECK(!reload.refilter_palette);
+    CHECK_STR(reload.message, "");
 
     WsOpenContext ctx = ws_open_context(root);
     CHECK_EQ(ctx.kind, WS_OPEN_WORKSPACE);

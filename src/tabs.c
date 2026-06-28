@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "buffer.h"
+#include "runtime.h"
 
 Editor *tabs_current(TabSet *tabs) {
     if (!tabs || tabs->count <= 0) return NULL;
@@ -62,6 +63,53 @@ int tabs_set_active(TabSet *tabs, int index) {
     if (!tabs || index < 0 || index >= tabs->count) return 0;
     tabs->active = index;
     return 1;
+}
+
+TabActionEffect tabs_close_with_effect(TabSet *tabs, int index) {
+    TabActionEffect effect = {0};
+    int before = tabs ? tabs->count : 0;
+    int remaining = tabs_close(tabs, index);
+    if (before <= 0) return effect;
+    if (remaining <= 0) effect.close_window = 1;
+    else effect.reset_mode = 1;
+    return effect;
+}
+
+TabActionEffect tabs_goto_with_effect(TabSet *tabs, int delta) {
+    TabActionEffect effect = {0};
+    if (!tabs || tabs->count <= 0) return effect;
+    tabs_goto(tabs, delta);
+    effect.reset_mode = 1;
+    return effect;
+}
+
+TabActionEffect tabs_set_active_with_effect(TabSet *tabs, int index) {
+    TabActionEffect effect = {0};
+    if (tabs_set_active(tabs, index)) effect.reset_mode = 1;
+    return effect;
+}
+
+TabActionEffect tabs_click_with_effect(TabSet *tabs, int index, int close) {
+    if (!tabs || index < 0 || index >= tabs->count) return (TabActionEffect){0};
+    if (close) return tabs_close_with_effect(tabs, index);
+    return tabs_set_active_with_effect(tabs, index);
+}
+
+TabStartupEffect tabs_ensure_startup(TabSet *tabs, int workspace_open) {
+    TabStartupEffect effect = {0};
+    if (!tabs) return effect;
+    if (tabs->count > 0) {
+        effect.editor = tabs_current(tabs);
+        return effect;
+    }
+
+    effect.editor = tabs_new(tabs);
+    if (!effect.editor) return effect;
+    if (!workspace_open) {
+        effect.editor->buf = buffer_new();
+        effect.enter_insert = effect.editor->buf != NULL;
+    }
+    return effect;
 }
 
 int tabs_find_path(const TabSet *tabs, const char *path) {
@@ -148,6 +196,31 @@ void tabs_cancel_open(TabSet *tabs, const TabOpenPlan *plan) {
     if (plan->kind == TAB_OPEN_NEW) tabs_close(tabs, plan->index);
 }
 
+TabOpenResult tabs_open_file(TabSet *tabs, const char *path, int preview,
+                             WatchService *watch) {
+    TabOpenResult result = {0};
+    TabOpenPlan plan = tabs_prepare_open(tabs, path, preview);
+    result.editor = plan.editor;
+    result.kind = plan.kind;
+    if (!plan.editor) return result;
+
+    if (tabs_apply_existing_open(&plan, preview)) {
+        result.ok = 1;
+        return result;
+    }
+
+    if (editor_open_file(plan.editor, path, preview, watch) != 0) {
+        tabs_cancel_open(tabs, &plan);
+        result.editor = NULL;
+        return result;
+    }
+
+    result.editor = plan.editor;
+    result.ok = 1;
+    result.loaded_file = 1;
+    return result;
+}
+
 Editor *tabs_find_file_watch(TabSet *tabs, int native_id) {
     if (!tabs || native_id < 0) return NULL;
     for (int i = 0; i < tabs->count; i++) {
@@ -187,6 +260,44 @@ TabDiskChangeEffect tabs_describe_disk_change(TabSet *tabs, const TabDiskChange 
                                                     message, message_cap);
     effect.reset_active_mode = event->change == EDITOR_DISK_RELOADED &&
                                event->editor == tabs_current(tabs);
+    return effect;
+}
+
+static void tabs_accumulate_watch_effect(TabSet *tabs, const TabDiskChange *event,
+                                         TabWatchEffect *out) {
+    if (!out) return;
+    TabDiskChangeEffect effect = tabs_describe_disk_change(
+        tabs, event, out->message, sizeof out->message);
+    if (effect.has_message) out->has_message = 1;
+    if (effect.reset_active_mode) out->reset_mode = 1;
+}
+
+TabWatchEffect tabs_process_file_watchers(TabSet *tabs, WatchService *watch,
+                                          double now, double *next_poll,
+                                          double poll_interval) {
+    TabWatchEffect effect = {0};
+#ifdef __APPLE__
+    (void)now;
+    (void)next_poll;
+    (void)poll_interval;
+    for (;;) {
+        int ids[16];
+        int n = watch_poll_file_events(watch, ids, 16);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++) {
+            TabDiskChange event;
+            if (tabs_apply_file_watch_event(tabs, watch, ids[i], &event))
+                tabs_accumulate_watch_effect(tabs, &event, &effect);
+        }
+        if (n < 16) break;
+    }
+#else
+    if (!wave_runtime_periodic_due(now, next_poll, poll_interval)) return effect;
+    TabDiskChange events[16];
+    int n = tabs_apply_file_watch_poll(tabs, watch, events, 16);
+    for (int i = 0; i < n; i++)
+        tabs_accumulate_watch_effect(tabs, &events[i], &effect);
+#endif
     return effect;
 }
 

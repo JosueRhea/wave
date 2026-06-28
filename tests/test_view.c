@@ -146,6 +146,16 @@ int main(void) {
     CHECK_EQ(status_line.kind, VIEW_STATUS_INFO);
     CHECK(status_line.r > 0.85f && status_line.g > 0.83f && status_line.b > 0.54f);
     CHECK_STR(out, "saved");
+    Editor status_editor;
+    fill(&status_editor, "alpha\nbeta\n");
+    status_editor.path = "/tmp/status.c";
+    status_editor.cursor = strlen("alpha\nbe");
+    status_line = view_editor_status_line(out, sizeof out, &status_editor, NULL, "",
+                                          "NORMAL", 2, 0, 1);
+    CHECK_EQ(status_line.kind, VIEW_STATUS_NORMAL);
+    CHECK_STR(out, "NORMAL  /tmp/status.c  c  Ln 2, Col 3  2 errs  [1/1]");
+    status_editor.path = NULL;
+    editor_close(&status_editor);
 
     PopoverRows rows;
     popover_wrap_text("alpha beta gamma", 8, &rows);

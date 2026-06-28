@@ -66,6 +66,29 @@ int layout_drag_should_start(float start_x, float start_y, float x, float y, flo
     return dx >= threshold || dy >= threshold;
 }
 
+void layout_drag_begin(LayoutDragState *drag, size_t anchor, float x, float y) {
+    if (!drag) return;
+    drag->down = 1;
+    drag->dragging = 0;
+    drag->anchor = anchor;
+    drag->x = x;
+    drag->y = y;
+}
+
+void layout_drag_release(LayoutDragState *drag) {
+    if (!drag) return;
+    drag->down = 0;
+    drag->dragging = 0;
+}
+
+int layout_drag_update(LayoutDragState *drag, float x, float y, float scale) {
+    if (!drag || !drag->down) return 0;
+    if (!drag->dragging && !layout_drag_should_start(drag->x, drag->y, x, y, scale))
+        return 0;
+    drag->dragging = 1;
+    return 1;
+}
+
 int layout_point_double_click(LayoutPointClick *click, double now, float x, float y,
                               double max_delay, float max_distance) {
     if (!click) return 0;
@@ -113,6 +136,11 @@ LayoutScrollTarget layout_scroll_target(const LayoutState *l, float mouse_x,
         return out;
     }
     return out;
+}
+
+float layout_scroll_offset(float current, float pixels) {
+    float next = current + pixels;
+    return next < 0.0f ? 0.0f : next;
 }
 
 int layout_in_titlebar(const LayoutState *l, float y) {

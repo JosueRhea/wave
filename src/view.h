@@ -118,5 +118,9 @@ ViewStatusLine view_status_line(char *out, size_t cap, const Editor *editor,
                                 const char *mode, size_t row, size_t col,
                                 size_t diagnostics, int tab_index,
                                 int tab_count);
+ViewStatusLine view_editor_status_line(char *out, size_t cap, const Editor *editor,
+                                       const char *command, const char *info,
+                                       const char *mode, size_t diagnostics,
+                                       int tab_index, int tab_count);
 
 #endif

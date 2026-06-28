@@ -1,6 +1,7 @@
 #include "edit_command.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 static void enter_insert(Editor *e, ModalState *modal) {
     modal_enter_insert(modal);
@@ -254,4 +255,14 @@ EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
 
     modal->count = 0;
     return res;
+}
+
+int edit_command_status_text(EditCommandResult result, char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    if (result.flags & EDIT_COMMAND_UNDO_AT_OLDEST) {
+        snprintf(out, cap, "already at oldest change");
+        return 1;
+    }
+    out[0] = '\0';
+    return 0;
 }

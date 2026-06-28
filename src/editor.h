@@ -82,7 +82,18 @@ typedef enum {
 
 void editor_init(Editor *e);
 void editor_close(Editor *e);
+int editor_has_buffer(const Editor *e);
+int editor_has_path(const Editor *e);
+const char *editor_path(const Editor *e);
+int editor_has_visual_rows(const Editor *e);
+float editor_scroll_y(const Editor *e);
+void editor_set_scroll_y(Editor *e, float scroll_y);
 void editor_attach_highlighter(Editor *e);
+int editor_refresh_highlighter(Editor *e);
+int editor_update_highlighter(Editor *e);
+size_t editor_highlight_spans(Editor *e, size_t start_byte, size_t end_byte,
+                              HighlightSpan *out, size_t max);
+void editor_cancel_group(Editor *e);
 char *editor_text(Editor *e);
 char *editor_range_text(Editor *e, size_t a, size_t b);
 void editor_clear_history(Editor *e);
@@ -104,6 +115,7 @@ int utf8_encode(unsigned int cp, char out[4]);
 void ed_insert(Editor *e, const char *s, size_t n);
 void ed_insert_at(Editor *e, size_t pos, const char *text, size_t len);
 void ed_delete_range(Editor *e, size_t a, size_t b);
+int editor_insert_encoded_text(Editor *e, const char *text);
 int editor_visual_range(Editor *e, EditorRange *out);
 int editor_line_range(Editor *e, EditorRange *out);
 char *editor_copy_text(Editor *e, int visual_mode);

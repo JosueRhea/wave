@@ -52,6 +52,12 @@ typedef struct {
 } CommandRun;
 
 typedef enum {
+    COMMAND_CLOSE_NONE,
+    COMMAND_CLOSE_TAB,
+    COMMAND_CLOSE_WINDOW
+} CommandCloseAction;
+
+typedef enum {
     COMMAND_KEY_NONE,
     COMMAND_KEY_ESCAPE,
     COMMAND_KEY_ACCEPT,
@@ -77,5 +83,6 @@ int command_info_text(CommandInfoKind info, const WaveConfig *config,
                       const char *config_path, char *out, int cap);
 CommandRun command_run(const char *text, WaveConfig *config,
                        const char *config_path);
+CommandCloseAction command_close_action(CommandEffect effect);
 
 #endif

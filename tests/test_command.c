@@ -50,10 +50,15 @@ int main(void) {
     CHECK(eff.write);
     CHECK(eff.quit);
     CHECK(!eff.quit_all);
+    CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_TAB);
+
+    eff = command_effect((CommandAction){COMMAND_QUIT_ALL, 0}, &cfg);
+    CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_WINDOW);
 
     eff = command_effect((CommandAction){COMMAND_SET_NOWRAP, 0}, &cfg);
     CHECK(!cfg.wrap);
     CHECK(eff.save_config);
+    CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_NONE);
 
     eff = command_effect((CommandAction){COMMAND_SET_OPACITY, 0.75f}, &cfg);
     CHECK(eff.save_config);

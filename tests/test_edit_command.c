@@ -83,5 +83,14 @@ int main(void) {
     CHECK(r.flags & EDIT_COMMAND_OPEN_COMMAND_LINE);
     editor_close(&e);
 
+    char msg[64] = "stale";
+    CHECK(edit_command_status_text((EditCommandResult){EDIT_COMMAND_UNDO_AT_OLDEST},
+                                   msg, sizeof msg));
+    CHECK_STR(msg, "already at oldest change");
+    CHECK(!edit_command_status_text((EditCommandResult){0}, msg, sizeof msg));
+    CHECK_STR(msg, "");
+    CHECK(!edit_command_status_text((EditCommandResult){EDIT_COMMAND_UNDO_AT_OLDEST},
+                                    NULL, sizeof msg));
+
     TEST_REPORT();
 }

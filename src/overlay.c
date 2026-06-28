@@ -3,6 +3,10 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#define OVERLAY_SEARCH_SETTLE_POLLS 500
+#define OVERLAY_SEARCH_SETTLE_SLEEP_US 10000
 
 void overlay_init(OverlayState *overlay) {
     if (!overlay) return;
@@ -108,6 +112,11 @@ void overlay_set_search_query(OverlayState *overlay, const char *root, const cha
     project_search_set_query(&overlay->search, root, query);
 }
 
+void overlay_set_search_selection(OverlayState *overlay, int selection) {
+    if (!overlay) return;
+    overlay->search.sel = selection;
+}
+
 void overlay_insert_text(OverlayState *overlay, Workspace *ws, const char *root,
                          const char *text) {
     if (!overlay) return;
@@ -159,6 +168,20 @@ OverlayKeyResult overlay_apply_key(OverlayState *overlay, Workspace *ws,
 
 void overlay_poll_search(OverlayState *overlay) {
     if (overlay) project_search_poll(&overlay->search);
+}
+
+int overlay_settle_search(OverlayState *overlay) {
+    if (!overlay) return 0;
+    int polls = 0;
+    for (int i = 0; i < OVERLAY_SEARCH_SETTLE_POLLS && overlay_search_running(overlay); i++) {
+        overlay_poll_search(overlay);
+        polls++;
+        if (!overlay_search_running(overlay)) break;
+        usleep(OVERLAY_SEARCH_SETTLE_SLEEP_US);
+    }
+    overlay_poll_search(overlay);
+    polls++;
+    return polls;
 }
 
 int overlay_search_running(const OverlayState *overlay) {

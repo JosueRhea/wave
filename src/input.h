@@ -57,6 +57,33 @@ typedef enum {
     INPUT_CLIPBOARD_EDITOR
 } InputClipboardTarget;
 
+typedef enum {
+    INPUT_KEY_TARGET_NONE,
+    INPUT_KEY_TARGET_SHORTCUT,
+    INPUT_KEY_TARGET_OVERLAY,
+    INPUT_KEY_TARGET_COMMAND,
+    INPUT_KEY_TARGET_EDITOR
+} InputKeyTarget;
+
+typedef enum {
+    INPUT_SHORTCUT_ACTION_NONE,
+    INPUT_SHORTCUT_ACTION_COPY,
+    INPUT_SHORTCUT_ACTION_PASTE,
+    INPUT_SHORTCUT_ACTION_OPEN_PALETTE,
+    INPUT_SHORTCUT_ACTION_OPEN_SEARCH,
+    INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR,
+    INPUT_SHORTCUT_ACTION_SAVE,
+    INPUT_SHORTCUT_ACTION_TAB_NEXT,
+    INPUT_SHORTCUT_ACTION_TAB_PREV,
+    INPUT_SHORTCUT_ACTION_CLOSE_TAB,
+    INPUT_SHORTCUT_ACTION_UNDO,
+    INPUT_SHORTCUT_ACTION_REDO,
+    INPUT_SHORTCUT_ACTION_ZOOM_IN,
+    INPUT_SHORTCUT_ACTION_ZOOM_OUT,
+    INPUT_SHORTCUT_ACTION_ZOOM_RESET,
+    INPUT_SHORTCUT_ACTION_TOGGLE_WRAP
+} InputShortcutAction;
+
 WaveShortcut input_shortcut(InputKey key, int command, int control,
                             int alt, int shift);
 InputTextTarget input_text_target(int command_modifier, int overlay_active,
@@ -65,5 +92,9 @@ InputTextTarget input_text_target(int command_modifier, int overlay_active,
 InputClipboardTarget input_clipboard_target(int overlay_active,
                                             int command_active,
                                             int editor_available);
+InputKeyTarget input_key_target(WaveShortcut shortcut, int overlay_active,
+                                int command_active, int editor_available);
+InputShortcutAction input_shortcut_action(WaveShortcut shortcut,
+                                          int editor_has_path);
 
 #endif

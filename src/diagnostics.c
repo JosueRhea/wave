@@ -44,6 +44,14 @@ size_t diagnostics_apply_lsp(Diagnostic *out, size_t current_count, size_t cap,
     return lsp_count;
 }
 
+size_t diagnostics_for_editor(Editor *e, Diagnostic *out, size_t cap,
+                              const LspDiag *lsp, size_t lsp_count,
+                              int published) {
+    size_t count = (e && e->hl && out && cap > 0) ? hl_diagnostics(e->hl, out, cap) : 0;
+    if (count > cap) count = cap;
+    return diagnostics_apply_lsp(out, count, cap, lsp, lsp_count, published);
+}
+
 static void append_info(char *out, size_t cap, size_t *off, const char *fmt, ...) {
     if (!out || cap == 0 || !off || *off >= cap) return;
     va_list ap;

@@ -34,6 +34,29 @@ typedef struct {
     int reset_active_mode;
 } TabDiskChangeEffect;
 
+typedef struct {
+    int has_message;
+    int reset_mode;
+    char message[256];
+} TabWatchEffect;
+
+typedef struct {
+    int close_window;
+    int reset_mode;
+} TabActionEffect;
+
+typedef struct {
+    Editor *editor;
+    int enter_insert;
+} TabStartupEffect;
+
+typedef struct {
+    Editor *editor;
+    int ok;
+    int loaded_file;
+    TabOpenKind kind;
+} TabOpenResult;
+
 Editor *tabs_current(TabSet *tabs);
 const Editor *tabs_current_const(const TabSet *tabs);
 Editor *tabs_at(TabSet *tabs, int index);
@@ -42,6 +65,11 @@ Editor *tabs_new(TabSet *tabs);
 int tabs_close(TabSet *tabs, int index);
 void tabs_goto(TabSet *tabs, int delta);
 int tabs_set_active(TabSet *tabs, int index);
+TabActionEffect tabs_close_with_effect(TabSet *tabs, int index);
+TabActionEffect tabs_goto_with_effect(TabSet *tabs, int delta);
+TabActionEffect tabs_set_active_with_effect(TabSet *tabs, int index);
+TabActionEffect tabs_click_with_effect(TabSet *tabs, int index, int close);
+TabStartupEffect tabs_ensure_startup(TabSet *tabs, int workspace_open);
 int tabs_find_path(const TabSet *tabs, const char *path);
 Editor *tabs_find_preview(TabSet *tabs);
 Editor *tabs_find_empty_scratch(TabSet *tabs);
@@ -49,6 +77,8 @@ Editor *tabs_use_empty_scratch(TabSet *tabs);
 TabOpenPlan tabs_prepare_open(TabSet *tabs, const char *path, int preview);
 int tabs_apply_existing_open(TabOpenPlan *plan, int preview);
 void tabs_cancel_open(TabSet *tabs, const TabOpenPlan *plan);
+TabOpenResult tabs_open_file(TabSet *tabs, const char *path, int preview,
+                             WatchService *watch);
 Editor *tabs_find_file_watch(TabSet *tabs, int native_id);
 int tabs_apply_file_watch_event(TabSet *tabs, WatchService *watch, int native_id,
                                 TabDiskChange *out);
@@ -56,6 +86,9 @@ int tabs_apply_file_watch_poll(TabSet *tabs, WatchService *watch,
                                TabDiskChange *out, int cap);
 TabDiskChangeEffect tabs_describe_disk_change(TabSet *tabs, const TabDiskChange *event,
                                               char *message, size_t message_cap);
+TabWatchEffect tabs_process_file_watchers(TabSet *tabs, WatchService *watch,
+                                          double now, double *next_poll,
+                                          double poll_interval);
 int tabs_count(const TabSet *tabs);
 int tabs_active_index(const TabSet *tabs);
 void tabs_free(TabSet *tabs);

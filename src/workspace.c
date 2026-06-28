@@ -207,6 +207,12 @@ WsReloadEffect ws_apply_reload(Workspace *w) {
     return effect;
 }
 
+WsReloadEffect ws_apply_watch_event(Workspace *w, int pending) {
+    WsReloadEffect effect = {0};
+    if (!pending || !w) return effect;
+    return ws_apply_reload(w);
+}
+
 WsOpenContext ws_open_context(const char *arg) {
     WsOpenContext ctx = {0};
     if (!arg || !*arg) return ctx;
@@ -269,6 +275,24 @@ WsClickAction ws_click_visible(Workspace *w, int row, int double_click) {
     action.entry = e;
     action.preview = !double_click;
     return action;
+}
+
+WsClickAction ws_click_visible_timed(Workspace *w, WsSidebarClickState *state,
+                                     int row, double now, double max_delay) {
+    WsClickAction action = { WS_CLICK_NONE, NULL, row, 0 };
+    if (!w || row < 0) return action;
+    const WsEntry *e = ws_visible(w, (size_t)row);
+    if (!e) return action;
+    if (e->is_dir) return ws_click_visible(w, row, 0);
+
+    int dbl = state && state->seen && now - state->time < max_delay &&
+              row == state->row;
+    if (state) {
+        state->seen = 1;
+        state->time = now;
+        state->row = row;
+    }
+    return ws_click_visible(w, row, dbl);
 }
 
 char *ws_fullpath(const Workspace *w, const char *rel) {

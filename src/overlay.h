@@ -57,6 +57,7 @@ const char *overlay_query(OverlayState *overlay);
 
 void overlay_set_palette_query(OverlayState *overlay, Workspace *ws, const char *query);
 void overlay_set_search_query(OverlayState *overlay, const char *root, const char *query);
+void overlay_set_search_selection(OverlayState *overlay, int selection);
 void overlay_insert_text(OverlayState *overlay, Workspace *ws, const char *root,
                          const char *text);
 void overlay_backspace(OverlayState *overlay, Workspace *ws, const char *root);
@@ -64,6 +65,7 @@ void overlay_move(OverlayState *overlay, int delta);
 OverlayKeyResult overlay_apply_key(OverlayState *overlay, Workspace *ws,
                                    const char *root, OverlayKey key);
 void overlay_poll_search(OverlayState *overlay);
+int overlay_settle_search(OverlayState *overlay);
 int overlay_search_running(const OverlayState *overlay);
 
 #endif /* WAVE_OVERLAY_H */

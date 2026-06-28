@@ -20,6 +20,20 @@ int main(void) {
     CHECK(layout_tab_close_hit(&l, 0, 365.0f));
     CHECK(!layout_drag_should_start(10.0f, 10.0f, 12.0f, 12.0f, 1.0f));
     CHECK(layout_drag_should_start(10.0f, 10.0f, 14.0f, 12.0f, 1.0f));
+    LayoutDragState drag = {0};
+    CHECK(!layout_drag_update(&drag, 20.0f, 20.0f, 1.0f));
+    layout_drag_begin(&drag, 123, 10.0f, 10.0f);
+    CHECK(drag.down);
+    CHECK(!drag.dragging);
+    CHECK_EQ(drag.anchor, 123);
+    CHECK(!layout_drag_update(&drag, 12.0f, 12.0f, 1.0f));
+    CHECK(!drag.dragging);
+    CHECK(layout_drag_update(&drag, 14.0f, 12.0f, 1.0f));
+    CHECK(drag.dragging);
+    CHECK(layout_drag_update(&drag, 12.0f, 12.0f, 1.0f));
+    layout_drag_release(&drag);
+    CHECK(!drag.down);
+    CHECK(!drag.dragging);
     LayoutPointClick pc = {0};
     CHECK(!layout_point_double_click(&pc, 1.0, 20.0f, 20.0f, 0.4, 6.0f));
     CHECK(layout_point_double_click(&pc, 1.2, 24.0f, 23.0f, 0.4, 6.0f));
@@ -56,6 +70,9 @@ int main(void) {
     CHECK_EQ(st.kind, LAYOUT_SCROLL_EDITOR);
     st = layout_scroll_target(&l, 100.0f, 1.0, 0, 0, 0, 1);
     CHECK_EQ(st.kind, LAYOUT_SCROLL_EDITOR);
+    CHECK_EQ((int)layout_scroll_offset(20.0f, 15.0f), 35);
+    CHECK_EQ((int)layout_scroll_offset(20.0f, -15.0f), 5);
+    CHECK_EQ((int)layout_scroll_offset(20.0f, -30.0f), 0);
 
     LayoutClickTarget ct = layout_click_target(&l, 100.0f, 20.0f, 0.0f, 1, 1, 1);
     CHECK_EQ(ct.kind, LAYOUT_CLICK_TITLEBAR);

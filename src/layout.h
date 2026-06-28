@@ -1,6 +1,8 @@
 #ifndef WAVE_LAYOUT_H
 #define WAVE_LAYOUT_H
 
+#include <stddef.h>
+
 typedef struct {
     float line_h, adv, ascent;
     float side_px, text_x, gutter;
@@ -31,6 +33,14 @@ typedef struct {
     double time;
     int index;
 } LayoutIndexClick;
+
+typedef struct {
+    int down;
+    int dragging;
+    size_t anchor;
+    float x;
+    float y;
+} LayoutDragState;
 
 typedef enum {
     LAYOUT_SCROLL_EDITOR,
@@ -74,6 +84,9 @@ int layout_sidebar_row(const LayoutState *l, float y, float scroll);
 int layout_tab_index(const LayoutState *l, float x);
 int layout_tab_close_hit(const LayoutState *l, int index, float x);
 int layout_drag_should_start(float start_x, float start_y, float x, float y, float scale);
+void layout_drag_begin(LayoutDragState *drag, size_t anchor, float x, float y);
+void layout_drag_release(LayoutDragState *drag);
+int layout_drag_update(LayoutDragState *drag, float x, float y, float scale);
 int layout_point_double_click(LayoutPointClick *click, double now, float x, float y,
                               double max_delay, float max_distance);
 int layout_index_double_click(LayoutIndexClick *click, double now, int index,
@@ -83,6 +96,7 @@ LayoutScrollTarget layout_scroll_target(const LayoutState *l, float mouse_x,
                                         int popover_scrollable,
                                         int workspace_open,
                                         int sidebar_visible);
+float layout_scroll_offset(float current, float pixels);
 int layout_in_titlebar(const LayoutState *l, float y);
 int layout_in_sidebar(const LayoutState *l, float x, int workspace_open, int sidebar_visible);
 int layout_in_tab_strip(const LayoutState *l, float x, float y);

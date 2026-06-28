@@ -1,6 +1,8 @@
 #ifndef WAVE_EDIT_COMMAND_H
 #define WAVE_EDIT_COMMAND_H
 
+#include <stddef.h>
+
 #include "editor.h"
 #include "mode.h"
 #include "yank.h"
@@ -22,5 +24,6 @@ typedef struct {
 
 EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
                                      YankRegister *yank, unsigned int cp);
+int edit_command_status_text(EditCommandResult result, char *out, size_t cap);
 
 #endif

@@ -2,6 +2,7 @@
 #include "test.h"
 #include "tabs.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,6 +11,13 @@ static char *dupstr(const char *s) {
     char *p = malloc(n + 1);
     memcpy(p, s, n + 1);
     return p;
+}
+
+static void write_file(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    fwrite(text, 1, strlen(text), f);
+    fclose(f);
 }
 
 int main(void) {
@@ -44,7 +52,28 @@ int main(void) {
     CHECK(tabs_set_active(&tabs, 1));
     tabs_goto(&tabs, -1);
     CHECK_EQ(tabs_active_index(&tabs), 0);
+    TabActionEffect action = tabs_goto_with_effect(&tabs, +1);
+    CHECK(action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_active_index(&tabs), 1);
+    action = tabs_set_active_with_effect(&tabs, 0);
+    CHECK(action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_active_index(&tabs), 0);
+    action = tabs_set_active_with_effect(&tabs, 99);
+    CHECK(!action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_active_index(&tabs), 0);
+    action = tabs_click_with_effect(&tabs, 1, 0);
+    CHECK(action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_active_index(&tabs), 1);
+    action = tabs_click_with_effect(&tabs, 99, 0);
+    CHECK(!action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_active_index(&tabs), 1);
 
+    CHECK(tabs_set_active(&tabs, 0));
     a->watch.native_fd = 42;
     b->watch.native_fd = 77;
     CHECK(tabs_find_file_watch(&tabs, 42) == a);
@@ -70,6 +99,21 @@ int main(void) {
     CHECK(!effect.reset_active_mode);
     TabDiskChange events[4];
     CHECK_EQ(tabs_apply_file_watch_poll(&tabs, NULL, events, 4), 0);
+    WatchService watch;
+    watch_service_init(&watch);
+    double next_poll = 10.0;
+    TabWatchEffect watch_effect = tabs_process_file_watchers(
+        &tabs, &watch, 0.0, &next_poll, 0.5);
+    CHECK(!watch_effect.has_message);
+    CHECK(!watch_effect.reset_mode);
+#ifndef __APPLE__
+    CHECK_EQ((int)next_poll, 10);
+    watch_effect = tabs_process_file_watchers(&tabs, &watch, 10.0, &next_poll, 0.5);
+    CHECK(!watch_effect.has_message);
+    CHECK(!watch_effect.reset_mode);
+    CHECK_EQ((int)(next_poll * 10.0), 105);
+#endif
+    watch_service_shutdown(&watch);
 
     b->preview = 1;
     CHECK(tabs_find_preview(&tabs) == b);
@@ -96,6 +140,20 @@ int main(void) {
     CHECK_EQ(tabs_count(&tabs), 1);
     CHECK_EQ(tabs_active_index(&tabs), 0);
     CHECK_EQ(tabs_find_path(&tabs, "/tmp/a.txt"), 0);
+    b = tabs_new(&tabs);
+    b->path = dupstr("/tmp/b2.txt");
+    action = tabs_click_with_effect(&tabs, 1, 1);
+    CHECK(action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    action = tabs_close_with_effect(&tabs, 42);
+    CHECK(action.reset_mode);
+    CHECK(!action.close_window);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    action = tabs_close_with_effect(&tabs, 0);
+    CHECK(!action.reset_mode);
+    CHECK(action.close_window);
+    CHECK_EQ(tabs_count(&tabs), 0);
 
     tabs_free(&tabs);
     CHECK_EQ(tabs_count(&tabs), 0);
@@ -115,6 +173,74 @@ int main(void) {
     tabs_cancel_open(&tabs, &plan);
     CHECK_EQ(tabs_count(&tabs), 1);
     CHECK_EQ(tabs_active_index(&tabs), 0);
+    tabs_free(&tabs);
+
+    memset(&tabs, 0, sizeof tabs);
+    const char *open_a = "/tmp/wave_tabs_open_a.txt";
+    const char *open_b = "/tmp/wave_tabs_open_b.txt";
+    const char *open_c = "/tmp/wave_tabs_open_c.txt";
+    write_file(open_a, "alpha\n");
+    write_file(open_b, "beta\n");
+    write_file(open_c, "gamma\n");
+    TabOpenResult open = tabs_open_file(&tabs, open_a, 0, NULL);
+    CHECK(open.ok);
+    CHECK(open.loaded_file);
+    CHECK_EQ(open.kind, TAB_OPEN_NEW);
+    CHECK(open.editor == tabs_current(&tabs));
+    CHECK_STR(editor_path(open.editor), open_a);
+    CHECK(!open.editor->preview);
+    CHECK_EQ(tabs_count(&tabs), 1);
+
+    open = tabs_open_file(&tabs, open_a, 1, NULL);
+    CHECK(open.ok);
+    CHECK(!open.loaded_file);
+    CHECK_EQ(open.kind, TAB_OPEN_EXISTING);
+    CHECK(open.editor == tabs_current(&tabs));
+    CHECK(!open.editor->preview);
+    CHECK_EQ(tabs_count(&tabs), 1);
+
+    open = tabs_open_file(&tabs, open_b, 1, NULL);
+    CHECK(open.ok);
+    CHECK(open.loaded_file);
+    CHECK_EQ(open.kind, TAB_OPEN_NEW);
+    CHECK_STR(editor_path(open.editor), open_b);
+    CHECK(open.editor->preview);
+    CHECK_EQ(tabs_count(&tabs), 2);
+
+    open = tabs_open_file(&tabs, open_c, 1, NULL);
+    CHECK(open.ok);
+    CHECK(open.loaded_file);
+    CHECK_EQ(open.kind, TAB_OPEN_REUSE_PREVIEW);
+    CHECK_STR(editor_path(open.editor), open_c);
+    CHECK(open.editor->preview);
+    CHECK_EQ(tabs_count(&tabs), 2);
+
+    open = tabs_open_file(&tabs, "/tmp/does-not-exist-wave-tabs", 0, NULL);
+    CHECK(!open.ok);
+    CHECK(!open.loaded_file);
+    CHECK(open.editor == NULL);
+    CHECK_EQ(tabs_count(&tabs), 2);
+    CHECK_STR(editor_path(tabs_current(&tabs)), open_c);
+    tabs_free(&tabs);
+
+    memset(&tabs, 0, sizeof tabs);
+    TabStartupEffect startup = tabs_ensure_startup(&tabs, 1);
+    CHECK(startup.editor != NULL);
+    CHECK(!startup.enter_insert);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    CHECK(tabs_current(&tabs) == startup.editor);
+    CHECK(startup.editor->buf == NULL);
+    tabs_free(&tabs);
+
+    memset(&tabs, 0, sizeof tabs);
+    startup = tabs_ensure_startup(&tabs, 0);
+    CHECK(startup.editor != NULL);
+    CHECK(startup.enter_insert);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    CHECK(startup.editor->buf != NULL);
+    startup = tabs_ensure_startup(&tabs, 0);
+    CHECK(tabs_count(&tabs) == 1);
+    CHECK(!startup.enter_insert);
     tabs_free(&tabs);
 
     TEST_REPORT();

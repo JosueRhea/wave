@@ -12,6 +12,31 @@ void editor_init(Editor *e) {
     watch_file_init(&e->watch);
 }
 
+int editor_has_buffer(const Editor *e) {
+    return e && e->buf != NULL;
+}
+
+int editor_has_path(const Editor *e) {
+    return e && e->path != NULL;
+}
+
+const char *editor_path(const Editor *e) {
+    return e ? e->path : NULL;
+}
+
+int editor_has_visual_rows(const Editor *e) {
+    return e && e->vstart != NULL;
+}
+
+float editor_scroll_y(const Editor *e) {
+    return e ? e->scroll_y : 0.0f;
+}
+
+void editor_set_scroll_y(Editor *e, float scroll_y) {
+    if (!e) return;
+    e->scroll_y = scroll_y < 0.0f ? 0.0f : scroll_y;
+}
+
 static char *memdup_local(const char *s, size_t n) {
     char *p = malloc(n ? n : 1);
     if (n) memcpy(p, s, n);
@@ -66,6 +91,32 @@ void editor_attach_highlighter(Editor *e) {
     if (!L) return;
     e->hl = hl_new(e->buf, L->lang, L->query);
     if (e->hl) hl_update(e->hl);
+}
+
+int editor_refresh_highlighter(Editor *e) {
+    if (!e || !e->hl) return 0;
+    hl_update(e->hl);
+    return 1;
+}
+
+int editor_update_highlighter(Editor *e) {
+    if (!e || !e->hl || !e->buf) return 0;
+    if (!e->dirty && buffer_pending_edits(e->buf) == 0) return 0;
+    hl_update(e->hl);
+    e->dirty = 0;
+    return 1;
+}
+
+size_t editor_highlight_spans(Editor *e, size_t start_byte, size_t end_byte,
+                              HighlightSpan *out, size_t max) {
+    if (!e || !e->hl || !out || max == 0) return 0;
+    size_t n = hl_spans(e->hl, start_byte, end_byte, out, max);
+    return n > max ? max : n;
+}
+
+void editor_cancel_group(Editor *e) {
+    if (!e) return;
+    e->group_open = 0;
 }
 
 static char *dupstr_local(const char *s) {
@@ -303,6 +354,21 @@ void ed_delete_range(Editor *e, size_t a, size_t b) {
     edit_delete_at(e, a, b - a, e->cursor);
     if (e->cursor >= b) e->cursor -= (b - a);
     else if (e->cursor > a) e->cursor = a;
+}
+
+int editor_insert_encoded_text(Editor *e, const char *text) {
+    if (!e || !e->buf || !text) return 0;
+    int inserted = 0;
+    for (const char *p = text; *p; p++) {
+        if (*p == '\\' && p[1] == 'n') {
+            ed_insert(e, "\n", 1);
+            p++;
+        } else {
+            ed_insert(e, p, 1);
+        }
+        inserted = 1;
+    }
+    return inserted;
 }
 
 int editor_visual_range(Editor *e, EditorRange *out) {

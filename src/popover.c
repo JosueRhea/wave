@@ -76,6 +76,19 @@ void popover_show_hover(Popover *p, const char *hover) {
     popover_compose(p, hover && hover[0] ? hover : NULL);
 }
 
+void popover_show_encoded_base(Popover *p, const char *encoded, int scroll) {
+    if (!p) return;
+    popover_set_encoded_base(p, encoded);
+    popover_set_loading(p, 0);
+    popover_compose(p, NULL);
+    popover_set_scroll(p, scroll);
+}
+
+void popover_set_scroll(Popover *p, int scroll) {
+    if (!p) return;
+    p->scroll = scroll;
+}
+
 void popover_scroll(Popover *p, int delta) {
     if (!p) return;
     int maxscroll = p->total_rows - p->vis_rows;
@@ -90,6 +103,10 @@ void popover_set_view(Popover *p, int total_rows, int vis_rows) {
     p->total_rows = total_rows;
     p->vis_rows = vis_rows;
     popover_scroll(p, 0);
+}
+
+int popover_is_scrollable(const Popover *p) {
+    return p && p->active && p->total_rows > p->vis_rows;
 }
 
 int popover_apply_normal_char(Popover *p, unsigned int cp, int g_pending) {

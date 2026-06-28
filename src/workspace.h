@@ -34,6 +34,12 @@ typedef struct {
     int preview;
 } WsClickAction;
 
+typedef struct {
+    int seen;
+    double time;
+    int row;
+} WsSidebarClickState;
+
 typedef enum {
     WS_OPEN_NONE,
     WS_OPEN_WORKSPACE,
@@ -57,6 +63,7 @@ Workspace *ws_open(const char *root);
 void ws_free(Workspace *w);
 int ws_reload(Workspace *w);
 WsReloadEffect ws_apply_reload(Workspace *w);
+WsReloadEffect ws_apply_watch_event(Workspace *w, int pending);
 WsOpenContext ws_open_context(const char *arg);
 
 const char *ws_root(const Workspace *w);
@@ -76,6 +83,8 @@ void ws_visible_toggle(Workspace *w, size_t vi);
  * toggled immediately; files report whether the caller should open as a preview
  * (single click) or pinned tab (double click). */
 WsClickAction ws_click_visible(Workspace *w, int row, int double_click);
+WsClickAction ws_click_visible_timed(Workspace *w, WsSidebarClickState *state,
+                                     int row, double now, double max_delay);
 
 /* Join the root with a relative path. Caller frees. */
 char *ws_fullpath(const Workspace *w, const char *rel);

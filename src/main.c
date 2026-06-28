@@ -58,6 +58,7 @@ static void *glfwGetCocoaWindow(GLFWwindow *w) { (void)w; return 0; }
 #include "font.h"
 #include "highlight.h"
 #include "input.h"
+#include "input_glfw.h"
 #include "layout.h"
 #include "lsp.h"
 #include "lsp_manager.h"
@@ -65,6 +66,7 @@ static void *glfwGetCocoaWindow(GLFWwindow *w) { (void)w; return 0; }
 #include "overlay.h"
 #include "popover.h"
 #include "render.h"
+#include "runtime.h"
 #include "tabs.h"
 #include "text_view.h"
 #include "theme.h"
@@ -107,12 +109,9 @@ typedef struct {
     WatchService watch;
 
     int mods;          /* latest modifier state */
-    int mouse_down;     /* 1 while left button is held in the text area */
-    int mouse_dragging; /* 1 after a held click turns into a selection drag */
-    size_t mouse_anchor;
-    float mouse_x, mouse_y;
+    LayoutDragState mouse_drag;
     LayoutPointClick title_click;
-    LayoutIndexClick sidebar_click;
+    WsSidebarClickState sidebar_click;
 
     double last_activity; /* glfwGetTime() of the last keypress (for blink reset) */
     double next_watch;    /* next glfwGetTime() for polling open files */
@@ -155,47 +154,21 @@ static void center_cursor(Editor *e) {
 }
 
 static void close_tab(int i) {
-    if (tabs_close(&g.tabs, i) == 0) {
-        glfwSetWindowShouldClose(g.win, GLFW_TRUE);
-        return;
-    }
-    modal_enter_normal(&g.modal);
+    TabActionEffect effect = tabs_close_with_effect(&g.tabs, i);
+    if (effect.close_window) glfwSetWindowShouldClose(g.win, GLFW_TRUE);
+    if (effect.reset_mode) modal_enter_normal(&g.modal);
 }
 
 static void tab_goto(int delta) {
-    tabs_goto(&g.tabs, delta);
-    modal_enter_normal(&g.modal);
-}
-
-static void handle_watched_file_change(TabDiskChange event) {
-    TabDiskChangeEffect effect = tabs_describe_disk_change(
-        &g.tabs, &event, g.info, sizeof g.info);
-    if (effect.reset_active_mode) modal_enter_normal(&g.modal);
+    TabActionEffect effect = tabs_goto_with_effect(&g.tabs, delta);
+    if (effect.reset_mode) modal_enter_normal(&g.modal);
 }
 
 static void process_file_watchers(void) {
-#ifdef __APPLE__
-    for (;;) {
-        int ids[16];
-        int n = watch_poll_file_events(&g.watch, ids, 16);
-        if (n <= 0) break;
-        for (int i = 0; i < n; i++) {
-            TabDiskChange event;
-            if (tabs_apply_file_watch_event(&g.tabs, &g.watch, ids[i], &event))
-                handle_watched_file_change(event);
-        }
-        if (n < 16) break;
-    }
-#else
-    double now = glfwGetTime();
-    if (now < g.next_watch) return;
-    g.next_watch = now + 0.5;
-
-    TabDiskChange events[16];
-    int n = tabs_apply_file_watch_poll(&g.tabs, &g.watch, events, 16);
-    for (int i = 0; i < n; i++)
-        handle_watched_file_change(events[i]);
-#endif
+    TabWatchEffect effect = tabs_process_file_watchers(
+        &g.tabs, &g.watch, glfwGetTime(), &g.next_watch, 0.5);
+    if (effect.reset_mode) modal_enter_normal(&g.modal);
+    if (effect.has_message) snprintf(g.info, sizeof g.info, "%s", effect.message);
 }
 
 static void workspace_watch_stop(void) {
@@ -209,8 +182,8 @@ static void workspace_watch_start(void) {
 }
 
 static void process_workspace_watchers(void) {
-    if (!watch_workspace_consume(&g.watch) || !g.ws) return;
-    WsReloadEffect effect = ws_apply_reload(g.ws);
+    WsReloadEffect effect = ws_apply_watch_event(g.ws, watch_workspace_consume(&g.watch));
+    if (!effect.ok && !effect.message[0]) return;
     if (effect.refilter_palette && overlay_active(&g.overlay) == OVERLAY_PALETTE)
         app_palette_refilter();
     snprintf(g.info, sizeof g.info, "%s", effect.message);
@@ -220,19 +193,12 @@ static void process_workspace_watchers(void) {
  * transient peek tab (see Editor.preview): the next preview-open reuses the
  * slot instead of stacking another tab. */
 static int open_path_mode(const char *path, int preview) {
-    TabOpenPlan plan = tabs_prepare_open(&g.tabs, path, preview);
-    if (!plan.editor) return -1;
-    if (tabs_apply_existing_open(&plan, preview)) {
-        modal_enter_normal(&g.modal);
-        return 0;
-    }
-
-    if (editor_open_file(plan.editor, path, preview, &g.watch) != 0) {
-        tabs_cancel_open(&g.tabs, &plan);
+    TabOpenResult result = tabs_open_file(&g.tabs, path, preview, &g.watch);
+    if (!result.ok) {
         fprintf(stderr, "could not open %s\n", path);
         return -1;
     }
-    lsp_manager_open_editor(&g.lsp, plan.editor);
+    if (result.loaded_file) lsp_manager_open_editor(&g.lsp, result.editor);
     modal_enter_normal(&g.modal);
     return 0;
 }
@@ -289,13 +255,20 @@ static void cmd_exec(void) {
 
     snprintf(g.info, sizeof g.info, "%s", run.info);
 
-    if (effect.write && cur()->path) {
+    if (effect.write && editor_has_path(cur())) {
         editor_save_file(cur(), &g.watch);
     }
     command_close(&g.cmd);
-    if (effect.quit) {
-        if (effect.quit_all) glfwSetWindowShouldClose(g.win, GLFW_TRUE);
-        else close_tab(tabs_active_index(&g.tabs)); /* closes the window when the last tab goes */
+    switch (command_close_action(effect)) {
+    case COMMAND_CLOSE_WINDOW:
+        glfwSetWindowShouldClose(g.win, GLFW_TRUE);
+        break;
+    case COMMAND_CLOSE_TAB:
+        close_tab(tabs_active_index(&g.tabs)); /* closes the window when the last tab goes */
+        break;
+    case COMMAND_CLOSE_NONE:
+    default:
+        break;
     }
 }
 
@@ -303,35 +276,18 @@ static void cmd_exec(void) {
 
 static void show_info(void) {
     Editor *e = cur();
-    if (!e->buf) return;
-
     char base[sizeof g.pop.base];
-    LspDiag ld[MAXDIAG];
-    size_t nl = 0;
-    if (e->path) {
-        int published = 0;
-        nl = lsp_manager_diagnostics(&g.lsp, e, ld, MAXDIAG, &published);
-    }
-
-    DiagnosticCursorInfo info;
-    diagnostics_cursor_info(e, e->path ? ld : NULL, nl, base, sizeof base, &info);
-    int loading = lsp_manager_request_hover(&g.lsp, e, (int)info.row, (int)info.col);
-    popover_show_base(&g.pop, base, loading);
+    LspManagerHoverInfo info = lsp_manager_hover_info(&g.lsp, e, base, sizeof base);
+    if (info.ok) popover_show_base(&g.pop, base, info.loading);
 }
 
 static void goto_definition(void) {
     Editor *e = cur();
-    if (!e->buf) return;
+    if (!editor_has_buffer(e)) return;
 
     /* prefer the language server; the async reply is applied in the main loop */
-    if (e->path) {
-        size_t row, col;
-        pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
-        if (lsp_manager_request_definition(&g.lsp, e, (int)row, (int)col)) {
-            snprintf(g.info, sizeof g.info, "resolving definition...");
-            return;
-        }
-    }
+    if (lsp_manager_request_definition_at_cursor(&g.lsp, e, g.info, sizeof g.info))
+        return;
 
     if (!editor_goto_local_definition(e, g.info, sizeof g.info))
         return;
@@ -353,8 +309,7 @@ static void vim_normal_char(unsigned int cp) {
     if (res.flags & EDIT_COMMAND_TAB_NEXT) tab_goto(+1);
     if (res.flags & EDIT_COMMAND_TAB_PREV) tab_goto(-1);
     if (res.flags & EDIT_COMMAND_OPEN_COMMAND_LINE) command_open(&g.cmd);
-    if (res.flags & EDIT_COMMAND_UNDO_AT_OLDEST)
-        snprintf(g.info, sizeof g.info, "already at oldest change");
+    edit_command_status_text(res, g.info, sizeof g.info);
 }
 
 /* ---- UI zoom (Cmd +/-) ---- */
@@ -391,7 +346,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
         (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         overlay_active(&g.overlay) != OVERLAY_NONE,
         g.cmd.active,
-        cur()->buf != NULL,
+        editor_has_buffer(cur()),
         g.modal.mode == MODE_INSERT);
 
     if (target == INPUT_TEXT_IGNORE || target == INPUT_TEXT_NONE) return;
@@ -413,75 +368,6 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     vim_normal_char(cp); /* NORMAL or VISUAL */
 }
 
-static EditorKey editor_key_from_glfw(int key) {
-    switch (key) {
-    case GLFW_KEY_BACKSPACE: return EDITOR_KEY_BACKSPACE;
-    case GLFW_KEY_DELETE: return EDITOR_KEY_DELETE;
-    case GLFW_KEY_ENTER:
-    case GLFW_KEY_KP_ENTER: return EDITOR_KEY_ENTER;
-    case GLFW_KEY_TAB: return EDITOR_KEY_TAB;
-    case GLFW_KEY_LEFT: return EDITOR_KEY_LEFT;
-    case GLFW_KEY_RIGHT: return EDITOR_KEY_RIGHT;
-    case GLFW_KEY_UP: return EDITOR_KEY_UP;
-    case GLFW_KEY_DOWN: return EDITOR_KEY_DOWN;
-    default: return EDITOR_KEY_NONE;
-    }
-}
-
-static CommandKey command_key_from_glfw(int key) {
-    switch (key) {
-    case GLFW_KEY_ESCAPE: return COMMAND_KEY_ESCAPE;
-    case GLFW_KEY_ENTER:
-    case GLFW_KEY_KP_ENTER: return COMMAND_KEY_ACCEPT;
-    case GLFW_KEY_BACKSPACE: return COMMAND_KEY_BACKSPACE;
-    default: return COMMAND_KEY_NONE;
-    }
-}
-
-static OverlayKey overlay_key_from_glfw(int key) {
-    switch (key) {
-    case GLFW_KEY_ESCAPE: return OVERLAY_KEY_ESCAPE;
-    case GLFW_KEY_ENTER:
-    case GLFW_KEY_KP_ENTER: return OVERLAY_KEY_ACCEPT;
-    case GLFW_KEY_UP: return OVERLAY_KEY_UP;
-    case GLFW_KEY_DOWN: return OVERLAY_KEY_DOWN;
-    case GLFW_KEY_BACKSPACE: return OVERLAY_KEY_BACKSPACE;
-    default: return OVERLAY_KEY_NONE;
-    }
-}
-
-static PopoverKey popover_key_from_glfw(int key) {
-    switch (key) {
-    case GLFW_KEY_ESCAPE: return POPOVER_KEY_ESCAPE;
-    case GLFW_KEY_UP: return POPOVER_KEY_UP;
-    case GLFW_KEY_DOWN: return POPOVER_KEY_DOWN;
-    default: return POPOVER_KEY_NONE;
-    }
-}
-
-static InputKey input_key_from_glfw(int key) {
-    switch (key) {
-    case GLFW_KEY_C: return INPUT_KEY_C;
-    case GLFW_KEY_V: return INPUT_KEY_V;
-    case GLFW_KEY_P: return INPUT_KEY_P;
-    case GLFW_KEY_F: return INPUT_KEY_F;
-    case GLFW_KEY_B: return INPUT_KEY_B;
-    case GLFW_KEY_S: return INPUT_KEY_S;
-    case GLFW_KEY_RIGHT_BRACKET: return INPUT_KEY_RIGHT_BRACKET;
-    case GLFW_KEY_LEFT_BRACKET: return INPUT_KEY_LEFT_BRACKET;
-    case GLFW_KEY_W: return INPUT_KEY_W;
-    case GLFW_KEY_Z: return INPUT_KEY_Z;
-    case GLFW_KEY_R: return INPUT_KEY_R;
-    case GLFW_KEY_EQUAL: return INPUT_KEY_EQUAL;
-    case GLFW_KEY_KP_ADD: return INPUT_KEY_ADD;
-    case GLFW_KEY_MINUS: return INPUT_KEY_MINUS;
-    case GLFW_KEY_KP_SUBTRACT: return INPUT_KEY_SUBTRACT;
-    case GLFW_KEY_0: return INPUT_KEY_0;
-    case GLFW_KEY_KP_0: return INPUT_KEY_KP_0;
-    default: return INPUT_KEY_NONE;
-    }
-}
-
 static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     (void)sc;
     g.mods = mods;
@@ -490,15 +376,22 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     Editor *e = cur();
 
     WaveShortcut shortcut = input_shortcut(
-        input_key_from_glfw(key),
+        wave_input_key_from_glfw(key),
         (mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         (mods & GLFW_MOD_CONTROL) != 0,
         (mods & GLFW_MOD_ALT) != 0,
         (mods & GLFW_MOD_SHIFT) != 0);
 
-    if (shortcut == SHORTCUT_COPY) {
+    InputKeyTarget target = input_key_target(
+        shortcut, overlay_active(&g.overlay) != OVERLAY_NONE,
+        g.cmd.active, editor_has_buffer(e));
+    InputShortcutAction shortcut_action =
+        input_shortcut_action(shortcut, editor_has_path(e));
+
+    if (target == INPUT_KEY_TARGET_SHORTCUT &&
+        shortcut_action == INPUT_SHORTCUT_ACTION_COPY) {
         switch (input_clipboard_target(overlay_active(&g.overlay) != OVERLAY_NONE,
-                                       g.cmd.active, e->buf != NULL)) {
+                                       g.cmd.active, editor_has_buffer(e))) {
         case INPUT_CLIPBOARD_OVERLAY:
             glfwSetClipboardString(g.win, overlay_query(&g.overlay));
             break;
@@ -513,11 +406,12 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         }
         return;
     }
-    if (shortcut == SHORTCUT_PASTE) {
+    if (target == INPUT_KEY_TARGET_SHORTCUT &&
+        shortcut_action == INPUT_SHORTCUT_ACTION_PASTE) {
         const char *clip = glfwGetClipboardString(g.win);
         if (!clip) return;
         switch (input_clipboard_target(overlay_active(&g.overlay) != OVERLAY_NONE,
-                                       g.cmd.active, e->buf != NULL)) {
+                                       g.cmd.active, editor_has_buffer(e))) {
         case INPUT_CLIPBOARD_OVERLAY:
             overlay_insert_text(&g.overlay, g.ws, ws_root(g.ws), clip);
             break;
@@ -534,39 +428,61 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         }
         return;
     }
-    if (shortcut == SHORTCUT_PALETTE) { palette_open(); return; }
-    if (shortcut == SHORTCUT_SEARCH) { search_open(); return; }
-    if (shortcut == SHORTCUT_TOGGLE_SIDEBAR) {
-        wave_config_toggle_sidebar(&g.config);
-        config_save();
-        return;
-    }
-    if (shortcut == SHORTCUT_SAVE) {
-        if (e->path) editor_save_file(e, &g.watch);
-        return;
-    }
-    if (shortcut == SHORTCUT_TAB_NEXT) { tab_goto(+1); return; }
-    if (shortcut == SHORTCUT_TAB_PREV) { tab_goto(-1); return; }
-    if (shortcut == SHORTCUT_CLOSE_TAB) { close_tab(tabs_active_index(&g.tabs)); return; }
-    if (shortcut == SHORTCUT_UNDO || shortcut == SHORTCUT_REDO) {
-        editor_apply_history_action(cur(), shortcut == SHORTCUT_REDO,
-                                    g.info, sizeof g.info);
-        return;
-    }
-    if (shortcut == SHORTCUT_ZOOM_IN) { ui_zoom(+1); return; }
-    if (shortcut == SHORTCUT_ZOOM_OUT) { ui_zoom(-1); return; }
-    if (shortcut == SHORTCUT_ZOOM_RESET) { ui_zoom(0); return; }
-    if (shortcut == SHORTCUT_TOGGLE_WRAP) {
-        wave_config_toggle_wrap(&g.config);
-        config_save();
-        wave_config_wrap_text(&g.config, g.info, sizeof g.info);
-        return;
+    if (target == INPUT_KEY_TARGET_SHORTCUT) {
+        switch (shortcut_action) {
+        case INPUT_SHORTCUT_ACTION_OPEN_PALETTE:
+            palette_open();
+            return;
+        case INPUT_SHORTCUT_ACTION_OPEN_SEARCH:
+            search_open();
+            return;
+        case INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR:
+            wave_config_toggle_sidebar(&g.config);
+            config_save();
+            return;
+        case INPUT_SHORTCUT_ACTION_SAVE:
+            editor_save_file(e, &g.watch);
+            return;
+        case INPUT_SHORTCUT_ACTION_TAB_NEXT:
+            tab_goto(+1);
+            return;
+        case INPUT_SHORTCUT_ACTION_TAB_PREV:
+            tab_goto(-1);
+            return;
+        case INPUT_SHORTCUT_ACTION_CLOSE_TAB:
+            close_tab(tabs_active_index(&g.tabs));
+            return;
+        case INPUT_SHORTCUT_ACTION_UNDO:
+        case INPUT_SHORTCUT_ACTION_REDO:
+            editor_apply_history_action(e, shortcut_action == INPUT_SHORTCUT_ACTION_REDO,
+                                        g.info, sizeof g.info);
+            return;
+        case INPUT_SHORTCUT_ACTION_ZOOM_IN:
+            ui_zoom(+1);
+            return;
+        case INPUT_SHORTCUT_ACTION_ZOOM_OUT:
+            ui_zoom(-1);
+            return;
+        case INPUT_SHORTCUT_ACTION_ZOOM_RESET:
+            ui_zoom(0);
+            return;
+        case INPUT_SHORTCUT_ACTION_TOGGLE_WRAP:
+            wave_config_toggle_wrap(&g.config);
+            config_save();
+            wave_config_wrap_text(&g.config, g.info, sizeof g.info);
+            return;
+        case INPUT_SHORTCUT_ACTION_NONE:
+        case INPUT_SHORTCUT_ACTION_COPY:
+        case INPUT_SHORTCUT_ACTION_PASTE:
+        default:
+            return;
+        }
     }
 
-    if (overlay_active(&g.overlay) != OVERLAY_NONE) {
+    if (target == INPUT_KEY_TARGET_OVERLAY) {
         OverlayKind active = overlay_active(&g.overlay);
         OverlayKeyResult overlay_key = overlay_apply_key(
-            &g.overlay, g.ws, ws_root(g.ws), overlay_key_from_glfw(key));
+            &g.overlay, g.ws, ws_root(g.ws), wave_overlay_key_from_glfw(key));
         if (overlay_key == OVERLAY_KEY_RESULT_ACCEPT) {
             if (active == OVERLAY_PALETTE) palette_accept();
             else if (active == OVERLAY_SEARCH) search_accept();
@@ -575,32 +491,32 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     }
 
     /* command line */
-    if (g.cmd.active) {
-        CommandKeyResult cmd_key = command_apply_key(&g.cmd, command_key_from_glfw(key));
+    if (target == INPUT_KEY_TARGET_COMMAND) {
+        CommandKeyResult cmd_key = command_apply_key(&g.cmd, wave_command_key_from_glfw(key));
         if (cmd_key == COMMAND_KEY_RESULT_ACCEPT) cmd_exec();
         return;
     }
 
-    if (!e->buf) return;
+    if (target != INPUT_KEY_TARGET_EDITOR) return;
 
-    if (popover_apply_key(&g.pop, popover_key_from_glfw(key),
+    if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
                           g.modal.mode == MODE_INSERT))
         return;
 
     if (key == GLFW_KEY_ESCAPE) {
         modal_enter_normal(&g.modal);
         g.info[0] = '\0';
-        e->group_open = 0;
+        editor_cancel_group(e);
         return;
     }
 
     if (g.modal.mode == MODE_INSERT) {
-        editor_apply_insert_key(e, editor_key_from_glfw(key));
+        editor_apply_insert_key(e, wave_editor_key_from_glfw(key));
         return;
     }
 
     /* NORMAL / VISUAL: arrows also move (convenience) */
-    if (editor_apply_motion_key(e, editor_key_from_glfw(key))) g.info[0] = '\0';
+    if (editor_apply_motion_key(e, wave_editor_key_from_glfw(key))) g.info[0] = '\0';
 }
 
 static void on_scroll(GLFWwindow *w, double dx, double dy) {
@@ -610,7 +526,7 @@ static void on_scroll(GLFWwindow *w, double dx, double dy) {
     LayoutScrollTarget target = layout_scroll_target(
         &g.layout, (float)mx * g.fb_scale, dy,
         overlay_active(&g.overlay) == OVERLAY_SEARCH,
-        g.pop.active && g.pop.total_rows > g.pop.vis_rows,
+        popover_is_scrollable(&g.pop),
         g.ws != NULL, g.config.show_sidebar);
 
     if (target.kind == LAYOUT_SCROLL_SEARCH) {
@@ -622,32 +538,27 @@ static void on_scroll(GLFWwindow *w, double dx, double dy) {
         return;
     }
     if (target.kind == LAYOUT_SCROLL_SIDEBAR) {
-        g.side_scroll += target.pixels;
-        if (g.side_scroll < 0) g.side_scroll = 0;
+        g.side_scroll = layout_scroll_offset(g.side_scroll, target.pixels);
     } else {
-        cur()->scroll_y += target.pixels;
-        if (cur()->scroll_y < 0) cur()->scroll_y = 0;
+        editor_set_scroll_y(cur(), layout_scroll_offset(editor_scroll_y(cur()), target.pixels));
     }
 }
 
 static void on_cursor_pos(GLFWwindow *w, double mx, double my) {
     (void)w;
-    if (!g.mouse_down) return;
+    if (!g.mouse_drag.down) return;
     float x = (float)mx * g.fb_scale, y = (float)my * g.fb_scale;
 
-    if (!g.mouse_dragging &&
-        !layout_drag_should_start(g.mouse_x, g.mouse_y, x, y, g.fb_scale))
-        return;
+    if (!layout_drag_update(&g.mouse_drag, x, y, g.fb_scale)) return;
 
     Editor *e = cur();
-    if (!e->buf) return;
+    if (!editor_has_buffer(e)) return;
 
     if (!editor_apply_drag_selection(
-            e, g.mouse_anchor, x, y, g.layout.text_x, g.layout.top_pad,
+            e, g.mouse_drag.anchor, x, y, g.layout.text_x, g.layout.top_pad,
             g.layout.line_h, g.layout.adv,
             layout_text_autoscroll_delta(&g.layout, y)))
         return;
-    g.mouse_dragging = 1;
     modal_enter_visual(&g.modal);
     g.last_activity = glfwGetTime();
 }
@@ -655,8 +566,7 @@ static void on_cursor_pos(GLFWwindow *w, double mx, double my) {
 static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     (void)mods;
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
-        g.mouse_down = 0;
-        g.mouse_dragging = 0;
+        layout_drag_release(&g.mouse_drag);
         return;
     }
     if (action != GLFW_PRESS) return;
@@ -688,13 +598,8 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     g.last_activity = glfwGetTime();
 
     if (click.kind == LAYOUT_CLICK_SIDEBAR) {
-        const WsEntry *e = ws_visible(g.ws, (size_t)click.row);
-        if (!e) return;
-        /* single click peeks; double click on the same file row pins it. */
-        double now = glfwGetTime();
-        int dbl = !e->is_dir &&
-                  layout_index_double_click(&g.sidebar_click, now, click.row, 0.4);
-        WsClickAction action = ws_click_visible(g.ws, click.row, dbl);
+        WsClickAction action = ws_click_visible_timed(
+            g.ws, &g.sidebar_click, click.row, glfwGetTime(), 0.4);
         if (action.kind == WS_CLICK_OPEN_FILE && action.entry) {
             char *full = ws_fullpath(g.ws, action.entry->rel);
             open_path_mode(full, action.preview);
@@ -705,27 +610,23 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
 
     /* tab strip: click to switch; click the trailing 'x' to close */
     if (click.kind == LAYOUT_CLICK_TAB) {
-        int idx = click.tab_index;
-        if (idx >= 0 && idx < tabs_count(&g.tabs)) {
-            if (click.tab_close) close_tab(idx);
-            else { tabs_set_active(&g.tabs, idx); modal_enter_normal(&g.modal); }
-        }
+        TabActionEffect effect = tabs_click_with_effect(
+            &g.tabs, click.tab_index, click.tab_close);
+        if (effect.close_window) glfwSetWindowShouldClose(g.win, GLFW_TRUE);
+        if (effect.reset_mode) modal_enter_normal(&g.modal);
         return;
     }
 
     /* click in the text area: map (visual row, x) back to a byte offset */
-    if (cur()->buf && cur()->vstart && click.kind == LAYOUT_CLICK_TEXT) {
+    if (editor_has_buffer(cur()) && editor_has_visual_rows(cur()) &&
+        click.kind == LAYOUT_CLICK_TEXT) {
         Editor *e = cur();
         size_t off = 0;
         if (!editor_apply_click_position(e, x, y, g.layout.text_x,
                                          g.layout.top_pad, g.layout.line_h,
                                          g.layout.adv, &off))
             return;
-        g.mouse_down = 1;
-        g.mouse_dragging = 0;
-        g.mouse_anchor = off;
-        g.mouse_x = x;
-        g.mouse_y = y;
+        layout_drag_begin(&g.mouse_drag, off, x, y);
         if (g.modal.mode == MODE_VISUAL) modal_enter_normal(&g.modal);
     }
 }
@@ -741,9 +642,9 @@ static void draw_frame(int fb_w, int fb_h) {
     /* keep the native title path menu pointed at the active file (cheap pointer
      * guard so we only touch Cocoa when the front tab actually changes) */
     static const char *shown_path = (const char *)-1;
-    if (g.config.native_titlebar && e->path != shown_path) {
-        mac_window_set_file(glfwGetCocoaWindow(g.win), e->path);
-        shown_path = e->path;
+    if (g.config.native_titlebar && editor_path(e) != shown_path) {
+        mac_window_set_file(glfwGetCocoaWindow(g.win), editor_path(e));
+        shown_path = editor_path(e);
     }
 
     float line_h = font_line_height(font);
@@ -765,7 +666,7 @@ static void draw_frame(int fb_w, int fb_h) {
     renderer_begin(r, fb_w, fb_h, 0.11f, 0.12f, 0.14f, g.config.opacity);
 
     if (side_px > 0)
-        draw_sidebar_panel(g.ws, e->path, g.config.side_cells, g.side_scroll,
+        draw_sidebar_panel(g.ws, editor_path(e), g.config.side_cells, g.side_scroll,
                            fb_h, font, r, adv, line_h, ascent, side_px,
                            header_h, g.layout.side_pad, g.config.opacity);
     if (tab_strip > 0)
@@ -773,11 +674,11 @@ static void draw_frame(int fb_w, int fb_h) {
                                          ascent, tab_h, header_h,
                                          g.config.opacity);
     if (header_h > 0)
-        draw_header_panel(g.ws ? ws_root(g.ws) : NULL, e ? e->path : NULL,
+        draw_header_panel(g.ws ? ws_root(g.ws) : NULL, editor_path(e),
                           fb_w, font, r, adv, ascent, header_h, g.fb_scale,
                           g.config.opacity);
 
-    if (!e->buf) { /* empty state: a folder is open but no file has been chosen */
+    if (!editor_has_buffer(e)) { /* empty state: a folder is open but no file has been chosen */
         ViewEmptyState empty = view_empty_state(g.ws != NULL);
         ViewEmptyLayout empty_layout = view_empty_layout(
             (float)fb_w, (float)fb_h, side_px, top_pad, adv, line_h, &empty);
@@ -803,23 +704,12 @@ static void draw_frame(int fb_w, int fb_h) {
                            (float)fb_w, text_x, adv, (float)fb_h, top_pad,
                            line_h, layout_status_bar_h(&g.layout), &text))
         return;
-    const PieceTable *pt = text.pt;
     static HighlightSpan spans[MAXSPANS];
-    size_t nspans = e->hl ? hl_spans(e->hl, text.window.byte_start,
-                                      text.window.byte_end, spans, MAXSPANS) : 0;
-    if (nspans > MAXSPANS) nspans = MAXSPANS; /* never index past the buffer */
-    static Diagnostic diags[MAXDIAG];
-    size_t ndiag = e->hl ? hl_diagnostics(e->hl, diags, MAXDIAG) : 0;
-    if (ndiag > MAXDIAG) ndiag = MAXDIAG;
+    size_t nspans = editor_highlight_spans(e, text.window.byte_start,
+                                           text.window.byte_end, spans, MAXSPANS);
 
-    /* If a language server has reported on this file, it is authoritative —
-     * replace the tree-sitter syntax diagnostics with the server's. */
-    if (e->path) {
-        static LspDiag ld[MAXDIAG];
-        int published = 0;
-        size_t nl = lsp_manager_diagnostics(&g.lsp, e, ld, MAXDIAG, &published);
-        ndiag = diagnostics_apply_lsp(diags, ndiag, MAXDIAG, ld, nl, published);
-    }
+    static Diagnostic diags[MAXDIAG];
+    size_t ndiag = lsp_manager_editor_diagnostics(&g.lsp, e, diags, MAXDIAG);
 
     /* cursor blink: solid for the first half-second after any input, then a
      * ~1Hz on/off. Always solid when blinking is disabled (snapshot mode). */
@@ -834,11 +724,9 @@ static void draw_frame(int fb_w, int fb_h) {
     float bar_h = line_h + 6.0f;
     renderer_rect(r, 0, (float)fb_h - bar_h, (float)fb_w, bar_h, 0.07f, 0.08f, 0.10f, g.config.opacity);
     char status[400];
-    size_t crow, ccol;
-    pt_offset_to_rowcol(pt, e->cursor, &crow, &ccol);
-    ViewStatusLine status_line = view_status_line(
+    ViewStatusLine status_line = view_editor_status_line(
         status, sizeof status, e, g.cmd.active ? command_text(&g.cmd) : NULL,
-        g.info, mode_name(g.modal.mode), crow, ccol, ndiag,
+        g.info, mode_name(g.modal.mode), ndiag,
         tabs_active_index(&g.tabs), tabs_count(&g.tabs));
     draw_text_run(font, r, status, (int)strlen(status), pad,
                   (float)fb_h - bar_h + ascent + 2.0f,
@@ -849,7 +737,7 @@ static void draw_frame(int fb_w, int fb_h) {
     if (overlay_active(&g.overlay) == OVERLAY_NONE) {
         ViewPoint anchor = view_popover_anchor(text_x, top_pad, (float)fb_h, bar_h,
                                                adv, line_h, text.cursor.vrow,
-                                               text.cursor.xcol, e->scroll_y);
+                                               text.cursor.xcol, editor_scroll_y(e));
         draw_popover_panel(&g.pop, fb_w, fb_h, font, r, adv, line_h, ascent,
                            top_pad, bar_h, anchor.x, anchor.y,
                            g.layout.side_px, g.fb_scale);
@@ -863,9 +751,6 @@ static void draw_frame(int fb_w, int fb_h) {
     renderer_flush(r);
 }
 
-/* ---- entry ---- */
-#include <sys/stat.h>
-
 int main(int argc, char **argv) {
     const char *arg = argc > 1 ? argv[1] : NULL;
 
@@ -877,18 +762,19 @@ int main(int argc, char **argv) {
     glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
 
     const char *snapshot = getenv("WAVE_SNAPSHOT");
-    if (snapshot) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    /* don't spawn language servers during headless snapshots unless asked */
-    lsp_manager_init(&g.lsp, snapshot && !getenv("WAVE_LSP"));
-    g.blink = (snapshot == NULL); /* keep the cursor solid for deterministic snapshots */
+    WaveRuntimeOptions runtime = wave_runtime_options(
+        snapshot, getenv("WAVE_LSP"), getenv("WAVE_PERSIST"), getenv("WAVE_SCALE"));
+    if (runtime.snapshot) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    lsp_manager_init(&g.lsp, runtime.lsp_disabled);
+    g.blink = runtime.blink;
 
     modal_init(&g.modal);
     overlay_init(&g.overlay);
     wave_config_defaults(&g.config);
     watch_service_init(&g.watch);
-    g.persist = (snapshot == NULL) || getenv("WAVE_PERSIST"); /* off in snapshots unless forced */
+    g.persist = runtime.persist;
     if (g.persist) wave_config_load(&g.config); /* saved prefs override defaults */
-    { const char *sc = getenv("WAVE_SCALE"); if (sc) { float v = (float)atof(sc); if (v > 0.1f) g.config.ui_scale = v; } }
+    if (runtime.has_scale_override) g.config.ui_scale = runtime.scale_override;
 
     /* a transparent framebuffer lets opacity<1 (and the macOS blur) show through */
     glfwWindowHint(GLFW_TRANSPARENT_FRAMEBUFFER, GLFW_TRUE);
@@ -920,75 +806,44 @@ int main(int argc, char **argv) {
         }
     }
     if (tabs_count(&g.tabs) == 0) {
-        /* Keep cur() valid even for a workspace empty state; buf stays NULL so
-         * draw_frame renders the placeholder until the user opens a file. */
-        tabs_new(&g.tabs);
-        if (!g.ws) {
-            cur()->buf = buffer_new();
-            modal_enter_insert(&g.modal);
-        }
+        TabStartupEffect startup = tabs_ensure_startup(&g.tabs, g.ws != NULL);
+        if (startup.enter_insert) modal_enter_insert(&g.modal);
     }
 
     g.rend = renderer_new(g.font);
     if (!g.rend) { fprintf(stderr, "renderer init failed\n"); return 1; }
 
-    if (snapshot) {
-        /* WAVE_OPEN: ':'-separated paths, each opened as its own tab. */
-        const char *opens = getenv("WAVE_OPEN");
-        if (opens) {
-            char buf[4096];
-            snprintf(buf, sizeof buf, "%s", opens);
-            for (char *p = strtok(buf, ":"); p; p = strtok(NULL, ":"))
-                open_path(p);
-        }
-        const char *typed = getenv("WAVE_TYPE");
-        if (typed && cur()->buf) {
+    if (runtime.snapshot) {
+        WaveRuntimeSnapshotScript script = wave_runtime_snapshot_script(
+            getenv("WAVE_OPEN"), getenv("WAVE_TYPE"), getenv("WAVE_KEYS"),
+            getenv("WAVE_PALETTE"), getenv("WAVE_QUERY"), getenv("WAVE_SEARCH"),
+            getenv("WAVE_SEARCHSEL"), getenv("WAVE_POPTEST"), getenv("WAVE_POPSCROLL"));
+
+        for (int i = 0; i < script.opens.count; i++) open_path(script.opens.paths[i]);
+        if (script.typed && editor_has_buffer(cur())) {
             modal_enter_insert(&g.modal);
-            for (const char *p = typed; *p; p++) {
-                if (*p == '\\' && p[1] == 'n') { ed_insert(cur(), "\n", 1); p++; }
-                else ed_insert(cur(), p, 1);
-            }
+            editor_insert_encoded_text(cur(), script.typed);
         }
-        if (cur()->hl) hl_update(cur()->hl);
-        /* WAVE_KEYS: a run of NORMAL-mode keystrokes (e.g. "ggwgd"). */
-        const char *keys = getenv("WAVE_KEYS");
-        if (keys && cur()->buf) {
+        editor_refresh_highlighter(cur());
+        if (script.keys && editor_has_buffer(cur())) {
             modal_enter_normal(&g.modal);
-            for (const char *p = keys; *p; p++) {
-                if (cur()->hl) hl_update(cur()->hl);
+            for (const char *p = script.keys; *p; p++) {
+                editor_refresh_highlighter(cur());
                 vim_normal_char((unsigned int)(unsigned char)*p);
             }
         }
-        if (getenv("WAVE_PALETTE")) palette_open();
-        /* WAVE_QUERY: prefill the palette query to verify fuzzy ranking. */
-        const char *pq = getenv("WAVE_QUERY");
-        if (pq && overlay_active(&g.overlay) == OVERLAY_PALETTE) {
-            overlay_set_palette_query(&g.overlay, g.ws, pq);
+        if (script.palette) palette_open();
+        if (script.palette_query && overlay_active(&g.overlay) == OVERLAY_PALETTE) {
+            overlay_set_palette_query(&g.overlay, g.ws, script.palette_query);
         }
-        /* WAVE_SEARCH: open the content-search overlay, run the query, and pump
-         * ripgrep to completion so the single-frame snapshot shows real hits. */
-        const char *sq = getenv("WAVE_SEARCH");
-        if (sq) {
+        if (script.search_query) {
             search_open();
-            overlay_set_search_query(&g.overlay, ws_root(g.ws), sq);
-            for (int i = 0; i < 500 && overlay_search_running(&g.overlay); i++) {
-                overlay_poll_search(&g.overlay);
-                if (!overlay_search_running(&g.overlay)) break;
-                usleep(10000);
-            }
-            overlay_poll_search(&g.overlay);
-            const char *ss = getenv("WAVE_SEARCHSEL");
-            if (ss) g.overlay.search.sel = atoi(ss);
+            overlay_set_search_query(&g.overlay, ws_root(g.ws), script.search_query);
+            overlay_settle_search(&g.overlay);
+            overlay_set_search_selection(&g.overlay, script.search_selection);
         }
-        /* WAVE_POPTEST: force-open the popover with given text (\n = newline,
-         * | = paragraph break) to verify max-height / scroll / placement. */
-        const char *poptest = getenv("WAVE_POPTEST");
-        if (poptest && cur()->buf) {
-            popover_set_encoded_base(&g.pop, poptest);
-            popover_set_loading(&g.pop, 0);
-            popover_compose(&g.pop, NULL);
-            const char *ps = getenv("WAVE_POPSCROLL");
-            if (ps) g.pop.scroll = atoi(ps);
+        if (script.popover_text && editor_has_buffer(cur())) {
+            popover_show_encoded_base(&g.pop, script.popover_text, script.popover_scroll);
         }
         glfwGetFramebufferSize(win, &fb_w, &fb_h);
         draw_frame(fb_w, fb_h);
@@ -1007,35 +862,26 @@ int main(int argc, char **argv) {
         process_file_watchers();
         process_workspace_watchers();
         Editor *e = cur();
-        if (g.mouse_down && glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS) {
-            g.mouse_down = 0;
-            g.mouse_dragging = 0;
-        }
+        if (g.mouse_drag.down && glfwGetMouseButton(win, GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS)
+            layout_drag_release(&g.mouse_drag);
         /* re-assert the blur each frame: macOS clears it on some window events */
         if (g.config.blur) mac_set_blur(glfwGetCocoaWindow(win), 1);
-        if (e->hl && (e->dirty || buffer_pending_edits(e->buf) > 0)) {
-            hl_update(e->hl);
-            e->dirty = 0;
-        }
+        editor_update_highlighter(e);
 
         /* drain language tooling and apply any UI-facing results */
-        LspLocation loc;
-        char hv[1024];
-        int lsp_events = lsp_manager_poll(&g.lsp, &loc, hv, sizeof hv);
-        if (lsp_events & LSP_MANAGER_EVENT_DEFINITION) {
-            if (open_path(loc.path) == 0) {
+        LspManagerUpdate lsp_update = lsp_manager_update_ui(&g.lsp, e);
+        if (lsp_update.has_definition) {
+            if (open_path(lsp_update.definition.path) == 0) {
                 Editor *te = cur();
-                if (editor_move_to_lsp_position(te, loc.line, loc.col,
+                if (editor_move_to_lsp_position(te, lsp_update.definition.line,
+                                                lsp_update.definition.col,
                                                 g.info, sizeof g.info))
                     center_cursor(te);
             }
         }
-        if (lsp_events & LSP_MANAGER_EVENT_HOVER) {
-            popover_show_hover(&g.pop, hv);
+        if (lsp_update.has_hover) {
+            popover_show_hover(&g.pop, lsp_update.hover);
         }
-
-        /* push a full-document didChange once the active file has edits pending */
-        lsp_manager_push_change(&g.lsp, e);
 
         /* drain any pending ripgrep output for the live search overlay */
         overlay_poll_search(&g.overlay);
@@ -1044,8 +890,8 @@ int main(int argc, char **argv) {
         draw_frame(fb_w, fb_h);
         glfwSwapBuffers(win);
         /* poll faster while a server or a search is active so results stream in */
-        glfwWaitEventsTimeout(
-            (lsp_manager_active(&g.lsp) || overlay_search_running(&g.overlay)) ? 0.03 : 0.1);
+        glfwWaitEventsTimeout(wave_runtime_wait_timeout(
+            lsp_manager_active(&g.lsp), overlay_search_running(&g.overlay)));
     }
 
     renderer_free(g.rend);

@@ -210,3 +210,14 @@ ViewStatusLine view_status_line(char *out, size_t cap, const Editor *editor,
     }
     return line;
 }
+
+ViewStatusLine view_editor_status_line(char *out, size_t cap, const Editor *editor,
+                                       const char *command, const char *info,
+                                       const char *mode, size_t diagnostics,
+                                       int tab_index, int tab_count) {
+    size_t row = 0, col = 0;
+    if (editor && editor->buf)
+        pt_offset_to_rowcol(buffer_pt(editor->buf), editor->cursor, &row, &col);
+    return view_status_line(out, cap, editor, command, info, mode,
+                            row, col, diagnostics, tab_index, tab_count);
+}

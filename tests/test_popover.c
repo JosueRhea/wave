@@ -40,13 +40,28 @@ int main(void) {
     CHECK(p.active);
     CHECK(!p.loading);
     CHECK_STR(p.text, "base\n\nhover");
+    popover_set_scroll(&p, 3);
+    CHECK_EQ(p.scroll, 3);
+    popover_set_scroll(&p, 0);
 
     popover_close(&p);
     popover_show_hover(&p, "ignored");
     CHECK(!p.active);
 
+    popover_show_encoded_base(&p, "snap\\nshot|text", 5);
+    CHECK(p.active);
+    CHECK(!p.loading);
+    CHECK_EQ(p.scroll, 5);
+    CHECK_STR(p.base, "snap\nshot\n\ntext");
+    CHECK_STR(p.text, "snap\nshot\n\ntext");
+    popover_show_encoded_base(NULL, "ignored", 1);
+
+    popover_set_scroll(&p, 0);
     popover_compose(&p, NULL);
+    CHECK(!popover_is_scrollable(&p));
+    CHECK(!popover_is_scrollable(NULL));
     popover_set_view(&p, 5, 2);
+    CHECK(popover_is_scrollable(&p));
     CHECK_EQ(popover_apply_normal_char(&p, 'j', 0), 1);
     CHECK_EQ(p.scroll, 1);
     CHECK_EQ(popover_apply_normal_char(&p, 'k', 0), 1);
@@ -57,6 +72,7 @@ int main(void) {
     CHECK(p.active);
     CHECK_EQ(popover_apply_normal_char(&p, 'x', 0), 0);
     CHECK(!p.active);
+    CHECK(!popover_is_scrollable(&p));
 
     popover_compose(&p, "hover");
     popover_set_view(&p, 4, 2);

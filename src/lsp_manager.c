@@ -80,6 +80,39 @@ size_t lsp_manager_diagnostics(LspManager *m, Editor *e, LspDiag *out,
     return n;
 }
 
+size_t lsp_manager_editor_diagnostics(LspManager *m, Editor *e,
+                                      Diagnostic *out, size_t max) {
+    LspDiag lsp[256];
+    int published = 0;
+    size_t nl = 0;
+    if (max > 256) max = 256;
+    if (e && e->path)
+        nl = lsp_manager_diagnostics(m, e, lsp, max, &published);
+    return diagnostics_for_editor(e, out, max, lsp, nl, published);
+}
+
+LspManagerHoverInfo lsp_manager_hover_info(LspManager *m, Editor *e,
+                                           char *base, size_t base_cap) {
+    LspManagerHoverInfo info = {0};
+    if (!editor_has_buffer(e)) return info;
+
+    LspDiag lsp[256];
+    size_t nl = 0;
+    if (editor_has_path(e)) {
+        int published = 0;
+        nl = lsp_manager_diagnostics(m, e, lsp, 256, &published);
+    }
+
+    DiagnosticCursorInfo cursor = {0};
+    diagnostics_cursor_info(e, editor_has_path(e) ? lsp : NULL, nl,
+                            base, base_cap, &cursor);
+    info.ok = 1;
+    info.row = cursor.row;
+    info.col = cursor.col;
+    info.loading = lsp_manager_request_hover(m, e, (int)cursor.row, (int)cursor.col);
+    return info;
+}
+
 int lsp_manager_request_hover(LspManager *m, Editor *e, int row, int col) {
     Lsp *l = lsp_manager_for(m, e);
     if (!l || !lsp_ready(l) || !e || !e->path) return 0;
@@ -98,6 +131,17 @@ int lsp_manager_request_definition(LspManager *m, Editor *e, int row, int col) {
     return 1;
 }
 
+int lsp_manager_request_definition_at_cursor(LspManager *m, Editor *e,
+                                             char *message, size_t message_cap) {
+    if (!e || !e->buf || !e->path) return 0;
+    size_t row, col;
+    pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+    if (!lsp_manager_request_definition(m, e, (int)row, (int)col)) return 0;
+    if (message && message_cap > 0)
+        snprintf(message, message_cap, "resolving definition...");
+    return 1;
+}
+
 int lsp_manager_poll(LspManager *m, LspLocation *definition,
                      char *hover, size_t hover_cap) {
     if (!m) return LSP_MANAGER_EVENT_NONE;
@@ -112,6 +156,22 @@ int lsp_manager_poll(LspManager *m, LspLocation *definition,
             events |= LSP_MANAGER_EVENT_HOVER;
     }
     return events;
+}
+
+int lsp_manager_update(LspManager *m, Editor *active, LspLocation *definition,
+                       char *hover, size_t hover_cap) {
+    int events = lsp_manager_poll(m, definition, hover, hover_cap);
+    lsp_manager_push_change(m, active);
+    return events;
+}
+
+LspManagerUpdate lsp_manager_update_ui(LspManager *m, Editor *active) {
+    LspManagerUpdate update = {0};
+    int events = lsp_manager_update(m, active, &update.definition,
+                                    update.hover, sizeof update.hover);
+    update.has_definition = (events & LSP_MANAGER_EVENT_DEFINITION) != 0;
+    update.has_hover = (events & LSP_MANAGER_EVENT_HOVER) != 0;
+    return update;
 }
 
 int lsp_manager_active(const LspManager *m) {

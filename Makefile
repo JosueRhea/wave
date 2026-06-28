@@ -66,11 +66,11 @@ TS_OBJ   := $(BUILD)/ts_lib.o $(BUILD)/ts_c_parser.o \
 
 # GUI-only objects (need GLFW/GL headers; mac.o is Objective-C / Cocoa).
 GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o \
-           $(BUILD)/draw.o $(BUILD)/main.o $(BUILD)/mac.o
+           $(BUILD)/draw.o $(BUILD)/input_glfw.o $(BUILD)/main.o $(BUILD)/mac.o
 
 TEST_LIBS := -framework CoreServices -framework CoreFoundation
 
-TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input
+TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
@@ -180,6 +180,8 @@ $(BUILD)/font.o: src/font.c | $(BUILD)
 $(BUILD)/stb_impl.o: src/stb_impl.c | $(BUILD)
 	$(CC) $(CFLAGS) -Wno-unused-function -c $< -o $@
 $(BUILD)/render.o: src/render.c | $(BUILD)
+	$(CC) $(CFLAGS) $(GUI_CFLAGS) -c $< -o $@
+$(BUILD)/input_glfw.o: src/input_glfw.c | $(BUILD)
 	$(CC) $(CFLAGS) $(GUI_CFLAGS) -c $< -o $@
 $(BUILD)/main.o: src/main.c | $(BUILD) vendor
 	$(CC) $(CFLAGS) $(GUI_CFLAGS) -c $< -o $@

@@ -37,7 +37,27 @@ int main(void) {
     size_t out = 999;
     int strong = 0;
 
+    editor_init(&e);
+    CHECK(!editor_has_buffer(NULL));
+    CHECK(!editor_has_buffer(&e));
+    CHECK(!editor_has_path(NULL));
+    CHECK(!editor_has_path(&e));
+    CHECK(editor_path(NULL) == NULL);
+    CHECK(editor_path(&e) == NULL);
+    CHECK(!editor_has_visual_rows(NULL));
+    CHECK(!editor_has_visual_rows(&e));
+    CHECK_EQ((int)editor_scroll_y(NULL), 0);
+    CHECK_EQ((int)editor_scroll_y(&e), 0);
+    editor_set_scroll_y(&e, 12.0f);
+    CHECK_EQ((int)editor_scroll_y(&e), 12);
+    editor_set_scroll_y(&e, -3.0f);
+    CHECK_EQ((int)editor_scroll_y(&e), 0);
+    editor_set_scroll_y(NULL, 4.0f);
+    CHECK(!editor_refresh_highlighter(NULL));
+    editor_close(&e);
+
     fill(&e, "let alpha = 1;\nalpha();\n");
+    CHECK(editor_has_buffer(&e));
     e.cursor = strlen("let alpha = 1;\n") + 2;
     CHECK(editor_find_definition(&e, word, sizeof word, &out, &strong));
     CHECK_STR(word, "alpha");
@@ -70,7 +90,9 @@ int main(void) {
     editor_close(&e);
 
     fill(&e, "abcdef\nxyz\n");
+    CHECK(!editor_has_visual_rows(&e));
     wrap_build(&e, WRAP_NOWRAP_COLS);
+    CHECK(editor_has_visual_rows(&e));
     out = 999;
     CHECK(editor_offset_at_point(&e, 120.0f, 50.0f, 100.0f, 50.0f,
                                  20.0f, 10.0f, &out));
@@ -192,6 +214,20 @@ int main(void) {
     CHECK_EQ(e.group_open, 1);
     editor_close(&e);
 
+    fill(&e, "");
+    CHECK(!editor_insert_encoded_text(NULL, "ignored"));
+    Editor no_buf;
+    editor_init(&no_buf);
+    CHECK(!editor_insert_encoded_text(&no_buf, "ignored"));
+    CHECK(editor_insert_encoded_text(&e, "one\\ntwo\\\\n"));
+    char *encoded_text = editor_text(&e);
+    CHECK_STR(encoded_text, "one\ntwo\\\n");
+    free(encoded_text);
+    CHECK_EQ(e.cursor, strlen("one\ntwo\\\n"));
+    CHECK(!editor_insert_encoded_text(&e, NULL));
+    editor_close(&e);
+    editor_close(&no_buf);
+
     fill(&e, "ab\ncd\n");
     e.cursor = 2;
     CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
@@ -224,6 +260,10 @@ int main(void) {
     CHECK(editor_apply_motion_key(&e, EDITOR_KEY_UP));
     CHECK_EQ(e.cursor, 1);
     CHECK(!editor_apply_motion_key(&e, EDITOR_KEY_TAB));
+    e.group_open = 1;
+    editor_cancel_group(&e);
+    CHECK_EQ(e.group_open, 0);
+    editor_cancel_group(NULL);
     editor_close(&e);
 
     fill(&e, "abcdef\nxyz\n");
@@ -277,6 +317,29 @@ int main(void) {
     free(opened);
     CHECK_EQ(editor_open_file(&e, "/tmp/does-not-exist-wave", 0, NULL), -1);
     CHECK_STR(e.path, open_path);
+    CHECK(!editor_update_highlighter(NULL));
+    CHECK(!editor_update_highlighter(&e));
+    editor_close(&e);
+
+    const char *highlight_path = "/tmp/wave_editor_highlight_test.c";
+    write_file(highlight_path, "int x;\n");
+    editor_init(&e);
+    CHECK_EQ(editor_open_file(&e, highlight_path, 0, NULL), 0);
+    CHECK(editor_has_path(&e));
+    CHECK_STR(editor_path(&e), highlight_path);
+    CHECK(e.hl != NULL);
+    CHECK(editor_refresh_highlighter(&e));
+    CHECK(!editor_update_highlighter(&e));
+    HighlightSpan spans[64];
+    CHECK(editor_highlight_spans(&e, 0, buffer_length(e.buf), spans, 64) > 0);
+    CHECK_EQ(editor_highlight_spans(NULL, 0, 1, spans, 64), 0);
+    CHECK_EQ(editor_highlight_spans(&e, 0, 1, NULL, 64), 0);
+    CHECK_EQ(editor_highlight_spans(&e, 0, 1, spans, 0), 0);
+    ed_insert(&e, "int main(void) { return 0; }\n", 29);
+    CHECK(editor_update_highlighter(&e));
+    CHECK_EQ(e.dirty, 0);
+    CHECK_EQ(buffer_pending_edits(e.buf), 0);
+    CHECK(!editor_update_highlighter(&e));
     editor_close(&e);
 
     const char *path = "/tmp/wave_editor_reload_test.txt";

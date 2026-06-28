@@ -45,6 +45,15 @@ int main(void) {
     CHECK_EQ(existing[0].start_col, 2);
     CHECK_STR(existing[0].message, "diagnostic");
 
+    Diagnostic editor_diags[2] = {{0}};
+    Editor empty_editor = {0};
+    CHECK_EQ(diagnostics_for_editor(&empty_editor, editor_diags, 2, lsp, 2, 0), 0);
+    CHECK_EQ(diagnostics_for_editor(&empty_editor, editor_diags, 2, lsp, 2, 1), 2);
+    CHECK_EQ(editor_diags[0].start_row, 1);
+    CHECK_EQ(editor_diags[1].start_col, 4);
+    CHECK_EQ(diagnostics_for_editor(&empty_editor, editor_diags, 1, lsp, 2, 1), 1);
+    CHECK_EQ(diagnostics_for_editor(NULL, editor_diags, 2, lsp, 2, 0), 0);
+
     Editor e;
     editor_init(&e);
     e.buf = buffer_new();
