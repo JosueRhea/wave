@@ -31,6 +31,11 @@ void mac_window_drag(void *nswindow);
 void mac_window_titlebar_doubleclick(void *nswindow);
 void mac_window_titlebar_menu(void *nswindow);
 void mac_window_set_file(void *nswindow, const char *path);
+int mac_sidebar_context_menu(void *nswindow, const char *target_name,
+                             int is_dir, int has_target, int has_clipboard);
+int mac_open_panel(void *nswindow, int folders, char *out, size_t cap);
+int mac_confirm_delete(void *nswindow, const char *path);
+void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void));
 #else
 static void mac_set_blur(void *nswindow, int enable) { (void)nswindow; (void)enable; }
 static void mac_use_native_titlebar(void *nswindow, int enable) { (void)nswindow; (void)enable; }
@@ -39,6 +44,20 @@ static void mac_window_titlebar_doubleclick(void *nswindow) { (void)nswindow; }
 static void mac_window_titlebar_menu(void *nswindow) { (void)nswindow; }
 static void mac_window_set_file(void *nswindow, const char *path) { (void)nswindow; (void)path; }
 static void *glfwGetCocoaWindow(GLFWwindow *w) { (void)w; return 0; }
+static int mac_sidebar_context_menu(void *nswindow, const char *target_name,
+                                    int is_dir, int has_target, int has_clipboard) {
+    (void)nswindow; (void)target_name; (void)is_dir; (void)has_target; (void)has_clipboard;
+    return 0;
+}
+static int mac_open_panel(void *nswindow, int folders, char *out, size_t cap) {
+    (void)nswindow; (void)folders; (void)out; (void)cap; return 0;
+}
+static int mac_confirm_delete(void *nswindow, const char *path) {
+    (void)nswindow; (void)path; return 0;
+}
+static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void)) {
+    (void)open_file; (void)open_folder;
+}
 #endif
 #include <limits.h>
 #include <stdint.h>
@@ -123,6 +142,14 @@ typedef struct {
     int scrollbar_drag;
     float scrollbar_drag_grab_y;
     float scrollbar_drag_max;
+    char file_clipboard[4096];
+    int file_clipboard_cut;
+    int create_active;
+    int create_is_dir;
+    int create_row;
+    int create_depth;
+    char create_parent[4096];
+    char create_text[1024];
 
     /* cached layout from the last frame, for click hit-testing */
     LayoutState layout;
@@ -219,6 +246,202 @@ static int open_path_mode(const char *path, int preview) {
  * load it into a fresh tab (reusing an empty untitled scratch tab if that's all
  * there is). */
 static int open_path(const char *path) { return open_path_mode(path, 0); }
+
+static void app_menu_open_file(void);
+static void app_menu_open_folder(void);
+
+enum {
+    SIDEBAR_MENU_NONE = 0,
+    SIDEBAR_MENU_OPEN_FILE = 1,
+    SIDEBAR_MENU_OPEN_FOLDER = 2,
+    SIDEBAR_MENU_NEW_FILE = 3,
+    SIDEBAR_MENU_NEW_FOLDER = 4,
+    SIDEBAR_MENU_COPY = 5,
+    SIDEBAR_MENU_CUT = 6,
+    SIDEBAR_MENU_PASTE = 7,
+    SIDEBAR_MENU_DELETE = 8
+};
+
+static void open_context_path(const char *path) {
+    WsOpenContext opened = ws_open_context(path);
+    if (!opened.workspace) {
+        snprintf(g.info, sizeof g.info, "could not open %s", path ? path : "");
+        return;
+    }
+    if (g.ws) ws_free(g.ws);
+    g.ws = opened.workspace;
+    lsp_manager_set_root_path(&g.lsp, ws_root(g.ws));
+    workspace_watch_start();
+    if (opened.kind == WS_OPEN_FILE) open_path(opened.file);
+    snprintf(g.info, sizeof g.info, "%s", opened.kind == WS_OPEN_FILE ? "file opened" : "folder opened");
+}
+
+static void app_menu_open_file(void) {
+    char path[4096];
+    if (mac_open_panel(glfwGetCocoaWindow(g.win), 0, path, sizeof path))
+        open_context_path(path);
+}
+
+static void app_menu_open_folder(void) {
+    char path[4096];
+    if (mac_open_panel(glfwGetCocoaWindow(g.win), 1, path, sizeof path))
+        open_context_path(path);
+}
+
+static void parent_rel(const char *rel, char *out, size_t cap) {
+    snprintf(out, cap, "%s", rel ? rel : "");
+    char *slash = strrchr(out, '/');
+    if (slash) *slash = '\0';
+    else out[0] = '\0';
+}
+
+static void apply_file_effect(WsFileEffect effect) {
+    snprintf(g.info, sizeof g.info, "%s", effect.message);
+    if (overlay_active(&g.overlay) == OVERLAY_PALETTE) app_palette_refilter();
+}
+
+static size_t sidebar_display_rows(void) {
+    return ws_visible_count(g.ws) + (g.create_active ? 1u : 0u);
+}
+
+static void sidebar_create_cancel(void) {
+    g.create_active = 0;
+    g.create_text[0] = '\0';
+    g.create_parent[0] = '\0';
+}
+
+static void sidebar_create_start(const char *parent, int row, int depth,
+                                 int is_dir) {
+    g.create_active = 1;
+    g.create_is_dir = is_dir != 0;
+    g.create_row = row < 0 ? 0 : row;
+    g.create_depth = depth < 0 ? 0 : depth;
+    snprintf(g.create_parent, sizeof g.create_parent, "%s", parent ? parent : "");
+    g.create_text[0] = '\0';
+    overlay_close(&g.overlay);
+    command_close(&g.cmd);
+    popover_close(&g.pop);
+    modal_enter_normal(&g.modal);
+}
+
+static void sidebar_create_accept(void) {
+    if (!g.create_active) return;
+    if (!g.create_text[0]) {
+        sidebar_create_cancel();
+        return;
+    }
+    WsFileEffect effect = g.create_is_dir
+        ? ws_create_dir_in(g.ws, g.create_parent, g.create_text)
+        : ws_create_file_in(g.ws, g.create_parent, g.create_text);
+    sidebar_create_cancel();
+    apply_file_effect(effect);
+    if (effect.ok && !g.create_is_dir) open_path(effect.path);
+}
+
+static int sidebar_create_insert_char(unsigned int cp) {
+    if (!g.create_active || cp < 32 || cp > 126) return 0;
+    size_t n = strlen(g.create_text);
+    if (n + 1 >= sizeof g.create_text) return 1;
+    g.create_text[n] = (char)cp;
+    g.create_text[n + 1] = '\0';
+    return 1;
+}
+
+static int sidebar_create_key(int key) {
+    if (!g.create_active) return 0;
+    if (key == GLFW_KEY_ESCAPE) {
+        sidebar_create_cancel();
+        return 1;
+    }
+    if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
+        sidebar_create_accept();
+        return 1;
+    }
+    if (key == GLFW_KEY_BACKSPACE) {
+        size_t n = strlen(g.create_text);
+        if (n > 0) g.create_text[n - 1] = '\0';
+        return 1;
+    }
+    return 1;
+}
+
+static void sidebar_context_menu(GLFWwindow *w, LayoutClickTarget click) {
+    const WsEntry *entry = (click.kind == LAYOUT_CLICK_SIDEBAR)
+        ? ws_visible(g.ws, (size_t)click.row) : NULL;
+    int action = mac_sidebar_context_menu(
+        glfwGetCocoaWindow(w), entry ? entry->name : NULL,
+        entry ? entry->is_dir : 0, entry != NULL, g.file_clipboard[0] != '\0');
+    if (action == SIDEBAR_MENU_NONE) return;
+
+    char target_dir[4096] = "";
+    if (entry) {
+        if (entry->is_dir) snprintf(target_dir, sizeof target_dir, "%s", entry->rel);
+        else parent_rel(entry->rel, target_dir, sizeof target_dir);
+    }
+
+    if (action == SIDEBAR_MENU_OPEN_FILE) {
+        if (entry && !entry->is_dir) {
+            char *full = ws_fullpath(g.ws, entry->rel);
+            open_path(full);
+            free(full);
+        } else {
+            char path[4096];
+            if (mac_open_panel(glfwGetCocoaWindow(w), 0, path, sizeof path))
+                open_context_path(path);
+        }
+        return;
+    }
+    if (action == SIDEBAR_MENU_OPEN_FOLDER) {
+        if (entry && entry->is_dir) {
+            char *full = ws_fullpath(g.ws, entry->rel);
+            open_context_path(full);
+            free(full);
+        } else {
+            char path[4096];
+            if (mac_open_panel(glfwGetCocoaWindow(w), 1, path, sizeof path))
+                open_context_path(path);
+        }
+        return;
+    }
+    if (action == SIDEBAR_MENU_NEW_FILE) {
+        int row = entry ? click.row + 1 : (int)ws_visible_count(g.ws);
+        int depth = entry ? (entry->is_dir ? entry->depth + 1 : entry->depth) : 0;
+        if (entry && entry->is_dir && entry->collapsed) ws_visible_toggle(g.ws, (size_t)click.row);
+        sidebar_create_start(target_dir, row, depth, 0);
+        return;
+    }
+    if (action == SIDEBAR_MENU_NEW_FOLDER) {
+        int row = entry ? click.row + 1 : (int)ws_visible_count(g.ws);
+        int depth = entry ? (entry->is_dir ? entry->depth + 1 : entry->depth) : 0;
+        if (entry && entry->is_dir && entry->collapsed) ws_visible_toggle(g.ws, (size_t)click.row);
+        sidebar_create_start(target_dir, row, depth, 1);
+        return;
+    }
+    if ((action == SIDEBAR_MENU_COPY || action == SIDEBAR_MENU_CUT) && entry) {
+        char *full = ws_fullpath(g.ws, entry->rel);
+        snprintf(g.file_clipboard, sizeof g.file_clipboard, "%s", full);
+        g.file_clipboard_cut = action == SIDEBAR_MENU_CUT;
+        snprintf(g.info, sizeof g.info, "%s", g.file_clipboard_cut ? "cut" : "copied");
+        free(full);
+        return;
+    }
+    if (action == SIDEBAR_MENU_PASTE) {
+        WsFileEffect effect = ws_paste_path_into(
+            g.ws, g.file_clipboard, target_dir, g.file_clipboard_cut);
+        if (effect.ok && g.file_clipboard_cut) {
+            g.file_clipboard[0] = '\0';
+            g.file_clipboard_cut = 0;
+        }
+        apply_file_effect(effect);
+        return;
+    }
+    if (action == SIDEBAR_MENU_DELETE && entry) {
+        char *full = ws_fullpath(g.ws, entry->rel);
+        int confirm = mac_confirm_delete(glfwGetCocoaWindow(w), full);
+        free(full);
+        if (confirm) apply_file_effect(ws_delete_path(g.ws, entry->rel));
+    }
+}
 
 static void app_palette_refilter(void) {
     overlay_refilter_palette(&g.overlay, g.ws);
@@ -355,6 +578,7 @@ static void ui_zoom(int dir) {
 static void on_char(GLFWwindow *w, unsigned int cp) {
     (void)w;
     g.last_activity = glfwGetTime();
+    if (sidebar_create_insert_char(cp)) return;
     InputTextPlan plan = input_text_plan(
         (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         overlay_active(&g.overlay) != OVERLAY_NONE,
@@ -386,6 +610,7 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     g.mods = mods;
     if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
     g.last_activity = glfwGetTime();
+    if (sidebar_create_key(key)) return;
     Editor *e = cur();
 
     WaveShortcut shortcut = input_shortcut(
@@ -531,7 +756,7 @@ static void on_scroll(GLFWwindow *w, double dx, double dy) {
         return;
     }
     if (target.kind == LAYOUT_SCROLL_SIDEBAR) {
-        float max_scroll = layout_sidebar_max_scroll(&g.layout, ws_visible_count(g.ws));
+        float max_scroll = layout_sidebar_max_scroll(&g.layout, sidebar_display_rows());
         g.side_scroll = layout_scroll_offset_clamped(g.side_scroll, target.pixels,
                                                      max_scroll);
     } else {
@@ -557,7 +782,7 @@ static LayoutScrollbar current_sidebar_scrollbar(float *max_scroll) {
     if (max_scroll) *max_scroll = 0.0f;
     if (!g.ws || !g.config.show_sidebar || g.layout.line_h <= 0.0f) return (LayoutScrollbar){0};
     float bottom = (float)g.layout.fb_h - layout_status_bar_h(&g.layout);
-    float content_h = (float)ws_visible_count(g.ws) * g.layout.line_h + g.layout.side_pad;
+    float content_h = (float)sidebar_display_rows() * g.layout.line_h + g.layout.side_pad;
     float viewport_h = bottom - g.layout.header_h;
     if (max_scroll) *max_scroll = layout_max_scroll(content_h, viewport_h);
     return layout_scrollbar(g.layout.side_px - 5.6f, g.layout.header_h + 4.0f,
@@ -674,6 +899,12 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     click = layout_click_target(
         &g.layout, x, y, g.side_scroll, button == GLFW_MOUSE_BUTTON_RIGHT,
         g.ws != NULL, g.config.show_sidebar);
+    if (button == GLFW_MOUSE_BUTTON_RIGHT &&
+        layout_in_sidebar(&g.layout, x, g.ws != NULL, g.config.show_sidebar)) {
+        sidebar_context_menu(w, click);
+        popover_close(&g.pop);
+        return;
+    }
     plan = input_mouse_plan(
         click, button == GLFW_MOUSE_BUTTON_LEFT, button == GLFW_MOUSE_BUTTON_RIGHT,
         1, 0, g.pop.active,
@@ -790,9 +1021,17 @@ static void draw_frame(int fb_w, int fb_h) {
     if (dt > 0.08) dt = 0.08;
 
     int side_hot = 0;
+    int side_hover_row = -1;
     if (frame.sidebar) {
         LayoutScrollbar side_bar = current_sidebar_scrollbar(NULL);
         side_hot = layout_scrollbar_hit(side_bar, cursor_x, cursor_y, 6.0f);
+        if (layout_in_sidebar(&g.layout, cursor_x, g.ws != NULL,
+                              g.config.show_sidebar) &&
+            !layout_in_titlebar(&g.layout, cursor_y) && !side_hot) {
+            side_hover_row = layout_sidebar_row(&g.layout, cursor_y, g.side_scroll);
+            if (side_hover_row < 0 || (size_t)side_hover_row >= sidebar_display_rows())
+                side_hover_row = -1;
+        }
     }
     if (g.scrollbar_drag == SCROLLBAR_DRAG_SIDEBAR) side_hot = 1;
     g.side_scrollbar_hover = hover_step(g.side_scrollbar_hover, side_hot, dt);
@@ -803,11 +1042,13 @@ static void draw_frame(int fb_w, int fb_h) {
         draw_sidebar_panel(g.ws, editor_path(e), g.config.side_cells, g.side_scroll,
                            fb_h, font, r, adv, line_h, ascent, side_px,
                            header_h, g.layout.side_pad, g.config.opacity,
-                           g.side_scrollbar_hover);
+                           g.side_scrollbar_hover, g.config.radius,
+                           g.create_active, g.create_row, g.create_depth,
+                           g.create_is_dir, g.create_text, side_hover_row);
     if (frame.tabs)
         g.layout.tab_w = draw_tabs_panel(&g.tabs, fb_w, font, r, side_px, adv,
                                          ascent, tab_h, header_h,
-                                         g.config.opacity);
+                                         g.config.opacity, g.config.radius);
     if (frame.header)
         draw_header_panel(g.ws ? ws_root(g.ws) : NULL, editor_path(e),
                           fb_w, font, r, adv, ascent, header_h, g.fb_scale,
@@ -827,9 +1068,11 @@ static void draw_frame(int fb_w, int fb_h) {
          * state too — the primary ways to open a file here — so draw whichever
          * is active on top before bailing. */
         if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
-            draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h, ascent);
+            draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h,
+                               ascent, top_pad, g.config.radius);
         else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
-            draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent);
+            draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent,
+                              g.config.radius);
         renderer_flush(r);
         return;
     }
@@ -865,7 +1108,7 @@ static void draw_frame(int fb_w, int fb_h) {
     g.editor_scrollbar_hover = hover_step(g.editor_scrollbar_hover, editor_hot, dt);
     editor_scrollbar = layout_scrollbar_expand(editor_scrollbar,
                                                g.editor_scrollbar_hover, 6.0f);
-    draw_scrollbar(r, editor_scrollbar, g.config.opacity);
+    draw_scrollbar(r, editor_scrollbar, g.config.opacity, g.config.radius);
 
     /* status / command line */
     renderer_rect(r, 0, (float)fb_h - bar_h, (float)fb_w, bar_h, 0.07f, 0.08f, 0.10f, g.config.opacity);
@@ -886,13 +1129,15 @@ static void draw_frame(int fb_w, int fb_h) {
                                                text.cursor.xcol, editor_scroll_y(e));
         draw_popover_panel(&g.pop, fb_w, fb_h, font, r, adv, line_h, ascent,
                            top_pad, bar_h, anchor.x, anchor.y,
-                           g.layout.side_px, g.fb_scale);
+                           g.layout.side_px, g.fb_scale, g.config.radius);
     }
 
     if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
-        draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h, ascent);
+        draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h,
+                           ascent, top_pad, g.config.radius);
     else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
-        draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent);
+        draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent,
+                          g.config.radius);
 
     renderer_flush(r);
 }
@@ -928,6 +1173,7 @@ int main(int argc, char **argv) {
     GLFWwindow *win = glfwCreateWindow(1100, 720, "Wave", NULL, NULL);
     if (!win) { fprintf(stderr, "window creation failed\n"); glfwTerminate(); return 1; }
     g.win = win;
+    mac_install_app_menu(app_menu_open_file, app_menu_open_folder);
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 

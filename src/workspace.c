@@ -2,10 +2,13 @@
 #include "workspace.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 struct Workspace {
     char *root;
@@ -300,4 +303,216 @@ char *ws_fullpath(const Workspace *w, const char *rel) {
     char *p = malloc(n);
     snprintf(p, n, "%s/%s", w->root, rel);
     return p;
+}
+
+static WsFileEffect ws_file_error(const char *prefix, const char *path) {
+    WsFileEffect effect = {0};
+    snprintf(effect.path, sizeof effect.path, "%s", path ? path : "");
+    snprintf(effect.message, sizeof effect.message, "%s: %s",
+             prefix ? prefix : "file action failed", strerror(errno));
+    return effect;
+}
+
+static WsFileEffect ws_file_ok(const char *message, const char *path) {
+    WsFileEffect effect = {0};
+    effect.ok = 1;
+    snprintf(effect.path, sizeof effect.path, "%s", path ? path : "");
+    snprintf(effect.message, sizeof effect.message, "%s", message ? message : "");
+    return effect;
+}
+
+static int invalid_name(const char *name) {
+    return !name || !name[0] || name[0] == '/' || strstr(name, "/../") ||
+           !strcmp(name, ".") || !strcmp(name, "..") ||
+           !strncmp(name, "../", 3) || strstr(name, "/..") ||
+           strstr(name, "//");
+}
+
+static void join_under_root(char *out, size_t cap, const Workspace *w,
+                            const char *dir_rel, const char *name) {
+    if (dir_rel && dir_rel[0])
+        snprintf(out, cap, "%s/%s/%s", w->root, dir_rel, name ? name : "");
+    else
+        snprintf(out, cap, "%s/%s", w->root, name ? name : "");
+}
+
+static int mkdirs_for_file(char *path) {
+    for (char *p = path + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+            *p = '/';
+            return -1;
+        }
+        *p = '/';
+    }
+    return 0;
+}
+
+WsFileEffect ws_create_file_in(Workspace *w, const char *dir_rel,
+                               const char *name) {
+    if (!w || invalid_name(name)) {
+        errno = EINVAL;
+        return ws_file_error("invalid file name", name);
+    }
+    char path[4096];
+    join_under_root(path, sizeof path, w, dir_rel, name);
+    char parented[4096];
+    snprintf(parented, sizeof parented, "%s", path);
+    if (mkdirs_for_file(parented) != 0)
+        return ws_file_error("could not create parent folder", path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) return ws_file_error("could not create file", path);
+    close(fd);
+    ws_reload(w);
+    return ws_file_ok("file created", path);
+}
+
+WsFileEffect ws_create_dir_in(Workspace *w, const char *dir_rel,
+                              const char *name) {
+    if (!w || invalid_name(name)) {
+        errno = EINVAL;
+        return ws_file_error("invalid folder name", name);
+    }
+    char path[4096];
+    join_under_root(path, sizeof path, w, dir_rel, name);
+    if (mkdirs_for_file(path) != 0)
+        return ws_file_error("could not create parent folder", path);
+    if (mkdir(path, 0755) != 0)
+        return ws_file_error("could not create folder", path);
+    ws_reload(w);
+    return ws_file_ok("folder created", path);
+}
+
+static int copy_file(const char *src, const char *dst) {
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    char buf[32768];
+    for (;;) {
+        ssize_t n = read(in, buf, sizeof buf);
+        if (n < 0) {
+            close(in);
+            close(out);
+            return -1;
+        }
+        if (n == 0) break;
+        char *p = buf;
+        while (n > 0) {
+            ssize_t w = write(out, p, (size_t)n);
+            if (w <= 0) {
+                close(in);
+                close(out);
+                return -1;
+            }
+            p += w;
+            n -= w;
+        }
+    }
+    close(in);
+    close(out);
+    return 0;
+}
+
+static int copy_dir(const char *src, const char *dst) {
+    if (mkdir(dst, 0755) != 0) return -1;
+    DIR *d = opendir(src);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char child_src[4096], child_dst[4096];
+        snprintf(child_src, sizeof child_src, "%s/%s", src, de->d_name);
+        snprintf(child_dst, sizeof child_dst, "%s/%s", dst, de->d_name);
+        struct stat st;
+        if (stat(child_src, &st) != 0) {
+            closedir(d);
+            return -1;
+        }
+        int ok = S_ISDIR(st.st_mode) ? copy_dir(child_src, child_dst)
+                                     : copy_file(child_src, child_dst);
+        if (ok != 0) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
+static int remove_tree(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) return unlink(path);
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        char child[4096];
+        snprintf(child, sizeof child, "%s/%s", path, de->d_name);
+        if (remove_tree(child) != 0) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    return rmdir(path);
+}
+
+WsFileEffect ws_paste_path_into(Workspace *w, const char *source_abs,
+                                const char *dir_rel, int move) {
+    if (!w || !source_abs || !source_abs[0]) {
+        errno = EINVAL;
+        return ws_file_error("nothing to paste", source_abs);
+    }
+    const char *base = strrchr(source_abs, '/');
+    base = base ? base + 1 : source_abs;
+    if (invalid_name(base)) {
+        errno = EINVAL;
+        return ws_file_error("invalid source name", source_abs);
+    }
+    char dst[4096];
+    join_under_root(dst, sizeof dst, w, dir_rel, base);
+    if (!strcmp(source_abs, dst)) {
+        errno = EEXIST;
+        return ws_file_error("already in this folder", dst);
+    }
+    struct stat st;
+    if (stat(source_abs, &st) != 0)
+        return ws_file_error("source unavailable", source_abs);
+    if (move && rename(source_abs, dst) == 0) {
+        ws_reload(w);
+        return ws_file_ok("moved", dst);
+    }
+    if (move && errno != EXDEV)
+        return ws_file_error("could not move", dst);
+    int ok = S_ISDIR(st.st_mode) ? copy_dir(source_abs, dst)
+                                 : copy_file(source_abs, dst);
+    if (ok != 0) return ws_file_error(move ? "could not move" : "could not copy", dst);
+    if (move && remove_tree(source_abs) != 0)
+        return ws_file_error("copied, but could not remove original", source_abs);
+    ws_reload(w);
+    return ws_file_ok(move ? "moved" : "copied", dst);
+}
+
+WsFileEffect ws_delete_path(Workspace *w, const char *rel) {
+    if (!w || !rel || !rel[0]) {
+        errno = EINVAL;
+        return ws_file_error("nothing to delete", rel);
+    }
+    char *path = ws_fullpath(w, rel);
+    WsFileEffect effect;
+    if (remove_tree(path) == 0) {
+        ws_reload(w);
+        effect = ws_file_ok("deleted", path);
+    } else {
+        effect = ws_file_error("could not delete", path);
+    }
+    free(path);
+    return effect;
 }

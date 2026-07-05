@@ -79,6 +79,10 @@ CommandAction command_parse(const char *text) {
         float v = (float)atof(text + 7);
         return (CommandAction){COMMAND_SET_OPACITY, v};
     }
+    if (!strncmp(text, "radius", 6)) {
+        float v = (float)atof(text + 6);
+        return (CommandAction){COMMAND_SET_RADIUS, v};
+    }
     if (!strcmp(text, "blur"))
         return (CommandAction){COMMAND_TOGGLE_BLUR, 0};
     if (!strcmp(text, "titlebar"))
@@ -122,6 +126,13 @@ CommandEffect command_effect(CommandAction action, WaveConfig *config) {
         }
         effect.info = COMMAND_INFO_OPACITY;
         break;
+    case COMMAND_SET_RADIUS:
+        if (config && action.value >= 0.0f && action.value <= 24.0f) {
+            config->radius = action.value;
+            effect.save_config = 1;
+        }
+        effect.info = COMMAND_INFO_RADIUS;
+        break;
     case COMMAND_TOGGLE_BLUR:
         if (config) config->blur = !config->blur;
         effect.save_config = 1;
@@ -150,6 +161,9 @@ int command_info_text(CommandInfoKind info, const WaveConfig *config,
         return 1;
     case COMMAND_INFO_OPACITY:
         snprintf(out, (size_t)cap, "opacity %.2f", config ? config->opacity : 0.0f);
+        return 1;
+    case COMMAND_INFO_RADIUS:
+        snprintf(out, (size_t)cap, "radius %.1f", config ? config->radius : 0.0f);
         return 1;
     case COMMAND_INFO_BLUR:
         snprintf(out, (size_t)cap, "blur %s", (config && config->blur) ? "on" : "off");

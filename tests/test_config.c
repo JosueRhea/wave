@@ -10,6 +10,7 @@ int main(void) {
     CHECK_EQ(cfg.side_cells, 26);
     CHECK_EQ(cfg.wrap, 1);
     CHECK_EQ((int)(cfg.ui_scale * 100.0f + 0.5f), 100);
+    CHECK_EQ((int)(cfg.radius * 10.0f + 0.5f), 70);
 
     CHECK_EQ(wave_config_zoom(&cfg, +1), 110);
     char info[32];

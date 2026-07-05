@@ -13,6 +13,7 @@ void wave_config_defaults(WaveConfig *cfg) {
     cfg->base_pt = 15.0f;
     cfg->ui_scale = 1.0f;
     cfg->opacity = 1.0f;
+    cfg->radius = 7.0f;
     cfg->blur = 0;
     cfg->native_titlebar = 1;
 }
@@ -42,6 +43,7 @@ int wave_config_save(const WaveConfig *cfg) {
     fprintf(f, "sidebar=%d\n", cfg->show_sidebar);
     fprintf(f, "side_cells=%d\n", cfg->side_cells);
     fprintf(f, "opacity=%.3f\n", cfg->opacity);
+    fprintf(f, "radius=%.1f\n", cfg->radius);
     fprintf(f, "blur=%d\n", cfg->blur);
     fprintf(f, "titlebar=%d\n", cfg->native_titlebar);
     fclose(f);
@@ -110,6 +112,9 @@ void wave_config_load(WaveConfig *cfg) {
         } else if (!strcmp(key, "opacity")) {
             float v = (float)atof(val);
             if (v >= 0.2f && v <= 1.0f) cfg->opacity = v;
+        } else if (!strcmp(key, "radius")) {
+            float v = (float)atof(val);
+            if (v >= 0.0f && v <= 24.0f) cfg->radius = v;
         } else if (!strcmp(key, "blur")) cfg->blur = atoi(val) != 0;
         else if (!strcmp(key, "titlebar")) cfg->native_titlebar = atoi(val) != 0;
     }

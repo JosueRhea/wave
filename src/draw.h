@@ -20,11 +20,14 @@ void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
                         float side_scroll, int fb_h, Font *font, Renderer *r,
                         float adv, float line_h, float ascent, float side_px,
                         float top_y, float side_pad, float opacity,
-                        float scrollbar_hover);
-void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity);
+                        float scrollbar_hover, float radius,
+                        int create_active, int create_row, int create_depth,
+                        int create_is_dir, const char *create_text,
+                        int hover_row);
+void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity, float radius);
 float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,
                       float side_px, float adv, float ascent, float tab_h,
-                      float top_y, float opacity);
+                      float top_y, float opacity, float radius);
 void draw_header_panel(const char *root, const char *path, int fb_w,
                        Font *font, Renderer *r, float adv, float ascent,
                        float header_h, float fb_scale, float opacity);
@@ -37,12 +40,14 @@ void draw_editor_text_panel(Editor *e, const TextFrameView *text,
                             float line_h, float adv, float ascent);
 void draw_palette_panel(OverlayState *overlay, Workspace *ws, int fb_w,
                         Font *font, Renderer *r, float adv, float line_h,
-                        float ascent);
+                        float ascent, float top_pad, float radius);
 void draw_search_panel(OverlayState *overlay, int fb_w, Font *font,
-                       Renderer *r, float adv, float line_h, float ascent);
+                       Renderer *r, float adv, float line_h, float ascent,
+                       float radius);
 void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
                         Renderer *r, float adv, float line_h, float ascent,
                         float top_pad, float bar_h, float anchor_x,
-                        float cur_top, float side_px, float fb_scale);
+                        float cur_top, float side_px, float fb_scale,
+                        float radius);
 
 #endif

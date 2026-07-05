@@ -183,6 +183,7 @@ scale=1.000    # UI zoom factor (Cmd +/-)
 sidebar=1      # sidebar visible
 side_cells=26  # sidebar width in character cells
 opacity=1.000  # window opacity 0.2..1.0 (:opacity 0.85)
+radius=7.0     # UI corner radius 0..24 px (:radius 10)
 blur=0         # macOS background blur behind the window (:blur)
 titlebar=1     # macOS native traffic lights floating over our header (:titlebar)
 ```

@@ -10,6 +10,7 @@ typedef struct {
     float base_pt;
     float ui_scale;
     float opacity;
+    float radius;
     int blur;
     int native_titlebar;
 } WaveConfig;

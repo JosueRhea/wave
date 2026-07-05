@@ -58,6 +58,12 @@ typedef struct {
     char message[256];
 } WsReloadEffect;
 
+typedef struct {
+    int ok;
+    char path[4096];
+    char message[256];
+} WsFileEffect;
+
 /* Open `root` and scan it. Returns NULL if it isn't a readable directory. */
 Workspace *ws_open(const char *root);
 void ws_free(Workspace *w);
@@ -88,5 +94,13 @@ WsClickAction ws_click_visible_timed(Workspace *w, WsSidebarClickState *state,
 
 /* Join the root with a relative path. Caller frees. */
 char *ws_fullpath(const Workspace *w, const char *rel);
+
+WsFileEffect ws_create_file_in(Workspace *w, const char *dir_rel,
+                               const char *name);
+WsFileEffect ws_create_dir_in(Workspace *w, const char *dir_rel,
+                              const char *name);
+WsFileEffect ws_paste_path_into(Workspace *w, const char *source_abs,
+                                const char *dir_rel, int move);
+WsFileEffect ws_delete_path(Workspace *w, const char *rel);
 
 #endif /* WAVE_WORKSPACE_H */

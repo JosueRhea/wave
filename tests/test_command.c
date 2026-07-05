@@ -42,6 +42,9 @@ int main(void) {
     CommandAction opacity = command_parse("opacity 0.75");
     CHECK_EQ(opacity.kind, COMMAND_SET_OPACITY);
     CHECK(opacity.value > 0.74f && opacity.value < 0.76f);
+    CommandAction radius = command_parse("radius 12");
+    CHECK_EQ(radius.kind, COMMAND_SET_RADIUS);
+    CHECK(radius.value > 11.9f && radius.value < 12.1f);
     CHECK_EQ(command_parse("not-a-command").kind, COMMAND_NONE);
 
     WaveConfig cfg;
@@ -82,6 +85,16 @@ int main(void) {
     CHECK_EQ(eff.info, COMMAND_INFO_OPACITY);
     CHECK(cfg.opacity > 0.74f && cfg.opacity < 0.76f);
 
+    eff = command_effect((CommandAction){COMMAND_SET_RADIUS, 12.0f}, &cfg);
+    CHECK(eff.save_config);
+    CHECK_EQ(eff.info, COMMAND_INFO_RADIUS);
+    CHECK(cfg.radius > 11.9f && cfg.radius < 12.1f);
+
+    eff = command_effect((CommandAction){COMMAND_SET_RADIUS, 30.0f}, &cfg);
+    CHECK(!eff.save_config);
+    CHECK_EQ(eff.info, COMMAND_INFO_RADIUS);
+    CHECK(cfg.radius > 11.9f && cfg.radius < 12.1f);
+
     int blur = cfg.blur;
     eff = command_effect((CommandAction){COMMAND_TOGGLE_BLUR, 0}, &cfg);
     CHECK_EQ(cfg.blur, !blur);
@@ -108,6 +121,8 @@ int main(void) {
     CHECK_STR(info, "config saved: /tmp/wave/config");
     CHECK(command_info_text(COMMAND_INFO_OPACITY, &cfg, NULL, info, sizeof info));
     CHECK_STR(info, "opacity 0.75");
+    CHECK(command_info_text(COMMAND_INFO_RADIUS, &cfg, NULL, info, sizeof info));
+    CHECK_STR(info, "radius 12.0");
     cfg.blur = 1;
     CHECK(command_info_text(COMMAND_INFO_BLUR, &cfg, NULL, info, sizeof info));
     CHECK_STR(info, "blur on");

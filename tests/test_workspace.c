@@ -40,6 +40,12 @@ static int row_of(Workspace *w, const char *name) {
     return -1;
 }
 
+static int entry_of(Workspace *w, const char *rel) {
+    for (size_t i = 0; i < ws_count(w); i++)
+        if (!strcmp(ws_entry(w, i)->rel, rel)) return (int)i;
+    return -1;
+}
+
 int main(void) {
     char *root = make_tree();
     Workspace *w = ws_open(root);
@@ -151,6 +157,44 @@ int main(void) {
     CHECK(reload.ok);
     CHECK(reload.refilter_palette);
     CHECK_STR(reload.message, "workspace updated");
+
+    WsFileEffect file_effect = ws_create_file_in(w, "b", "nested/created.txt");
+    CHECK(file_effect.ok);
+    CHECK_STR(file_effect.message, "file created");
+    snprintf(p, sizeof p, "%s/b/nested/created.txt", root);
+    CHECK(access(p, F_OK) == 0);
+    CHECK(entry_of(w, "b/nested/created.txt") >= 0);
+
+    file_effect = ws_create_dir_in(w, "b", "folder/newchild");
+    CHECK(file_effect.ok);
+    CHECK_STR(file_effect.message, "folder created");
+    snprintf(p, sizeof p, "%s/b/folder/newchild", root);
+    CHECK(access(p, F_OK) == 0);
+    CHECK(entry_of(w, "b/folder") >= 0);
+    CHECK(entry_of(w, "b/folder/newchild") >= 0);
+
+    char source[512];
+    snprintf(source, sizeof source, "%s/b/b1.txt", root);
+    file_effect = ws_paste_path_into(w, source, "", 0);
+    CHECK(file_effect.ok);
+    CHECK_STR(file_effect.message, "copied");
+    snprintf(p, sizeof p, "%s/b1.txt", root);
+    CHECK(access(p, F_OK) == 0);
+    CHECK(entry_of(w, "b1.txt") >= 0);
+
+    file_effect = ws_paste_path_into(w, p, "a", 1);
+    CHECK(file_effect.ok);
+    CHECK_STR(file_effect.message, "moved");
+    CHECK(access(p, F_OK) != 0);
+    snprintf(p, sizeof p, "%s/a/b1.txt", root);
+    CHECK(access(p, F_OK) == 0);
+    CHECK(entry_of(w, "a/b1.txt") >= 0);
+
+    file_effect = ws_delete_path(w, "a/b1.txt");
+    CHECK(file_effect.ok);
+    CHECK_STR(file_effect.message, "deleted");
+    CHECK(access(p, F_OK) != 0);
+    CHECK_EQ(entry_of(w, "a/b1.txt"), -1);
 
     ws_free(w);
 
