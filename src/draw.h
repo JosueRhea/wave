@@ -29,7 +29,8 @@ void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
 void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity, float radius);
 float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,
                       float side_px, float adv, float ascent, float tab_h,
-                      float top_y, float opacity, float radius);
+                      float top_y, float opacity, float radius,
+                      float tab_scroll);
 void draw_header_panel(const char *root, const char *path, int fb_w,
                        Font *font, Renderer *r, float adv, float ascent,
                        float header_h, float fb_scale, float opacity);

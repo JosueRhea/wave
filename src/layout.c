@@ -26,7 +26,7 @@ LayoutFrameMetrics layout_frame_metrics(LayoutState *l, float line_h, float adv,
     m.gutter = adv * 5.0f;
     m.pad = adv;
     m.text_x = m.side_px + m.gutter + m.pad;
-    m.tab_h = line_h + 6.0f;
+    m.tab_h = line_h + 10.0f;
     m.header_h = native_titlebar ? (float)(int)(28.0f * fb_scale + 0.5f) : 0.0f;
     m.tab_strip = (tab_count > 0) ? m.tab_h : 0.0f;
     m.top_pad = m.header_h + m.tab_strip;
@@ -48,13 +48,23 @@ int layout_sidebar_row(const LayoutState *l, float y, float scroll) {
 
 int layout_tab_index(const LayoutState *l, float x) {
     if (!l || l->tab_w <= 0 || x < l->side_px) return -1;
-    return (int)((x - l->side_px) / l->tab_w);
+    float rel = x - l->side_px + l->tab_scroll;
+    if (rel < 0.0f) return -1;
+    int index = (int)(rel / l->tab_w);
+    float local = rel - (float)index * l->tab_w;
+    float tab_body_w = l->tab_w - l->tab_gap;
+    float tab_x = l->side_px + (float)index * l->tab_w - l->tab_scroll;
+    if (tab_x < l->side_px) return -1;
+    if (local < 0.0f || local > tab_body_w) return -1;
+    return index;
 }
 
 int layout_tab_close_hit(const LayoutState *l, int index, float x) {
     if (!l || index < 0 || l->tab_w <= 0) return 0;
-    float tx = l->side_px + (float)index * l->tab_w;
-    return x > tx + l->tab_w - l->adv * 1.8f;
+    float tab_body_w = l->tab_w - l->tab_gap;
+    float tx = l->side_px + (float)index * l->tab_w - l->tab_scroll;
+    return x >= tx && x <= tx + tab_body_w &&
+           x > tx + tab_body_w - l->adv * 1.8f;
 }
 
 int layout_drag_should_start(float start_x, float start_y, float x, float y, float scale) {
@@ -264,8 +274,9 @@ LayoutClickTarget layout_click_target(const LayoutState *l, float x, float y,
     }
 
     if (layout_in_tab_strip(l, x, y)) {
-        out.kind = LAYOUT_CLICK_TAB;
         out.tab_index = layout_tab_index(l, x);
+        if (out.tab_index < 0) return out;
+        out.kind = LAYOUT_CLICK_TAB;
         out.tab_close = layout_tab_close_hit(l, out.tab_index, x);
         return out;
     }

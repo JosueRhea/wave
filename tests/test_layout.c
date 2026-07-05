@@ -7,6 +7,7 @@ int main(void) {
     layout_set(&l, 20.0f, 10.0f, 15.0f, 200.0f, 260.0f, 50.0f,
                52.0f, 28.0f, 720);
     l.tab_w = 180.0f;
+    l.tab_gap = 8.0f;
 
     CHECK_EQ((int)layout_status_bar_h(&l), 26);
     CHECK_EQ(layout_sidebar_row(&l, 36.0f, 0.0f), 0);
@@ -16,6 +17,10 @@ int main(void) {
     CHECK_EQ(layout_tab_index(&l, 199.0f), -1);
     CHECK_EQ(layout_tab_index(&l, 200.0f), 0);
     CHECK_EQ(layout_tab_index(&l, 381.0f), 1);
+    CHECK_EQ(layout_tab_index(&l, 375.0f), -1);
+    l.tab_scroll = 180.0f;
+    CHECK_EQ(layout_tab_index(&l, 200.0f), 1);
+    l.tab_scroll = 0.0f;
     CHECK(!layout_tab_close_hit(&l, 0, 250.0f));
     CHECK(layout_tab_close_hit(&l, 0, 365.0f));
     CHECK(!layout_drag_should_start(10.0f, 10.0f, 12.0f, 12.0f, 1.0f));
@@ -130,13 +135,13 @@ int main(void) {
     CHECK_EQ((int)m.gutter, 50);
     CHECK_EQ((int)m.pad, 10);
     CHECK_EQ((int)m.text_x, 300);
-    CHECK_EQ((int)m.tab_h, 26);
+    CHECK_EQ((int)m.tab_h, 30);
     CHECK_EQ((int)m.header_h, 56);
-    CHECK_EQ((int)m.tab_strip, 26);
-    CHECK_EQ((int)m.top_pad, 82);
+    CHECK_EQ((int)m.tab_strip, 30);
+    CHECK_EQ((int)m.top_pad, 86);
     CHECK_EQ((int)l.side_px, 240);
     CHECK_EQ((int)l.text_x, 300);
-    CHECK_EQ((int)l.top_pad, 82);
+    CHECK_EQ((int)l.top_pad, 86);
 
     m = layout_frame_metrics(&l, 20.0f, 10.0f, 15.0f, 720,
                              1, 0, 24, 0, 2.0f, 0);

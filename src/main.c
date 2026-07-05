@@ -164,6 +164,8 @@ typedef struct {
     int persist;          /* 1 = read/write the config file (off in snapshot mode) */
     float side_scrollbar_hover;
     float editor_scrollbar_hover;
+    float tab_scroll;
+    int tab_reveal_active;
     double last_frame_time;
     int scrollbar_drag;
     float scrollbar_drag_grab_y;
@@ -245,6 +247,7 @@ static const char *terminal_cwd(void) {
 static Terminal *open_terminal_tab(const char *label, const char *const argv[]) {
     if (!argv || !argv[0]) return NULL;
     Terminal *t = tabs_new_terminal(&g.tabs, label, terminal_cwd(), argv);
+    g.tab_reveal_active = 1;
     modal_enter_normal(&g.modal);
     return t;
 }
@@ -356,13 +359,59 @@ static void center_cursor(Editor *e) {
 
 static void close_tab(int i) {
     TabActionEffect effect = tabs_close_with_effect(&g.tabs, i);
+    g.tab_reveal_active = 1;
     if (effect.close_window) glfwSetWindowShouldClose(g.win, GLFW_TRUE);
     if (effect.reset_mode) modal_enter_normal(&g.modal);
 }
 
 static void tab_goto(int delta) {
     TabActionEffect effect = tabs_goto_with_effect(&g.tabs, delta);
+    g.tab_reveal_active = 1;
     if (effect.reset_mode) modal_enter_normal(&g.modal);
+}
+
+static float tab_pitch_for_adv(float adv) {
+    return adv * 18.0f;
+}
+
+static float tab_gap_for_adv(float adv) {
+    float gap = adv * 0.70f;
+    return gap < 8.0f ? 8.0f : gap;
+}
+
+static float tab_max_scroll(int fb_w) {
+    float viewport = (float)fb_w - g.layout.side_px;
+    if (viewport < 0.0f) viewport = 0.0f;
+    return layout_max_scroll((float)tabs_count(&g.tabs) * g.layout.tab_w,
+                             viewport);
+}
+
+static void tab_clamp_scroll(int fb_w) {
+    float max_scroll = tab_max_scroll(fb_w);
+    if (g.tab_scroll < 0.0f) g.tab_scroll = 0.0f;
+    if (g.tab_scroll > max_scroll) g.tab_scroll = max_scroll;
+    g.layout.tab_scroll = g.tab_scroll;
+}
+
+static void tab_scroll_by(float pixels, int fb_w) {
+    g.tab_scroll = layout_scroll_offset_clamped(g.tab_scroll, pixels,
+                                                tab_max_scroll(fb_w));
+    g.layout.tab_scroll = g.tab_scroll;
+}
+
+static void tab_ensure_active_visible(int fb_w) {
+    int active = tabs_active_index(&g.tabs);
+    if (active < 0 || g.layout.tab_w <= 0.0f) return;
+    float viewport = (float)fb_w - g.layout.side_px;
+    if (viewport <= 0.0f) return;
+    float left = (float)active * g.layout.tab_w;
+    float right = left + g.layout.tab_w - g.layout.tab_gap;
+    float pad = g.layout.adv;
+    if (left < g.tab_scroll + pad)
+        g.tab_scroll = left - pad;
+    else if (right > g.tab_scroll + viewport - pad)
+        g.tab_scroll = right - viewport + pad;
+    tab_clamp_scroll(fb_w);
 }
 
 static void app_menu_next_tab(void) { tab_goto(+1); }
@@ -403,6 +452,7 @@ static int open_path_mode(const char *path, int preview) {
         return -1;
     }
     if (result.loaded_file) lsp_manager_open_editor(&g.lsp, result.editor);
+    g.tab_reveal_active = 1;
     modal_enter_normal(&g.modal);
     return 0;
 }
@@ -1245,16 +1295,31 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
 }
 
 static void on_scroll(GLFWwindow *w, double dx, double dy) {
-    (void)w; (void)dx;
+    (void)w;
     double mx, my;
     glfwGetCursorPos(w, &mx, &my);
+    float x = (float)mx * g.fb_scale;
+    float y = (float)my * g.fb_scale;
+    if (layout_in_tab_strip(&g.layout, x, y)) {
+        float step = g.layout.line_h > 0.0f ? g.layout.line_h * 3.0f : 60.0f;
+        float pixels = 0.0f;
+        if (dx != 0.0)
+            pixels = (float)dx * step;
+        else if (dy != 0.0)
+            pixels = dy < 0.0 ? step : -step;
+        int fb_w = 0, fb_h = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        (void)fb_h;
+        tab_scroll_by(pixels, fb_w);
+        return;
+    }
     Terminal *term = cur_term();
     if (term) {
         terminal_scroll(term, dy > 0.0 ? 3 : -3);
         return;
     }
     LayoutScrollTarget target = layout_scroll_target(
-        &g.layout, (float)mx * g.fb_scale, dy,
+        &g.layout, x, dy,
         overlay_active(&g.overlay) == OVERLAY_SEARCH,
         popover_is_scrollable(&g.pop),
         g.ws != NULL, g.config.show_sidebar);
@@ -1550,6 +1615,14 @@ static void draw_frame(int fb_w, int fb_h) {
     float header_h = metrics.header_h;
     float tab_strip = metrics.tab_strip;
     float top_pad = metrics.top_pad;
+    g.layout.tab_w = tab_pitch_for_adv(adv);
+    g.layout.tab_gap = tab_gap_for_adv(adv);
+    if (g.tab_reveal_active) {
+        tab_ensure_active_visible(editor_fb_w);
+        g.tab_reveal_active = 0;
+    } else {
+        tab_clamp_scroll(editor_fb_w);
+    }
     ViewFramePlan frame = view_frame_plan(
         side_px, tab_strip, header_h, editor_has_buffer(e),
         overlay_active(&g.overlay));
@@ -1590,7 +1663,8 @@ static void draw_frame(int fb_w, int fb_h) {
     if (frame.tabs)
         g.layout.tab_w = draw_tabs_panel(&g.tabs, editor_fb_w, font, r, side_px, adv,
                                          ascent, tab_h, header_h,
-                                         g.config.opacity, g.config.radius);
+                                         g.config.opacity, g.config.radius,
+                                         g.tab_scroll);
     if (frame.header)
         draw_header_panel(g.ws ? ws_root(g.ws) : NULL, active_path,
                           editor_fb_w, font, r, adv, ascent, header_h, g.fb_scale,

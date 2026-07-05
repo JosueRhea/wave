@@ -6,7 +6,7 @@
 typedef struct {
     float line_h, adv, ascent;
     float side_px, text_x, gutter;
-    float top_pad, tab_w, header_h, side_pad;
+    float top_pad, tab_w, tab_gap, tab_scroll, header_h, side_pad;
     int fb_h;
 } LayoutState;
 

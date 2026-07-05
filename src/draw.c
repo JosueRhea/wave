@@ -635,33 +635,43 @@ void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity, float radiu
 
 float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,
                       float side_px, float adv, float ascent, float tab_h,
-                      float top_y, float opacity, float radius) {
+                      float top_y, float opacity, float radius,
+                      float tab_scroll) {
     renderer_rect(r, side_px, top_y, (float)fb_w - side_px, tab_h,
-                  0.08f, 0.09f, 0.11f, opacity);
+                  0.075f, 0.083f, 0.102f, opacity);
+    renderer_rect(r, side_px, top_y + tab_h - 1.0f, (float)fb_w - side_px, 1.0f,
+                  0.16f, 0.18f, 0.22f, opacity * 0.55f);
 
     float tab_w = adv * 18.0f;
+    float gap = adv * 0.70f;
+    if (gap < 8.0f) gap = 8.0f;
+    float body_w = tab_w - gap;
+    float tab_y = top_y + 3.0f;
+    float body_h = tab_h - 6.0f;
+    float tab_radius = radius < 7.0f ? 7.0f : radius;
     for (int i = 0; i < tabs_count(tabs); i++) {
-        float x = side_px + (float)i * tab_w;
+        float x = side_px + (float)i * tab_w - tab_scroll;
+        if (x + body_w <= side_px) continue;
+        if (x < side_px) continue;
         if (x >= (float)fb_w) break;
         int act = (i == tabs_active_index(tabs));
-        draw_round_rect(r, x + 1.0f, top_y + 1.0f, tab_w - 3.0f, tab_h - 1.0f,
-                        radius * 0.75f,
-                        act ? (Color){0.15f, 0.16f, 0.21f}
-                            : (Color){0.10f, 0.11f, 0.13f},
+        draw_round_rect(r, x, tab_y, body_w, body_h,
+                        tab_radius,
+                        act ? (Color){0.18f, 0.20f, 0.28f}
+                            : (Color){0.105f, 0.115f, 0.14f},
                         1.0f);
-        if (act)
-            renderer_rect(r, x, top_y + tab_h - 2.0f, tab_w - 1.0f, 2.0f,
-                          0.45f, 0.60f, 0.95f, 1.0f);
 
         char label[64];
         tabs_label(tabs, i, label, sizeof label);
-        int nl = view_clamp_text_len(label, (int)(tab_w / adv) - 3);
+        int nl = view_clamp_text_len(label, (int)(body_w / adv) - 4);
         Color c = act ? (Color){0.92f, 0.93f, 0.95f}
-                      : (Color){0.62f, 0.66f, 0.72f};
-        draw_text_run(font, r, label, nl, x + adv * 0.6f,
-                      top_y + ascent + 2.0f, c);
-        draw_text_run(font, r, "x", 1, x + tab_w - adv * 1.5f,
-                      top_y + ascent + 2.0f, (Color){0.50f, 0.54f, 0.60f});
+                      : (Color){0.60f, 0.64f, 0.72f};
+        draw_text_run(font, r, label, nl, x + adv * 0.75f,
+                      top_y + ascent + 4.0f, c);
+        draw_text_run(font, r, "x", 1, x + body_w - adv * 1.45f,
+                      top_y + ascent + 4.0f,
+                      act ? (Color){0.72f, 0.76f, 0.84f}
+                          : (Color){0.45f, 0.49f, 0.56f});
     }
     return tab_w;
 }
