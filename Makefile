@@ -79,8 +79,8 @@ TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
-#   make dist VERSION=0.1.5-alpha
-VERSION  ?= 0.1.5-alpha
+#   make dist VERSION=0.1.6-alpha
+VERSION  ?= 0.1.6-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources

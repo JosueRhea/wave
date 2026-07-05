@@ -622,7 +622,7 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
     if (visible > max_rows) visible = max_rows;
     int rows_for_height = visible ? visible : 1;
     float input_h = line_h * 1.55f;
-    float row_h = line_h * 1.42f;
+    float row_h = line_h * 1.72f;
     float h = pad * 2.0f + line_h * 1.35f + input_h +
               line_h * 0.45f + (float)rows_for_height * row_h;
     float x = ((float)fb_w - w) * 0.5f;
@@ -678,11 +678,11 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
         float ry = row_y + (float)i * row_h;
         if (selected)
             draw_round_rect(r, x + pad * 0.75f, ry - line_h * 0.2f,
-                            w - pad * 1.5f, line_h * 1.28f, radius,
+                            w - pad * 1.5f, line_h * 1.62f, radius,
                             (Color){0.16f, 0.19f, 0.24f}, 1.0f);
 
         float icon = line_h * 0.72f;
-        draw_folder_icon(r, x + pad, ry + line_h * 0.1f, icon,
+        draw_folder_icon(r, x + pad, ry + line_h * 0.22f, icon,
                          selected ? (Color){0.62f, 0.75f, 0.98f}
                                   : (Color){0.50f, 0.63f, 0.86f});
         const char *base = draw_path_basename(path);
