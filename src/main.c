@@ -127,8 +127,10 @@ typedef struct {
     /* vim */
     ModalState modal;
 
-    /* command line ( : ) */
+    /* command line ( : ) and current-buffer search ( / ) */
     CommandLine cmd;
+    CommandLine buf_search;
+    char last_buf_search[256];
 
     /* command palette (Cmd-P) and content search (Cmd-Shift-F). */
     OverlayState overlay;
@@ -695,6 +697,53 @@ static void search_accept(void) {
     overlay_close(&g.overlay);
 }
 
+static void buffer_search_open(void) {
+    if (!editor_has_buffer(cur())) return;
+    command_open(&g.buf_search);
+    g.info[0] = '\0';
+    modal_enter_normal(&g.modal);
+}
+
+static void buffer_search_close(void) {
+    command_close(&g.buf_search);
+}
+
+static int buffer_search_jump(const char *query, int reverse) {
+    if (!query || !query[0]) return 0;
+    Editor *e = cur();
+    if (!editor_search_text(e, query, reverse, g.info, sizeof g.info))
+        return 0;
+    center_cursor(e);
+    return 1;
+}
+
+static void buffer_search_accept(void) {
+    const char *query = command_text(&g.buf_search);
+    if (query[0]) {
+        snprintf(g.last_buf_search, sizeof g.last_buf_search, "%s", query);
+        buffer_search_jump(g.last_buf_search, 0);
+    }
+    buffer_search_close();
+}
+
+static void buffer_search_repeat(int reverse) {
+    if (!g.last_buf_search[0]) {
+        snprintf(g.info, sizeof g.info, "no previous search");
+        return;
+    }
+    buffer_search_jump(g.last_buf_search, reverse);
+}
+
+static void buffer_search_word(void) {
+    char word[256];
+    if (!editor_word_under_cursor(cur(), word, sizeof word)) {
+        snprintf(g.info, sizeof g.info, "no word under cursor");
+        return;
+    }
+    snprintf(g.last_buf_search, sizeof g.last_buf_search, "%s", word);
+    buffer_search_jump(g.last_buf_search, 0);
+}
+
 /* ---- command line ( :w :q :wq ) ---- */
 static void cmd_exec(void) {
     char path[1100];
@@ -769,7 +818,13 @@ static void vim_normal_char(unsigned int cp) {
     if (res.flags & EDIT_COMMAND_TAB_NEXT) tab_goto(+1);
     if (res.flags & EDIT_COMMAND_TAB_PREV) tab_goto(-1);
     if (res.flags & EDIT_COMMAND_OPEN_COMMAND_LINE) command_open(&g.cmd);
-    edit_command_status_text(res, g.info, sizeof g.info);
+    if (res.flags & EDIT_COMMAND_OPEN_BUFFER_SEARCH) buffer_search_open();
+    if (res.flags & EDIT_COMMAND_SEARCH_NEXT) buffer_search_repeat(0);
+    if (res.flags & EDIT_COMMAND_SEARCH_PREV) buffer_search_repeat(1);
+    if (res.flags & EDIT_COMMAND_SEARCH_WORD) buffer_search_word();
+    char edit_status[256];
+    if (edit_command_status_text(res, edit_status, sizeof edit_status))
+        snprintf(g.info, sizeof g.info, "%s", edit_status);
 }
 
 /* ---- UI zoom (Cmd +/-) ---- */
@@ -862,6 +917,14 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     (void)w;
     g.last_activity = glfwGetTime();
     Terminal *term = cur_term();
+    if (g.buf_search.active) {
+        char text[2] = {0};
+        if (cp >= 32 && cp < 127) {
+            text[0] = (char)cp;
+            command_insert_text(&g.buf_search, text);
+        }
+        return;
+    }
     if (term && overlay_active(&g.overlay) == OVERLAY_NONE && !g.cmd.active &&
         !g.create_active && (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) == 0) {
         terminal_put_codepoint(term, cp, (g.mods & GLFW_MOD_ALT) != 0);
@@ -926,6 +989,19 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         (mods & GLFW_MOD_CONTROL) != 0,
         (mods & GLFW_MOD_ALT) != 0,
         (mods & GLFW_MOD_SHIFT) != 0);
+
+    if (g.buf_search.active) {
+        if (shortcut == SHORTCUT_PASTE) {
+            const char *clip = glfwGetClipboardString(g.win);
+            if (clip) command_insert_text(&g.buf_search, clip);
+            return;
+        }
+        CommandKeyResult search_key = command_apply_key(
+            &g.buf_search, wave_command_key_from_glfw(key));
+        if (search_key == COMMAND_KEY_RESULT_ACCEPT) buffer_search_accept();
+        if (search_key != COMMAND_KEY_RESULT_NONE) return;
+        return;
+    }
 
     Terminal *term = cur_term();
     if (term && overlay_active(&g.overlay) == OVERLAY_NONE && !g.cmd.active &&
@@ -1372,10 +1448,20 @@ static void draw_status_line(Renderer *r, Font *font, Editor *e, float fb_w,
     renderer_rect(r, 0, fb_h - bar_h, fb_w, bar_h, 0.07f, 0.08f, 0.10f,
                   g.config.opacity);
     char status[400];
-    ViewStatusLine status_line = view_editor_status_line(
-        status, sizeof status, e, g.cmd.active ? command_text(&g.cmd) : NULL,
-        g.info, mode_name(g.modal.mode), diagnostics,
-        tabs_active_index(&g.tabs), tabs_count(&g.tabs));
+    ViewStatusLine status_line;
+    if (g.buf_search.active) {
+        snprintf(status, sizeof status, "/%s", command_text(&g.buf_search));
+        status_line = (ViewStatusLine){.kind = VIEW_STATUS_COMMAND,
+                                       .lang = "text",
+                                       .r = 0.70f,
+                                       .g = 0.74f,
+                                       .b = 0.80f};
+    } else {
+        status_line = view_editor_status_line(
+            status, sizeof status, e, g.cmd.active ? command_text(&g.cmd) : NULL,
+            g.info, mode_name(g.modal.mode), diagnostics,
+            tabs_active_index(&g.tabs), tabs_count(&g.tabs));
+    }
     draw_text_run(font, r, status, (int)strlen(status), pad,
                   fb_h - bar_h + ascent + 2.0f,
                   (Color){status_line.r, status_line.g, status_line.b});

@@ -81,6 +81,14 @@ int main(void) {
     CHECK(r.flags & EDIT_COMMAND_GOTO_DEFINITION);
     r = edit_command_apply(&e, &m, &y, ':');
     CHECK(r.flags & EDIT_COMMAND_OPEN_COMMAND_LINE);
+    r = edit_command_apply(&e, &m, &y, '/');
+    CHECK(r.flags & EDIT_COMMAND_OPEN_BUFFER_SEARCH);
+    r = edit_command_apply(&e, &m, &y, 'n');
+    CHECK(r.flags & EDIT_COMMAND_SEARCH_NEXT);
+    r = edit_command_apply(&e, &m, &y, 'N');
+    CHECK(r.flags & EDIT_COMMAND_SEARCH_PREV);
+    r = edit_command_apply(&e, &m, &y, '*');
+    CHECK(r.flags & EDIT_COMMAND_SEARCH_WORD);
     editor_close(&e);
 
     char msg[64] = "stale";

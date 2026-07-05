@@ -870,3 +870,104 @@ int editor_goto_local_definition(Editor *e, char *message, size_t message_cap) {
                  row + 1, col + 1, strong ? "" : " (first use)");
     return 1;
 }
+
+static size_t mem_find_forward(const char *haystack, size_t hay_len,
+                               const char *needle, size_t needle_len,
+                               size_t start) {
+    if (!haystack || !needle || needle_len == 0 || hay_len < needle_len)
+        return (size_t)-1;
+    if (start > hay_len) start = hay_len;
+    for (size_t i = start; i + needle_len <= hay_len; i++)
+        if (!memcmp(haystack + i, needle, needle_len)) return i;
+    return (size_t)-1;
+}
+
+static size_t mem_find_backward(const char *haystack, size_t hay_len,
+                                const char *needle, size_t needle_len,
+                                size_t start) {
+    if (!haystack || !needle || needle_len == 0 || hay_len < needle_len)
+        return (size_t)-1;
+    size_t max = hay_len - needle_len;
+    if (start > max) start = max;
+    for (size_t i = start + 1; i > 0; i--) {
+        size_t pos = i - 1;
+        if (!memcmp(haystack + pos, needle, needle_len)) return pos;
+    }
+    return (size_t)-1;
+}
+
+int editor_find_text(Editor *e, const char *needle, size_t from, int reverse,
+                     size_t *out) {
+    if (out) *out = 0;
+    if (!e || !e->buf || !needle || !needle[0] || !out) return 0;
+
+    size_t len = buffer_length(e->buf);
+    size_t needle_len = strlen(needle);
+    if (needle_len > len) return 0;
+
+    char *text = editor_text(e);
+    if (!text) return 0;
+
+    size_t found = (size_t)-1;
+    if (reverse) {
+        if (from > 0)
+            found = mem_find_backward(text, len, needle, needle_len, from - 1);
+        if (found == (size_t)-1)
+            found = mem_find_backward(text, len, needle, needle_len, len);
+    } else {
+        found = mem_find_forward(text, len, needle, needle_len, from);
+        if (found == (size_t)-1)
+            found = mem_find_forward(text, len, needle, needle_len, 0);
+    }
+
+    free(text);
+    if (found == (size_t)-1) return 0;
+    *out = found;
+    return 1;
+}
+
+int editor_search_text(Editor *e, const char *needle, int reverse,
+                       char *message, size_t message_cap) {
+    if (message && message_cap) message[0] = '\0';
+    if (!e || !e->buf || !needle || !needle[0]) return 0;
+
+    size_t from = reverse ? e->cursor : next_boundary(buffer_pt(e->buf), e->cursor);
+    size_t found = 0;
+    if (!editor_find_text(e, needle, from, reverse, &found)) {
+        if (message && message_cap)
+            snprintf(message, message_cap, "pattern not found: %s", needle);
+        return 0;
+    }
+
+    e->cursor = found;
+    if (message && message_cap)
+        snprintf(message, message_cap, "/%s", needle);
+    return 1;
+}
+
+int editor_word_under_cursor(Editor *e, char *out, size_t cap) {
+    if (out && cap) out[0] = '\0';
+    if (!e || !e->buf || !out || cap == 0) return 0;
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t len = pt_length(pt);
+    if (len == 0) return 0;
+
+    size_t pos = e->cursor;
+    if (pos >= len) pos = len - 1;
+    if (!is_word(byte_at(pt, pos)) && pos + 1 < len && is_word(byte_at(pt, pos + 1)))
+        pos++;
+    if (!is_word(byte_at(pt, pos)) && pos > 0 && is_word(byte_at(pt, pos - 1)))
+        pos--;
+    if (!is_word(byte_at(pt, pos))) return 0;
+
+    size_t start = pos;
+    size_t end = pos + 1;
+    while (start > 0 && is_word(byte_at(pt, start - 1))) start--;
+    while (end < len && is_word(byte_at(pt, end))) end++;
+
+    size_t n = end - start;
+    if (n >= cap) n = cap - 1;
+    pt_read(pt, start, n, out);
+    out[n] = '\0';
+    return n > 0;
+}

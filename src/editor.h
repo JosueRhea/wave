@@ -157,5 +157,10 @@ int editor_move_to_lsp_position(Editor *e, int line, int col,
 int editor_find_definition(Editor *e, char *word, size_t word_cap,
                            size_t *out, int *strong);
 int editor_goto_local_definition(Editor *e, char *message, size_t message_cap);
+int editor_find_text(Editor *e, const char *needle, size_t from, int reverse,
+                     size_t *out);
+int editor_search_text(Editor *e, const char *needle, int reverse,
+                       char *message, size_t message_cap);
+int editor_word_under_cursor(Editor *e, char *out, size_t cap);
 
 #endif

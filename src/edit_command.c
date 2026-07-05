@@ -248,6 +248,18 @@ EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
     case ':':
         res.flags |= EDIT_COMMAND_OPEN_COMMAND_LINE;
         break;
+    case '/':
+        res.flags |= EDIT_COMMAND_OPEN_BUFFER_SEARCH;
+        break;
+    case 'n':
+        res.flags |= EDIT_COMMAND_SEARCH_NEXT;
+        break;
+    case 'N':
+        res.flags |= EDIT_COMMAND_SEARCH_PREV;
+        break;
+    case '*':
+        res.flags |= EDIT_COMMAND_SEARCH_WORD;
+        break;
 
     default:
         break;

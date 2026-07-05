@@ -16,6 +16,10 @@ typedef enum {
     EDIT_COMMAND_TAB_PREV = 1 << 4,
     EDIT_COMMAND_OPEN_COMMAND_LINE = 1 << 5,
     EDIT_COMMAND_UNDO_AT_OLDEST = 1 << 6,
+    EDIT_COMMAND_OPEN_BUFFER_SEARCH = 1 << 7,
+    EDIT_COMMAND_SEARCH_NEXT = 1 << 8,
+    EDIT_COMMAND_SEARCH_PREV = 1 << 9,
+    EDIT_COMMAND_SEARCH_WORD = 1 << 10,
 } EditCommandFlags;
 
 typedef struct {
