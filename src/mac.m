@@ -9,6 +9,7 @@
 #import <Cocoa/Cocoa.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
+#include <unistd.h>
 
 #include "updater.h"
 
@@ -56,6 +57,67 @@ enum {
 @property(nonatomic) MacUpdateCallback callback;
 @end
 
+static NSString *current_bundle_version(const char *fallback) {
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    if ([version isKindOfClass:[NSString class]] && version.length > 0) return version;
+    return fallback ? [NSString stringWithUTF8String:fallback] : @"0.0.0";
+}
+
+static BOOL mac_apply_update_from_dmg(NSString *dmgPath, NSString *version,
+                                      MacUpdateCallback callback) {
+    NSString *appPath = [NSBundle mainBundle].bundlePath;
+    if (![appPath hasSuffix:@".app"] || dmgPath.length == 0) return NO;
+
+    NSString *scriptPath = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:[NSString stringWithFormat:@"wave-update-%@.sh",
+                                        [[NSUUID UUID] UUIDString]]];
+    NSString *script =
+        @"#!/bin/sh\n"
+        "set -eu\n"
+        "APP=\"$1\"\n"
+        "DMG=\"$2\"\n"
+        "PID=\"$3\"\n"
+        "MOUNT=$(mktemp -d /tmp/wave-update-mount.XXXXXX)\n"
+        "cleanup() { hdiutil detach \"$MOUNT\" -quiet >/dev/null 2>&1 || true; rm -rf \"$MOUNT\"; rm -f \"$DMG\" \"$0\"; }\n"
+        "trap cleanup EXIT\n"
+        "hdiutil attach \"$DMG\" -nobrowse -quiet -mountpoint \"$MOUNT\"\n"
+        "NEWAPP=\"$MOUNT/Wave.app\"\n"
+        "test -d \"$NEWAPP\"\n"
+        "while kill -0 \"$PID\" >/dev/null 2>&1; do sleep 0.2; done\n"
+        "TMP=\"${APP}.updating\"\n"
+        "rm -rf \"$TMP\"\n"
+        "/usr/bin/ditto \"$NEWAPP\" \"$TMP\"\n"
+        "rm -rf \"$APP\"\n"
+        "mv \"$TMP\" \"$APP\"\n"
+        "open -n \"$APP\"\n";
+
+    NSError *error = nil;
+    if (![script writeToFile:scriptPath atomically:YES
+                    encoding:NSUTF8StringEncoding error:&error]) {
+        (void)callback;
+        return NO;
+    }
+
+    NSTask *task = [NSTask new];
+    task.launchPath = @"/bin/sh";
+    task.arguments = @[scriptPath, appPath, dmgPath,
+                       [NSString stringWithFormat:@"%d", getpid()]];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    @try {
+        [task launch];
+    } @catch (NSException *exception) {
+        (void)exception;
+        return NO;
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [NSApp terminate:nil];
+    });
+    return YES;
+}
+
 @implementation WaveMenuTarget
 - (void)choose:(NSMenuItem *)sender {
     self.selection = (int)sender.tag;
@@ -98,14 +160,18 @@ totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
 didFinishDownloadingToURL:(NSURL *)location {
     (void)downloadTask;
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSURL *downloads = [fm URLForDirectory:NSDownloadsDirectory
-                                  inDomain:NSUserDomainMask
-                         appropriateForURL:nil
-                                    create:YES
-                                     error:nil];
+    NSURL *cache = [fm URLForDirectory:NSCachesDirectory
+                              inDomain:NSUserDomainMask
+                     appropriateForURL:nil
+                                create:YES
+                                 error:nil];
+    NSURL *updates = [cache URLByAppendingPathComponent:@"com.gzenit.wave/Updates"
+                                           isDirectory:YES];
+    [fm createDirectoryAtURL:updates withIntermediateDirectories:YES
+                  attributes:nil error:nil];
     NSString *filename = [NSString stringWithFormat:@"Wave-%@-macos.dmg",
                           self.version ?: @"update"];
-    NSURL *dest = [downloads URLByAppendingPathComponent:filename];
+    NSURL *dest = [updates URLByAppendingPathComponent:filename];
     [fm removeItemAtURL:dest error:nil];
     NSError *error = nil;
     BOOL ok = [fm moveItemAtURL:location toURL:dest error:&error];
@@ -119,10 +185,17 @@ didFinishDownloadingToURL:(NSURL *)location {
         [session finishTasksAndInvalidate];
         return;
     }
-    [[NSWorkspace sharedWorkspace] openURL:dest];
+    if (!mac_apply_update_from_dmg(dest.path, version, cb)) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (cb) cb(UPDATE_STATE_ERROR, version.UTF8String,
+                       "could not start installer", 0.0);
+        });
+        [session finishTasksAndInvalidate];
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         if (cb) cb(UPDATE_STATE_DOWNLOADED, version.UTF8String,
-                   dest.path.lastPathComponent.UTF8String, 1.0);
+                   "restarting Wave", 1.0);
     });
     [session finishTasksAndInvalidate];
 }
@@ -267,8 +340,7 @@ static void start_update_download(NSURL *url, NSString *version,
 
 void mac_check_for_updates(const char *current_version, int manual,
                            MacUpdateCallback callback) {
-    NSString *current = current_version
-        ? [NSString stringWithUTF8String:current_version] : @"0.0.0";
+    NSString *current = current_bundle_version(current_version);
     if (manual) updater_emit(callback, UPDATE_STATE_CHECKING, current, @"", 0.0);
 
     NSURL *url = [NSURL URLWithString:@"https://api.github.com/repos/JosueRhea/wave/releases/latest"];
@@ -321,7 +393,7 @@ void mac_check_for_updates(const char *current_version, int manual,
                          @"release has no macOS DMG", 0.0);
             return;
         }
-        updater_emit(callback, UPDATE_STATE_AVAILABLE, tag, @"", 0.0);
+        updater_emit(callback, UPDATE_STATE_AVAILABLE, tag, current, 0.0);
         start_update_download(asset_url, tag, callback);
     }];
     [task resume];

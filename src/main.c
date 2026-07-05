@@ -338,15 +338,21 @@ static void update_callback(int state, const char *version,
 
     switch (state) {
     case UPDATE_STATE_CHECKING:
-        update_toast("Checking for updates", WAVE_VERSION, 0.0f, 0, 12.0);
+        update_toast("Checking for updates",
+                     version && version[0] ? version : WAVE_VERSION,
+                     0.0f, 0, 12.0);
         break;
     case UPDATE_STATE_CURRENT:
-        update_toast("Wave is up to date", WAVE_VERSION, 0.0f, 0, 5.0);
-        snprintf(g.info, sizeof g.info, "Wave %s is up to date", WAVE_VERSION);
+        update_toast("Wave is up to date",
+                     version && version[0] ? version : WAVE_VERSION,
+                     0.0f, 0, 5.0);
+        snprintf(g.info, sizeof g.info, "Wave %s is up to date",
+                 version && version[0] ? version : WAVE_VERSION);
         break;
     case UPDATE_STATE_AVAILABLE: {
         char text[160];
-        snprintf(text, sizeof text, "%s -> %s", WAVE_VERSION,
+        snprintf(text, sizeof text, "%s -> %s",
+                 detail && detail[0] ? detail : WAVE_VERSION,
                  version && version[0] ? version : "new version");
         update_toast("Update available", text, 0.0f, 0, 8.0);
         break;
@@ -356,7 +362,7 @@ static void update_callback(int state, const char *version,
                      (float)progress, 1, 20.0);
         break;
     case UPDATE_STATE_DOWNLOADED:
-        update_toast("Update downloaded", detail && detail[0] ? detail : "installer opened",
+        update_toast("Installing update", detail && detail[0] ? detail : "restarting Wave",
                      1.0f, 1, 8.0);
         snprintf(g.info, sizeof g.info, "downloaded Wave %s", version ? version : "");
         break;
