@@ -97,6 +97,7 @@ static void mac_check_for_updates(const char *current_version, int manual,
 #include "mode.h"
 #include "overlay.h"
 #include "popover.h"
+#include "recent.h"
 #include "render.h"
 #include "runtime.h"
 #include "tabs.h"
@@ -130,6 +131,9 @@ typedef struct {
 
     /* command palette (Cmd-P) and content search (Cmd-Shift-F). */
     OverlayState overlay;
+
+    /* no-folder startup project launcher */
+    RecentProjects recent;
 
     /* yank register */
     YankRegister yank;
@@ -181,6 +185,12 @@ static App g;
 /* The active editor (the front tab). Always valid once a tab exists, so
  * callers never have to null-check the slot itself. */
 static Editor *cur(void) { return tabs_current(&g.tabs); }
+
+static int project_launcher_active(void) {
+    return g.ws == NULL && cur() && !editor_has_buffer(cur()) &&
+           overlay_active(&g.overlay) == OVERLAY_NONE && !g.cmd.active &&
+           !g.create_active;
+}
 
 static const char *FONT_PATH = "/System/Library/Fonts/SFNSMono.ttf";
 #ifndef WAVE_VERSION
@@ -306,6 +316,8 @@ static void open_context_path(const char *path) {
     g.ws = opened.workspace;
     lsp_manager_set_root_path(&g.lsp, ws_root(g.ws));
     workspace_watch_start();
+    if (recent_projects_add(&g.recent, ws_root(g.ws)) && g.persist)
+        recent_projects_save(&g.recent);
     if (opened.kind == WS_OPEN_FILE) open_path(opened.file);
     snprintf(g.info, sizeof g.info, "%s", opened.kind == WS_OPEN_FILE ? "file opened" : "folder opened");
 }
@@ -669,11 +681,51 @@ static void ui_zoom(int dir) {
     wave_config_zoom_text(&g.config, g.info, sizeof g.info);
 }
 
+static int project_launcher_accept(void) {
+    const char *path = recent_projects_selected(&g.recent);
+    if (!path) return 0;
+    open_context_path(path);
+    recent_projects_set_query(&g.recent, "");
+    return 1;
+}
+
+static int project_launcher_key(int key) {
+    if (!project_launcher_active()) return 0;
+    switch (key) {
+    case GLFW_KEY_ENTER:
+    case GLFW_KEY_KP_ENTER:
+        project_launcher_accept();
+        return 1;
+    case GLFW_KEY_UP:
+        recent_projects_move(&g.recent, -1);
+        return 1;
+    case GLFW_KEY_DOWN:
+        recent_projects_move(&g.recent, +1);
+        return 1;
+    case GLFW_KEY_BACKSPACE:
+        recent_projects_backspace(&g.recent);
+        return 1;
+    case GLFW_KEY_ESCAPE:
+        recent_projects_set_query(&g.recent, "");
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* ---- GLFW callbacks ---- */
 static void on_char(GLFWwindow *w, unsigned int cp) {
     (void)w;
     g.last_activity = glfwGetTime();
     if (sidebar_create_insert_char(cp)) return;
+    if (project_launcher_active()) {
+        char text[2] = {0};
+        if (cp >= 32 && cp < 127) {
+            text[0] = (char)cp;
+            recent_projects_insert_text(&g.recent, text);
+        }
+        return;
+    }
     InputTextPlan plan = input_text_plan(
         (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         overlay_active(&g.overlay) != OVERLAY_NONE,
@@ -714,6 +766,15 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         (mods & GLFW_MOD_CONTROL) != 0,
         (mods & GLFW_MOD_ALT) != 0,
         (mods & GLFW_MOD_SHIFT) != 0);
+
+    if (project_launcher_active()) {
+        if (shortcut == SHORTCUT_PASTE) {
+            const char *clip = glfwGetClipboardString(g.win);
+            if (clip) recent_projects_insert_text(&g.recent, clip);
+            return;
+        }
+        if (project_launcher_key(key)) return;
+    }
 
     InputKeyPlan plan = input_key_plan(
         shortcut, overlay_active(&g.overlay) != OVERLAY_NONE,
@@ -1091,10 +1152,12 @@ static void draw_frame(int fb_w, int fb_h) {
     float line_h = font_line_height(font);
     float ascent = font_ascent(font);
     float adv = font_advance(font);
+    int launcher_base = g.ws == NULL && e && !editor_has_buffer(e);
 
     LayoutFrameMetrics metrics = layout_frame_metrics(
         &g.layout, line_h, adv, ascent, fb_h, g.ws != NULL, g.config.show_sidebar,
-        g.config.side_cells, g.config.native_titlebar, g.fb_scale, tabs_count(&g.tabs));
+        g.config.side_cells, g.config.native_titlebar, g.fb_scale,
+        launcher_base ? 0 : tabs_count(&g.tabs));
     float side_px = metrics.side_px;
     float gutter = metrics.gutter;
     float pad = metrics.pad;
@@ -1149,7 +1212,20 @@ static void draw_frame(int fb_w, int fb_h) {
                           fb_w, font, r, adv, ascent, header_h, g.fb_scale,
                           g.config.opacity);
 
-    if (frame.empty) { /* empty state: a folder is open but no file has been chosen */
+    if (frame.empty) {
+        if (!g.ws) {
+            draw_recent_projects_panel(&g.recent, fb_w, fb_h, font, r, adv,
+                                       line_h, ascent, top_pad,
+                                       g.config.radius);
+            if (g.update_title[0] && g.update_toast_until > glfwGetTime())
+                draw_update_toast(g.update_title, g.update_detail, g.update_progress,
+                                  g.update_show_progress, fb_w, fb_h, font, r,
+                                  adv, line_h, ascent, g.config.radius);
+            renderer_flush(r);
+            return;
+        }
+
+        /* empty state: a folder is open but no file has been chosen */
         ViewEmptyState empty = view_empty_state(g.ws != NULL);
         ViewEmptyLayout empty_layout = view_empty_layout(
             (float)fb_w, (float)fb_h, side_px, top_pad, adv, line_h, &empty);
@@ -1265,10 +1341,14 @@ int main(int argc, char **argv) {
 
     modal_init(&g.modal);
     overlay_init(&g.overlay);
+    recent_projects_init(&g.recent);
     wave_config_defaults(&g.config);
     watch_service_init(&g.watch);
     g.persist = runtime.persist;
-    if (g.persist) wave_config_load(&g.config); /* saved prefs override defaults */
+    if (g.persist) {
+        wave_config_load(&g.config); /* saved prefs override defaults */
+        recent_projects_load(&g.recent);
+    }
     if (runtime.has_scale_override) g.config.ui_scale = runtime.scale_override;
 
     /* a transparent framebuffer lets opacity<1 (and the macOS blur) show through */
@@ -1299,11 +1379,13 @@ int main(int argc, char **argv) {
         if (g.ws) {
             lsp_manager_set_root_path(&g.lsp, ws_root(g.ws));
             workspace_watch_start();
+            if (recent_projects_add(&g.recent, ws_root(g.ws)) && g.persist)
+                recent_projects_save(&g.recent);
             if (opened.kind == WS_OPEN_FILE) open_path(opened.file);
         }
     }
     if (tabs_count(&g.tabs) == 0) {
-        TabStartupEffect startup = tabs_ensure_startup(&g.tabs, g.ws != NULL);
+        TabStartupEffect startup = tabs_ensure_startup(&g.tabs, 1);
         if (startup.enter_insert) modal_enter_insert(&g.modal);
     }
     if (!runtime.snapshot) app_check_updates(0);

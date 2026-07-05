@@ -6,6 +6,7 @@
 #include "layout.h"
 #include "overlay.h"
 #include "popover.h"
+#include "recent.h"
 #include "render.h"
 #include "tabs.h"
 #include "text_view.h"
@@ -53,5 +54,9 @@ void draw_update_toast(const char *title, const char *detail, float progress,
                        int show_progress, int fb_w, int fb_h, Font *font,
                        Renderer *r, float adv, float line_h, float ascent,
                        float radius);
+void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h,
+                                Font *font, Renderer *r, float adv,
+                                float line_h, float ascent, float top_pad,
+                                float radius);
 
 #endif

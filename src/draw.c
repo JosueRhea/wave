@@ -608,3 +608,92 @@ void draw_update_toast(const char *title, const char *detail, float progress,
                         (Color){0.38f, 0.58f, 0.90f}, 1.0f);
     }
 }
+
+void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h,
+                                Font *font, Renderer *r, float adv,
+                                float line_h, float ascent, float top_pad,
+                                float radius) {
+    float w = adv * 62.0f;
+    if (w > (float)fb_w - adv * 8.0f) w = (float)fb_w - adv * 8.0f;
+    if (w < adv * 32.0f) w = adv * 32.0f;
+    float x = ((float)fb_w - w) * 0.5f;
+    float y = top_pad + line_h * 2.2f;
+    float pad = line_h * 0.8f;
+    int visible = recent ? (int)recent->filtered_count : 0;
+    int max_rows = 8;
+    if (visible > max_rows) visible = max_rows;
+    float input_h = line_h * 1.8f;
+    float h = pad * 2.0f + line_h * 1.6f + input_h +
+              line_h * 0.7f + (float)(visible ? visible : 2) * line_h * 1.65f;
+    if (y + h > (float)fb_h - line_h * 1.8f)
+        y = (float)fb_h - h - line_h * 1.8f;
+    if (y < top_pad + line_h) y = top_pad + line_h;
+
+    draw_round_rect(r, x, y, w, h, radius * 1.3f,
+                    (Color){0.08f, 0.09f, 0.11f}, 0.96f);
+    renderer_rect(r, x, y, w, 1.0f, 0.22f, 0.25f, 0.30f, 0.70f);
+
+    const char *title = "Recent Projects";
+    draw_text_run(font, r, title, (int)strlen(title),
+                  x + pad, y + pad + ascent,
+                  (Color){0.91f, 0.93f, 0.96f});
+
+    float input_y = y + pad + line_h * 1.7f;
+    draw_round_rect(r, x + pad, input_y, w - pad * 2.0f, input_h,
+                    radius, (Color){0.12f, 0.14f, 0.17f}, 1.0f);
+    const char *query = recent ? recent->query : "";
+    const char *placeholder = "Search projects";
+    Color query_color = query[0] ? (Color){0.92f, 0.94f, 0.97f}
+                                 : (Color){0.48f, 0.53f, 0.60f};
+    const char *search_text = query[0] ? query : placeholder;
+    int search_len = view_clamp_text_len(search_text, (int)((w - pad * 3.0f) / adv));
+    draw_text_run(font, r, search_text, search_len,
+                  x + pad * 1.45f, input_y + (input_h - line_h) * 0.5f + ascent,
+                  query_color);
+    float cursor_x = x + pad * 1.45f + adv * (float)(query[0] ? search_len : 0);
+    renderer_rect(r, cursor_x + adv * 0.12f, input_y + 6.0f,
+                  1.4f, input_h - 12.0f, 0.78f, 0.86f, 1.0f, 1.0f);
+
+    float row_y = input_y + input_h + line_h * 0.7f;
+    if (!recent || recent->count == 0) {
+        const char *msg = "Open a folder to start building history";
+        draw_text_run(font, r, msg, (int)strlen(msg), x + pad,
+                      row_y + ascent, (Color){0.49f, 0.54f, 0.61f});
+        return;
+    }
+    if (recent->filtered_count == 0) {
+        const char *msg = "No matching projects";
+        draw_text_run(font, r, msg, (int)strlen(msg), x + pad,
+                      row_y + ascent, (Color){0.49f, 0.54f, 0.61f});
+        return;
+    }
+
+    for (int i = 0; i < visible; i++) {
+        const char *path = recent_projects_filtered_path(recent, (size_t)i);
+        if (!path) continue;
+        int selected = i == recent->selected;
+        float ry = row_y + (float)i * line_h * 1.65f;
+        if (selected)
+            draw_round_rect(r, x + pad * 0.75f, ry - line_h * 0.2f,
+                            w - pad * 1.5f, line_h * 1.45f, radius,
+                            (Color){0.16f, 0.19f, 0.24f}, 1.0f);
+
+        float icon = line_h * 0.78f;
+        draw_folder_icon(r, x + pad, ry + line_h * 0.1f, icon,
+                         selected ? (Color){0.62f, 0.75f, 0.98f}
+                                  : (Color){0.50f, 0.63f, 0.86f});
+        const char *base = draw_path_basename(path);
+        int base_len = view_clamp_text_len(base, (int)((w - pad * 4.0f) / adv));
+        draw_text_run(font, r, base, base_len, x + pad + adv * 2.4f,
+                      ry + ascent, selected ? (Color){0.94f, 0.96f, 0.99f}
+                                            : (Color){0.78f, 0.82f, 0.88f});
+
+        int parent_len = draw_path_parent_len(path, base);
+        int max_parent = (int)((w - pad * 4.0f) / adv);
+        if (parent_len > max_parent) parent_len = max_parent;
+        draw_text_run(font, r, path, parent_len, x + pad + adv * 2.4f,
+                      ry + line_h * 0.78f + ascent,
+                      selected ? (Color){0.56f, 0.62f, 0.70f}
+                               : (Color){0.42f, 0.47f, 0.54f});
+    }
+}
