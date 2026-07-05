@@ -55,6 +55,16 @@ typedef struct {
     float pixels;
 } LayoutScrollTarget;
 
+typedef struct {
+    int visible;
+    float track_x;
+    float track_y;
+    float track_w;
+    float track_h;
+    float thumb_y;
+    float thumb_h;
+} LayoutScrollbar;
+
 typedef enum {
     LAYOUT_CLICK_NONE,
     LAYOUT_CLICK_TITLEBAR,
@@ -97,6 +107,18 @@ LayoutScrollTarget layout_scroll_target(const LayoutState *l, float mouse_x,
                                         int workspace_open,
                                         int sidebar_visible);
 float layout_scroll_offset(float current, float pixels);
+float layout_max_scroll(float content_h, float viewport_h);
+float layout_scroll_offset_clamped(float current, float pixels, float max_scroll);
+float layout_sidebar_max_scroll(const LayoutState *l, size_t rows);
+LayoutScrollbar layout_scrollbar(float track_x, float track_y, float track_w,
+                                 float track_h, float content_h,
+                                 float viewport_h, float scroll);
+int layout_scrollbar_hit(LayoutScrollbar bar, float x, float y, float pad);
+int layout_scrollbar_thumb_hit(LayoutScrollbar bar, float x, float y, float pad);
+float layout_scrollbar_drag_scroll(LayoutScrollbar bar, float y,
+                                   float grab_offset, float max_scroll);
+LayoutScrollbar layout_scrollbar_expand(LayoutScrollbar bar, float amount,
+                                        float expand_w);
 int layout_in_titlebar(const LayoutState *l, float y);
 int layout_in_sidebar(const LayoutState *l, float x, int workspace_open, int sidebar_visible);
 int layout_in_tab_strip(const LayoutState *l, float x, float y);

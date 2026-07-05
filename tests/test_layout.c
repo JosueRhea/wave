@@ -73,6 +73,32 @@ int main(void) {
     CHECK_EQ((int)layout_scroll_offset(20.0f, 15.0f), 35);
     CHECK_EQ((int)layout_scroll_offset(20.0f, -15.0f), 5);
     CHECK_EQ((int)layout_scroll_offset(20.0f, -30.0f), 0);
+    CHECK_EQ((int)layout_max_scroll(100.0f, 40.0f), 60);
+    CHECK_EQ((int)layout_max_scroll(40.0f, 100.0f), 0);
+    CHECK_EQ((int)layout_scroll_offset_clamped(20.0f, 100.0f, 80.0f), 80);
+    CHECK_EQ((int)layout_scroll_offset_clamped(20.0f, -100.0f, 80.0f), 0);
+    CHECK_EQ((int)layout_sidebar_max_scroll(&l, 50), 342);
+
+    LayoutScrollbar sb = layout_scrollbar(90.0f, 10.0f, 4.0f, 100.0f,
+                                          400.0f, 100.0f, 150.0f);
+    CHECK(sb.visible);
+    CHECK_EQ((int)sb.track_x, 90);
+    CHECK_EQ((int)sb.thumb_h, 25);
+    CHECK_EQ((int)sb.thumb_y, 47);
+    CHECK(layout_scrollbar_hit(sb, 92.0f, 50.0f, 0.0f));
+    CHECK(layout_scrollbar_hit(sb, 86.0f, 50.0f, 5.0f));
+    CHECK(!layout_scrollbar_hit(sb, 84.0f, 50.0f, 5.0f));
+    CHECK(layout_scrollbar_thumb_hit(sb, 92.0f, 50.0f, 0.0f));
+    CHECK(!layout_scrollbar_thumb_hit(sb, 92.0f, 20.0f, 0.0f));
+    CHECK_EQ((int)layout_scrollbar_drag_scroll(sb, 47.0f, 0.0f, 300.0f), 148);
+    CHECK_EQ((int)layout_scrollbar_drag_scroll(sb, 500.0f, 0.0f, 300.0f), 300);
+    CHECK_EQ((int)layout_scrollbar_drag_scroll(sb, -50.0f, 0.0f, 300.0f), 0);
+    LayoutScrollbar wide = layout_scrollbar_expand(sb, 1.0f, 6.0f);
+    CHECK_EQ((int)wide.track_x, 87);
+    CHECK_EQ((int)wide.track_w, 10);
+    sb = layout_scrollbar(90.0f, 10.0f, 4.0f, 100.0f,
+                          90.0f, 100.0f, 0.0f);
+    CHECK(!sb.visible);
 
     LayoutClickTarget ct = layout_click_target(&l, 100.0f, 20.0f, 0.0f, 1, 1, 1);
     CHECK_EQ(ct.kind, LAYOUT_CLICK_TITLEBAR);

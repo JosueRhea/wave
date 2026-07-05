@@ -53,6 +53,7 @@ TS_JS_TAG     := v0.21.4
 TS_TS_TAG     := v0.21.2
 
 BUILD   := build
+QUERY_DIR := queries
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
 CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
@@ -70,7 +71,7 @@ GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o \
 
 TEST_LIBS := -framework CoreServices -framework CoreFoundation
 
-TESTS    := test_piece_table test_buffer test_highlight test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
@@ -235,6 +236,7 @@ bundle: app
 	@cp -R $(LSP_DIR)/node_modules $(APP_RES)/vendor/lsp/
 	@cp $(LSP_DIR)/package.json $(APP_RES)/vendor/lsp/
 	@cp $(RG_BIN) $(APP_RES)/vendor/rg/rg
+	@cp -R $(QUERY_DIR) $(APP_RES)/queries
 	@# Drop the node_modules .bin symlink shims — unused at runtime (Wave spawns
 	@# cli.mjs directly) and they break codesign's bundle seal.
 	@rm -rf $(APP_RES)/vendor/lsp/node_modules/.bin

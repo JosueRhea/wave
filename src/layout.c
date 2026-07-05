@@ -143,6 +143,83 @@ float layout_scroll_offset(float current, float pixels) {
     return next < 0.0f ? 0.0f : next;
 }
 
+float layout_max_scroll(float content_h, float viewport_h) {
+    float max_scroll = content_h - viewport_h;
+    return max_scroll > 0.0f ? max_scroll : 0.0f;
+}
+
+float layout_scroll_offset_clamped(float current, float pixels, float max_scroll) {
+    float next = layout_scroll_offset(current, pixels);
+    if (max_scroll < 0.0f) max_scroll = 0.0f;
+    return next > max_scroll ? max_scroll : next;
+}
+
+float layout_sidebar_max_scroll(const LayoutState *l, size_t rows) {
+    if (!l || l->line_h <= 0.0f) return 0.0f;
+    float content_h = (float)rows * l->line_h + l->side_pad;
+    float viewport_h = (float)l->fb_h - l->header_h - layout_status_bar_h(l);
+    return layout_max_scroll(content_h, viewport_h);
+}
+
+LayoutScrollbar layout_scrollbar(float track_x, float track_y, float track_w,
+                                 float track_h, float content_h,
+                                 float viewport_h, float scroll) {
+    LayoutScrollbar out = {0};
+    if (track_w <= 0.0f || track_h <= 0.0f || content_h <= viewport_h ||
+        viewport_h <= 0.0f)
+        return out;
+
+    float max_scroll = layout_max_scroll(content_h, viewport_h);
+    if (scroll < 0.0f) scroll = 0.0f;
+    if (scroll > max_scroll) scroll = max_scroll;
+
+    out.visible = 1;
+    out.track_x = track_x;
+    out.track_y = track_y;
+    out.track_w = track_w;
+    out.track_h = track_h;
+    out.thumb_h = track_h * viewport_h / content_h;
+    if (out.thumb_h < track_w * 2.0f) out.thumb_h = track_w * 2.0f;
+    if (out.thumb_h > track_h) out.thumb_h = track_h;
+    out.thumb_y = track_y;
+    if (max_scroll > 0.0f)
+        out.thumb_y += (track_h - out.thumb_h) * scroll / max_scroll;
+    return out;
+}
+
+int layout_scrollbar_hit(LayoutScrollbar bar, float x, float y, float pad) {
+    if (!bar.visible) return 0;
+    return x >= bar.track_x - pad && x <= bar.track_x + bar.track_w + pad &&
+           y >= bar.track_y && y <= bar.track_y + bar.track_h;
+}
+
+int layout_scrollbar_thumb_hit(LayoutScrollbar bar, float x, float y, float pad) {
+    if (!layout_scrollbar_hit(bar, x, y, pad)) return 0;
+    return y >= bar.thumb_y && y <= bar.thumb_y + bar.thumb_h;
+}
+
+float layout_scrollbar_drag_scroll(LayoutScrollbar bar, float y,
+                                   float grab_offset, float max_scroll) {
+    if (!bar.visible || max_scroll <= 0.0f) return 0.0f;
+    float travel = bar.track_h - bar.thumb_h;
+    if (travel <= 0.0f) return 0.0f;
+    float thumb_y = y - grab_offset;
+    if (thumb_y < bar.track_y) thumb_y = bar.track_y;
+    if (thumb_y > bar.track_y + travel) thumb_y = bar.track_y + travel;
+    return (thumb_y - bar.track_y) * max_scroll / travel;
+}
+
+LayoutScrollbar layout_scrollbar_expand(LayoutScrollbar bar, float amount,
+                                        float expand_w) {
+    if (!bar.visible) return bar;
+    if (amount < 0.0f) amount = 0.0f;
+    if (amount > 1.0f) amount = 1.0f;
+    float dw = expand_w * amount;
+    bar.track_x -= dw * 0.5f;
+    bar.track_w += dw;
+    return bar;
+}
+
 int layout_in_titlebar(const LayoutState *l, float y) {
     return l && y < l->header_h;
 }

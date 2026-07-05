@@ -3,6 +3,7 @@
 
 #include "font.h"
 #include "diagnostics.h"
+#include "layout.h"
 #include "overlay.h"
 #include "popover.h"
 #include "render.h"
@@ -18,7 +19,9 @@ void draw_file_icon(Renderer *r, float x, float y, float size, Color c);
 void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
                         float side_scroll, int fb_h, Font *font, Renderer *r,
                         float adv, float line_h, float ascent, float side_px,
-                        float top_y, float side_pad, float opacity);
+                        float top_y, float side_pad, float opacity,
+                        float scrollbar_hover);
+void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity);
 float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,
                       float side_px, float adv, float ascent, float tab_h,
                       float top_y, float opacity);

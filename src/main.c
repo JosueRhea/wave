@@ -117,6 +117,12 @@ typedef struct {
     double next_watch;    /* next glfwGetTime() for polling open files */
     int blink;            /* 1 = animate the cursor (off in snapshot mode) */
     int persist;          /* 1 = read/write the config file (off in snapshot mode) */
+    float side_scrollbar_hover;
+    float editor_scrollbar_hover;
+    double last_frame_time;
+    int scrollbar_drag;
+    float scrollbar_drag_grab_y;
+    float scrollbar_drag_max;
 
     /* cached layout from the last frame, for click hit-testing */
     LayoutState layout;
@@ -131,6 +137,12 @@ static Editor *cur(void) { return tabs_current(&g.tabs); }
 static const char *FONT_PATH = "/System/Library/Fonts/SFNSMono.ttf";
 
 static void app_palette_refilter(void);
+
+enum {
+    SCROLLBAR_DRAG_NONE = 0,
+    SCROLLBAR_DRAG_SIDEBAR = 1,
+    SCROLLBAR_DRAG_EDITOR = 2
+};
 
 static void config_path(char *out, size_t cap) {
     wave_config_path(out, cap);
@@ -519,16 +531,87 @@ static void on_scroll(GLFWwindow *w, double dx, double dy) {
         return;
     }
     if (target.kind == LAYOUT_SCROLL_SIDEBAR) {
-        g.side_scroll = layout_scroll_offset(g.side_scroll, target.pixels);
+        float max_scroll = layout_sidebar_max_scroll(&g.layout, ws_visible_count(g.ws));
+        g.side_scroll = layout_scroll_offset_clamped(g.side_scroll, target.pixels,
+                                                     max_scroll);
     } else {
-        editor_set_scroll_y(cur(), layout_scroll_offset(editor_scroll_y(cur()), target.pixels));
+        Editor *e = cur();
+        if (!editor_has_buffer(e) || g.layout.adv <= 0.0f ||
+            g.layout.line_h <= 0.0f)
+            return;
+        int fb_w = 0, fb_h = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        int cols = text_view_wrap_cols(g.config.wrap, (float)fb_w,
+                                       g.layout.text_x, g.layout.adv);
+        wrap_build(e, cols);
+        float view_h = (float)fb_h - g.layout.top_pad - layout_status_bar_h(&g.layout);
+        float max_scroll = layout_max_scroll((float)e->vstart[pt_line_count(buffer_pt(e->buf))] *
+                                             g.layout.line_h, view_h);
+        editor_set_scroll_y(e, layout_scroll_offset_clamped(editor_scroll_y(e),
+                                                            target.pixels,
+                                                            max_scroll));
     }
+}
+
+static LayoutScrollbar current_sidebar_scrollbar(float *max_scroll) {
+    if (max_scroll) *max_scroll = 0.0f;
+    if (!g.ws || !g.config.show_sidebar || g.layout.line_h <= 0.0f) return (LayoutScrollbar){0};
+    float bottom = (float)g.layout.fb_h - layout_status_bar_h(&g.layout);
+    float content_h = (float)ws_visible_count(g.ws) * g.layout.line_h + g.layout.side_pad;
+    float viewport_h = bottom - g.layout.header_h;
+    if (max_scroll) *max_scroll = layout_max_scroll(content_h, viewport_h);
+    return layout_scrollbar(g.layout.side_px - 5.6f, g.layout.header_h + 4.0f,
+                            3.6f, viewport_h - 8.0f, content_h, viewport_h,
+                            g.side_scroll);
+}
+
+static int current_editor_scrollbar(GLFWwindow *w, LayoutScrollbar *bar,
+                                    float *max_scroll) {
+    if (bar) *bar = (LayoutScrollbar){0};
+    if (max_scroll) *max_scroll = 0.0f;
+    Editor *e = cur();
+    if (!editor_has_buffer(e) || g.layout.adv <= 0.0f || g.layout.line_h <= 0.0f)
+        return 0;
+
+    int fb_w = 0, fb_h = 0;
+    glfwGetFramebufferSize(w, &fb_w, &fb_h);
+    int cols = text_view_wrap_cols(g.config.wrap, (float)fb_w,
+                                   g.layout.text_x, g.layout.adv);
+    wrap_build(e, cols);
+    float view_h = (float)fb_h - g.layout.top_pad - layout_status_bar_h(&g.layout);
+    float content_h = (float)e->vstart[pt_line_count(buffer_pt(e->buf))] *
+                      g.layout.line_h;
+    float max = layout_max_scroll(content_h, view_h);
+    if (max_scroll) *max_scroll = max;
+    if (bar)
+        *bar = layout_scrollbar((float)fb_w - 6.6f, g.layout.top_pad + 4.0f,
+                                3.6f, view_h - 8.0f, content_h, view_h,
+                                editor_scroll_y(e));
+    return 1;
 }
 
 static void on_cursor_pos(GLFWwindow *w, double mx, double my) {
     (void)w;
-    if (!g.mouse_drag.down) return;
     float x = (float)mx * g.fb_scale, y = (float)my * g.fb_scale;
+
+    if (g.scrollbar_drag == SCROLLBAR_DRAG_SIDEBAR) {
+        LayoutScrollbar bar = current_sidebar_scrollbar(NULL);
+        g.side_scroll = layout_scrollbar_drag_scroll(
+            bar, y, g.scrollbar_drag_grab_y, g.scrollbar_drag_max);
+        return;
+    }
+    if (g.scrollbar_drag == SCROLLBAR_DRAG_EDITOR) {
+        LayoutScrollbar bar;
+        if (current_editor_scrollbar(w, &bar, NULL)) {
+            Editor *e = cur();
+            editor_set_scroll_y(e, layout_scrollbar_drag_scroll(
+                                     bar, y, g.scrollbar_drag_grab_y,
+                                     g.scrollbar_drag_max));
+        }
+        return;
+    }
+
+    if (!g.mouse_drag.down) return;
 
     if (!layout_drag_update(&g.mouse_drag, x, y, g.fb_scale)) return;
 
@@ -550,6 +633,11 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     InputMousePlan plan = input_mouse_plan(
         click, button == GLFW_MOUSE_BUTTON_LEFT, button == GLFW_MOUSE_BUTTON_RIGHT,
         action == GLFW_PRESS, action == GLFW_RELEASE, g.pop.active, 0);
+    if (action == GLFW_RELEASE && button == GLFW_MOUSE_BUTTON_LEFT &&
+        g.scrollbar_drag != SCROLLBAR_DRAG_NONE) {
+        g.scrollbar_drag = SCROLLBAR_DRAG_NONE;
+        return;
+    }
     if (plan.action == INPUT_MOUSE_ACTION_RELEASE_DRAG) {
         layout_drag_release(&g.mouse_drag);
         return;
@@ -559,6 +647,29 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     double mx, my;
     glfwGetCursorPos(w, &mx, &my);
     float x = (float)mx * g.fb_scale, y = (float)my * g.fb_scale;
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        float max_scroll = 0.0f;
+        LayoutScrollbar bar = current_sidebar_scrollbar(&max_scroll);
+        if (layout_scrollbar_thumb_hit(bar, x, y, 6.0f)) {
+            g.scrollbar_drag = SCROLLBAR_DRAG_SIDEBAR;
+            g.scrollbar_drag_grab_y = y - bar.thumb_y;
+            g.scrollbar_drag_max = max_scroll;
+            g.side_scrollbar_hover = 1.0f;
+            popover_close(&g.pop);
+            return;
+        }
+
+        if (current_editor_scrollbar(w, &bar, &max_scroll) &&
+            layout_scrollbar_thumb_hit(bar, x, y, 6.0f)) {
+            g.scrollbar_drag = SCROLLBAR_DRAG_EDITOR;
+            g.scrollbar_drag_grab_y = y - bar.thumb_y;
+            g.scrollbar_drag_max = max_scroll;
+            g.editor_scrollbar_hover = 1.0f;
+            popover_close(&g.pop);
+            return;
+        }
+    }
 
     click = layout_click_target(
         &g.layout, x, y, g.side_scroll, button == GLFW_MOUSE_BUTTON_RIGHT,
@@ -626,6 +737,18 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
 /* ---- drawing ---- */
 #define MAXSPANS 4096
 
+static float hover_step(float current, int hot, double dt) {
+    float target = hot ? 1.0f : 0.0f;
+    float step = (float)dt * 14.0f;
+    if (step > 1.0f) step = 1.0f;
+    if (step < 0.0f) step = 0.0f;
+    return current + (target - current) * step;
+}
+
+static int hover_animating(float value) {
+    return value > 0.01f && value < 0.99f;
+}
+
 static void draw_frame(int fb_w, int fb_h) {
     Font *font = g.font;
     Renderer *r = g.rend;
@@ -657,13 +780,30 @@ static void draw_frame(int fb_w, int fb_h) {
     ViewFramePlan frame = view_frame_plan(
         side_px, tab_strip, header_h, editor_has_buffer(e),
         overlay_active(&g.overlay));
+    double mx = -1000.0, my = -1000.0;
+    glfwGetCursorPos(g.win, &mx, &my);
+    float cursor_x = (float)mx * g.fb_scale;
+    float cursor_y = (float)my * g.fb_scale;
+    double now = glfwGetTime();
+    double dt = g.last_frame_time > 0.0 ? now - g.last_frame_time : 1.0 / 60.0;
+    g.last_frame_time = now;
+    if (dt > 0.08) dt = 0.08;
+
+    int side_hot = 0;
+    if (frame.sidebar) {
+        LayoutScrollbar side_bar = current_sidebar_scrollbar(NULL);
+        side_hot = layout_scrollbar_hit(side_bar, cursor_x, cursor_y, 6.0f);
+    }
+    if (g.scrollbar_drag == SCROLLBAR_DRAG_SIDEBAR) side_hot = 1;
+    g.side_scrollbar_hover = hover_step(g.side_scrollbar_hover, side_hot, dt);
 
     renderer_begin(r, fb_w, fb_h, 0.11f, 0.12f, 0.14f, g.config.opacity);
 
     if (frame.sidebar)
         draw_sidebar_panel(g.ws, editor_path(e), g.config.side_cells, g.side_scroll,
                            fb_h, font, r, adv, line_h, ascent, side_px,
-                           header_h, g.layout.side_pad, g.config.opacity);
+                           header_h, g.layout.side_pad, g.config.opacity,
+                           g.side_scrollbar_hover);
     if (frame.tabs)
         g.layout.tab_w = draw_tabs_panel(&g.tabs, fb_w, font, r, side_px, adv,
                                          ascent, tab_h, header_h,
@@ -715,8 +855,19 @@ static void draw_frame(int fb_w, int fb_h) {
                            font, r, side_px, gutter, text_x, top_pad,
                            line_h, adv, ascent);
 
-    /* status / command line */
     float bar_h = line_h + 6.0f;
+    float editor_view_h = (float)fb_h - top_pad - bar_h;
+    LayoutScrollbar editor_scrollbar = layout_scrollbar(
+        (float)fb_w - 6.6f, top_pad + 4.0f, 3.6f, editor_view_h - 8.0f,
+        (float)text.total_vrows * line_h, editor_view_h, editor_scroll_y(e));
+    int editor_hot = layout_scrollbar_hit(editor_scrollbar, cursor_x, cursor_y, 6.0f);
+    if (g.scrollbar_drag == SCROLLBAR_DRAG_EDITOR) editor_hot = 1;
+    g.editor_scrollbar_hover = hover_step(g.editor_scrollbar_hover, editor_hot, dt);
+    editor_scrollbar = layout_scrollbar_expand(editor_scrollbar,
+                                               g.editor_scrollbar_hover, 6.0f);
+    draw_scrollbar(r, editor_scrollbar, g.config.opacity);
+
+    /* status / command line */
     renderer_rect(r, 0, (float)fb_h - bar_h, (float)fb_w, bar_h, 0.07f, 0.08f, 0.10f, g.config.opacity);
     char status[400];
     ViewStatusLine status_line = view_editor_status_line(
@@ -893,7 +1044,10 @@ int main(int argc, char **argv) {
         glfwSwapBuffers(win);
         /* poll faster while a server or a search is active so results stream in */
         glfwWaitEventsTimeout(wave_runtime_wait_timeout(
-            lsp_manager_active(&g.lsp), overlay_search_running(&g.overlay)));
+            lsp_manager_active(&g.lsp) ||
+                hover_animating(g.side_scrollbar_hover) ||
+                hover_animating(g.editor_scrollbar_hover),
+            overlay_search_running(&g.overlay)));
     }
 
     renderer_free(g.rend);

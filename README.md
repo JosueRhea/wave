@@ -41,7 +41,8 @@ batched OpenGL renderer, and (next) LuaJIT extensions.
   works out of the box with no global install; C uses the system `clangd` if
   present. No server (no clangd, or no JS runtime) → tree-sitter fallbacks.
 - **tree-sitter highlighting for C, JavaScript, JSX, TypeScript, TSX** — picked
-  by file extension — with live syntax-error underlines.
+  by file extension, driven by external `queries/<language>/highlights.scm`
+  files, with live syntax-error underlines.
 
 ![Wave rendering a highlighted C file](docs/screenshot.png)
 
@@ -73,13 +74,15 @@ piece_table  ─ append-only text storage; original text is mmap'd read-only,
 buffer       ─ a document: open/save + a stream of tree-sitter-shaped edit
                records (byte range + row/col points) for incremental reparse.
 highlight    ─ owns a TSParser/TSTree; drains buffer edits, applies them with
-               ts_tree_edit(), reparses incrementally, runs a highlights query
-               to emit colored spans, and walks the tree for ERROR/MISSING
-               diagnostics. Parses straight from the piece table via a TSInput
-               callback — never flattens the document. Grammar-agnostic: the
-               language is passed in.
-langs        ─ maps a file extension to a grammar + highlights query
-               (C, JavaScript/JSX, TypeScript, TSX).
+               ts_tree_edit(), reparses incrementally, runs the language's
+               loaded highlights query to emit colored spans, and walks the
+               tree for ERROR/MISSING diagnostics. Parses straight from the
+               piece table via a TSInput callback — never flattens the document.
+               Grammar-agnostic: the language is passed in.
+langs        ─ maps a file extension to a grammar and loads
+               queries/<language>/highlights.scm from the source tree, build
+               tree, or app bundle resources (C, JavaScript/JSX, TypeScript,
+               TSX).
 workspace    ─ an opened folder: a recursively scanned, display-ordered tree of
                files and subdirectories (skips .git, node_modules, build, …).
 search       ─ project-wide content search: spawns the bundled ripgrep as a
@@ -206,6 +209,7 @@ WAVE_TYPE='int x = 1\n' WAVE_SNAPSHOT=out.ppm ./build/wave   # type, then snapsh
 
 ```
 src/      piece_table, buffer, highlight, langs, workspace, lsp, search (core)
+queries/  tree-sitter highlight queries loaded at runtime and bundled into app
           + font, render, main (gui)
 tests/    test_piece_table, test_buffer, test_highlight, test_workspace,
           test_lsp (drives a real clangd: cross-file go-to-definition +

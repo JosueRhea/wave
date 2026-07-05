@@ -54,14 +54,16 @@ void draw_file_icon(Renderer *r, float x, float y, float size, Color c) {
 void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
                         float side_scroll, int fb_h, Font *font, Renderer *r,
                         float adv, float line_h, float ascent, float side_px,
-                        float top_y, float side_pad, float opacity) {
+                        float top_y, float side_pad, float opacity,
+                        float scrollbar_hover) {
     renderer_rect(r, 0, top_y, side_px, (float)fb_h - top_y,
                   0.09f, 0.10f, 0.12f, opacity);
     renderer_rect(r, side_px - 1.0f, top_y, 1.0f, (float)fb_h - top_y,
                   0.04f, 0.05f, 0.06f, opacity);
 
+    float bottom_y = (float)fb_h - (line_h + 6.0f);
     size_t n = ws_visible_count(ws);
-    ViewSidebarWindow win = view_sidebar_window(fb_h, top_y, side_pad,
+    ViewSidebarWindow win = view_sidebar_window((int)bottom_y, top_y, side_pad,
                                                 side_scroll, line_h);
     for (int i = win.first; i < win.first + win.count && i < (int)n; i++) {
         const WsEntry *e = ws_visible(ws, (size_t)i);
@@ -89,6 +91,20 @@ void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
         draw_text_run(font, r, e->name, row.name_len, row.name_x,
                       row.baseline, c);
     }
+
+    LayoutScrollbar bar = layout_scrollbar(
+        side_px - 5.6f, top_y + 4.0f, 3.6f, bottom_y - top_y - 8.0f,
+        (float)n * line_h + side_pad, bottom_y - top_y, side_scroll);
+    bar = layout_scrollbar_expand(bar, scrollbar_hover, 6.0f);
+    draw_scrollbar(r, bar, opacity);
+}
+
+void draw_scrollbar(Renderer *r, LayoutScrollbar bar, float opacity) {
+    if (!bar.visible) return;
+    renderer_rect(r, bar.track_x, bar.track_y, bar.track_w, bar.track_h,
+                  0.18f, 0.20f, 0.24f, opacity * 0.55f);
+    renderer_rect(r, bar.track_x, bar.thumb_y, bar.track_w, bar.thumb_h,
+                  0.52f, 0.57f, 0.64f, opacity * 0.96f);
 }
 
 float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,

@@ -88,7 +88,7 @@ void editor_close(Editor *e) {
 void editor_attach_highlighter(Editor *e) {
     if (e->hl) { hl_free(e->hl); e->hl = NULL; }
     const Language *L = lang_detect(e->path);
-    if (!L) return;
+    if (!L || !L->query) return;
     e->hl = hl_new(e->buf, L->lang, L->query);
     if (e->hl) hl_update(e->hl);
 }
