@@ -49,5 +49,9 @@ void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
                         float top_pad, float bar_h, float anchor_x,
                         float cur_top, float side_px, float fb_scale,
                         float radius);
+void draw_update_toast(const char *title, const char *detail, float progress,
+                       int show_progress, int fb_w, int fb_h, Font *font,
+                       Renderer *r, float adv, float line_h, float ascent,
+                       float radius);
 
 #endif

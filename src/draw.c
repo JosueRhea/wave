@@ -569,3 +569,42 @@ void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
                         1.0f);
     }
 }
+
+void draw_update_toast(const char *title, const char *detail, float progress,
+                       int show_progress, int fb_w, int fb_h, Font *font,
+                       Renderer *r, float adv, float line_h, float ascent,
+                       float radius) {
+    if (!title || !title[0]) return;
+    if (progress < 0.0f) progress = 0.0f;
+    if (progress > 1.0f) progress = 1.0f;
+
+    float w = adv * 42.0f;
+    if (w > (float)fb_w - adv * 2.0f) w = (float)fb_w - adv * 2.0f;
+    float h = show_progress ? line_h * 4.0f : line_h * 3.25f;
+    float x = (float)fb_w - w - adv * 1.4f;
+    float y = (float)fb_h - h - line_h * 1.9f;
+    if (x < adv) x = adv;
+    if (y < line_h) y = line_h;
+
+    draw_round_rect(r, x, y, w, h, radius, (Color){0.075f, 0.083f, 0.102f}, 0.98f);
+    renderer_rect(r, x, y, 3.0f, h, 0.38f, 0.58f, 0.90f, 0.95f);
+
+    int title_len = view_clamp_text_len(title, (int)(w / adv) - 4);
+    draw_text_run(font, r, title, title_len, x + adv * 1.2f,
+                  y + ascent + line_h * 0.55f, (Color){0.94f, 0.95f, 0.98f});
+    if (detail && detail[0]) {
+        int detail_len = view_clamp_text_len(detail, (int)(w / adv) - 4);
+        draw_text_run(font, r, detail, detail_len, x + adv * 1.2f,
+                      y + ascent + line_h * 1.65f, (Color){0.58f, 0.64f, 0.74f});
+    }
+
+    if (show_progress) {
+        float bar_x = x + adv * 1.2f;
+        float bar_y = y + h - line_h * 0.95f;
+        float bar_w = w - adv * 2.4f;
+        draw_round_rect(r, bar_x, bar_y, bar_w, 4.0f, 2.0f,
+                        (Color){0.16f, 0.18f, 0.22f}, 1.0f);
+        draw_round_rect(r, bar_x, bar_y, bar_w * progress, 4.0f, 2.0f,
+                        (Color){0.38f, 0.58f, 0.90f}, 1.0f);
+    }
+}

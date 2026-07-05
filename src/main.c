@@ -35,7 +35,12 @@ int mac_sidebar_context_menu(void *nswindow, const char *target_name,
                              int is_dir, int has_target, int has_clipboard);
 int mac_open_panel(void *nswindow, int folders, char *out, size_t cap);
 int mac_confirm_delete(void *nswindow, const char *path);
-void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void));
+typedef void (*MacUpdateCallback)(int state, const char *version,
+                                  const char *detail, double progress);
+void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
+                          void (*check_updates)(void));
+void mac_check_for_updates(const char *current_version, int manual,
+                           MacUpdateCallback callback);
 #else
 static void mac_set_blur(void *nswindow, int enable) { (void)nswindow; (void)enable; }
 static void mac_use_native_titlebar(void *nswindow, int enable) { (void)nswindow; (void)enable; }
@@ -55,8 +60,16 @@ static int mac_open_panel(void *nswindow, int folders, char *out, size_t cap) {
 static int mac_confirm_delete(void *nswindow, const char *path) {
     (void)nswindow; (void)path; return 0;
 }
-static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void)) {
-    (void)open_file; (void)open_folder;
+typedef void (*MacUpdateCallback)(int state, const char *version,
+                                  const char *detail, double progress);
+static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
+                                 void (*check_updates)(void)) {
+    (void)open_file; (void)open_folder; (void)check_updates;
+}
+static void mac_check_for_updates(const char *current_version, int manual,
+                                  MacUpdateCallback callback) {
+    (void)current_version; (void)manual;
+    if (callback) callback(5, "", "updates unavailable on this platform", 0.0);
 }
 #endif
 #include <limits.h>
@@ -89,6 +102,7 @@ static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(vo
 #include "tabs.h"
 #include "text_view.h"
 #include "theme.h"
+#include "updater.h"
 #include "view.h"
 #include "watch.h"
 #include "workspace.h"
@@ -150,6 +164,13 @@ typedef struct {
     int create_depth;
     char create_parent[4096];
     char create_text[1024];
+    int update_state;
+    int update_show_progress;
+    double update_toast_until;
+    float update_progress;
+    char update_title[128];
+    char update_detail[256];
+    char update_latest[64];
 
     /* cached layout from the last frame, for click hit-testing */
     LayoutState layout;
@@ -162,8 +183,20 @@ static App g;
 static Editor *cur(void) { return tabs_current(&g.tabs); }
 
 static const char *FONT_PATH = "/System/Library/Fonts/SFNSMono.ttf";
+#ifndef WAVE_VERSION
+#define WAVE_VERSION "0.0.0-dev"
+#endif
 
 static void app_palette_refilter(void);
+
+enum {
+    UPDATE_STATE_CHECKING = 1,
+    UPDATE_STATE_CURRENT = 2,
+    UPDATE_STATE_AVAILABLE = 3,
+    UPDATE_STATE_DOWNLOADING = 4,
+    UPDATE_STATE_ERROR = 5,
+    UPDATE_STATE_DOWNLOADED = 6
+};
 
 enum {
     SCROLLBAR_DRAG_NONE = 0,
@@ -249,6 +282,7 @@ static int open_path(const char *path) { return open_path_mode(path, 0); }
 
 static void app_menu_open_file(void);
 static void app_menu_open_folder(void);
+static void app_menu_check_updates(void);
 
 enum {
     SIDEBAR_MENU_NONE = 0,
@@ -286,6 +320,61 @@ static void app_menu_open_folder(void) {
     char path[4096];
     if (mac_open_panel(glfwGetCocoaWindow(g.win), 1, path, sizeof path))
         open_context_path(path);
+}
+
+static void update_toast(const char *title, const char *detail,
+                         float progress, int show_progress, double seconds) {
+    snprintf(g.update_title, sizeof g.update_title, "%s", title ? title : "");
+    snprintf(g.update_detail, sizeof g.update_detail, "%s", detail ? detail : "");
+    g.update_progress = progress;
+    g.update_show_progress = show_progress;
+    g.update_toast_until = seconds <= 0.0 ? 0.0 : glfwGetTime() + seconds;
+}
+
+static void update_callback(int state, const char *version,
+                            const char *detail, double progress) {
+    g.update_state = state;
+    if (version && version[0]) snprintf(g.update_latest, sizeof g.update_latest, "%s", version);
+
+    switch (state) {
+    case UPDATE_STATE_CHECKING:
+        update_toast("Checking for updates", WAVE_VERSION, 0.0f, 0, 12.0);
+        break;
+    case UPDATE_STATE_CURRENT:
+        update_toast("Wave is up to date", WAVE_VERSION, 0.0f, 0, 5.0);
+        snprintf(g.info, sizeof g.info, "Wave %s is up to date", WAVE_VERSION);
+        break;
+    case UPDATE_STATE_AVAILABLE: {
+        char text[160];
+        snprintf(text, sizeof text, "%s -> %s", WAVE_VERSION,
+                 version && version[0] ? version : "new version");
+        update_toast("Update available", text, 0.0f, 0, 8.0);
+        break;
+    }
+    case UPDATE_STATE_DOWNLOADING:
+        update_toast("Downloading update", version && version[0] ? version : detail,
+                     (float)progress, 1, 20.0);
+        break;
+    case UPDATE_STATE_DOWNLOADED:
+        update_toast("Update downloaded", detail && detail[0] ? detail : "installer opened",
+                     1.0f, 1, 8.0);
+        snprintf(g.info, sizeof g.info, "downloaded Wave %s", version ? version : "");
+        break;
+    case UPDATE_STATE_ERROR:
+    default:
+        update_toast("Update check failed", detail && detail[0] ? detail : "try again later",
+                     0.0f, 0, 8.0);
+        break;
+    }
+}
+
+static void app_check_updates(int manual) {
+    if (manual) update_callback(UPDATE_STATE_CHECKING, WAVE_VERSION, NULL, 0.0);
+    mac_check_for_updates(WAVE_VERSION, manual, update_callback);
+}
+
+static void app_menu_check_updates(void) {
+    app_check_updates(1);
 }
 
 static void parent_rel(const char *rel, char *out, size_t cap) {
@@ -1073,6 +1162,10 @@ static void draw_frame(int fb_w, int fb_h) {
         else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
             draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent,
                               g.config.radius);
+        if (g.update_title[0] && g.update_toast_until > glfwGetTime())
+            draw_update_toast(g.update_title, g.update_detail, g.update_progress,
+                              g.update_show_progress, fb_w, fb_h, font, r,
+                              adv, line_h, ascent, g.config.radius);
         renderer_flush(r);
         return;
     }
@@ -1139,6 +1232,11 @@ static void draw_frame(int fb_w, int fb_h) {
         draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent,
                           g.config.radius);
 
+    if (g.update_title[0] && g.update_toast_until > glfwGetTime())
+        draw_update_toast(g.update_title, g.update_detail, g.update_progress,
+                          g.update_show_progress, fb_w, fb_h, font, r,
+                          adv, line_h, ascent, g.config.radius);
+
     renderer_flush(r);
 }
 
@@ -1173,7 +1271,8 @@ int main(int argc, char **argv) {
     GLFWwindow *win = glfwCreateWindow(1100, 720, "Wave", NULL, NULL);
     if (!win) { fprintf(stderr, "window creation failed\n"); glfwTerminate(); return 1; }
     g.win = win;
-    mac_install_app_menu(app_menu_open_file, app_menu_open_folder);
+    mac_install_app_menu(app_menu_open_file, app_menu_open_folder,
+                         app_menu_check_updates);
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 
@@ -1201,6 +1300,7 @@ int main(int argc, char **argv) {
         TabStartupEffect startup = tabs_ensure_startup(&g.tabs, g.ws != NULL);
         if (startup.enter_insert) modal_enter_insert(&g.modal);
     }
+    if (!runtime.snapshot) app_check_updates(0);
 
     g.rend = renderer_new(g.font);
     if (!g.rend) { fprintf(stderr, "renderer init failed\n"); return 1; }
