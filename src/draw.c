@@ -613,18 +613,21 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
                                 Font *font, Renderer *r, float adv,
                                 float line_h, float ascent, float top_pad,
                                 float radius) {
-    float w = adv * 62.0f;
-    if (w > (float)fb_w - adv * 8.0f) w = (float)fb_w - adv * 8.0f;
-    if (w < adv * 32.0f) w = adv * 32.0f;
-    float x = ((float)fb_w - w) * 0.5f;
-    float y = top_pad + line_h * 2.2f;
-    float pad = line_h * 0.8f;
+    float w = adv * 48.0f;
+    if (w > (float)fb_w - adv * 12.0f) w = (float)fb_w - adv * 12.0f;
+    if (w < adv * 30.0f) w = adv * 30.0f;
+    float pad = line_h * 0.72f;
     int visible = recent ? (int)recent->filtered_count : 0;
-    int max_rows = 8;
+    int max_rows = 7;
     if (visible > max_rows) visible = max_rows;
-    float input_h = line_h * 1.8f;
-    float h = pad * 2.0f + line_h * 1.6f + input_h +
-              line_h * 0.7f + (float)(visible ? visible : 2) * line_h * 1.65f;
+    int rows_for_height = visible ? visible : 1;
+    float input_h = line_h * 1.55f;
+    float row_h = line_h * 1.42f;
+    float h = pad * 2.0f + line_h * 1.35f + input_h +
+              line_h * 0.45f + (float)rows_for_height * row_h;
+    float x = ((float)fb_w - w) * 0.5f;
+    float available_h = (float)fb_h - top_pad;
+    float y = top_pad + (available_h - h) * 0.24f;
     if (y + h > (float)fb_h - line_h * 1.8f)
         y = (float)fb_h - h - line_h * 1.8f;
     if (y < top_pad + line_h) y = top_pad + line_h;
@@ -638,7 +641,7 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
                   x + pad, y + pad + ascent,
                   (Color){0.91f, 0.93f, 0.96f});
 
-    float input_y = y + pad + line_h * 1.7f;
+    float input_y = y + pad + line_h * 1.45f;
     draw_round_rect(r, x + pad, input_y, w - pad * 2.0f, input_h,
                     radius, (Color){0.12f, 0.14f, 0.17f}, 1.0f);
     const char *query = recent ? recent->query : "";
@@ -646,7 +649,7 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
     Color query_color = query[0] ? (Color){0.92f, 0.94f, 0.97f}
                                  : (Color){0.48f, 0.53f, 0.60f};
     const char *search_text = query[0] ? query : placeholder;
-    int search_len = view_clamp_text_len(search_text, (int)((w - pad * 3.0f) / adv));
+    int search_len = view_clamp_text_len(search_text, (int)((w - pad * 3.2f) / adv));
     draw_text_run(font, r, search_text, search_len,
                   x + pad * 1.45f, input_y + (input_h - line_h) * 0.5f + ascent,
                   query_color);
@@ -654,7 +657,7 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
     renderer_rect(r, cursor_x + adv * 0.12f, input_y + 6.0f,
                   1.4f, input_h - 12.0f, 0.78f, 0.86f, 1.0f, 1.0f);
 
-    float row_y = input_y + input_h + line_h * 0.7f;
+    float row_y = input_y + input_h + line_h * 0.45f;
     if (!recent || recent->count == 0) {
         const char *msg = "Open a folder to start building history";
         draw_text_run(font, r, msg, (int)strlen(msg), x + pad,
@@ -672,13 +675,13 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
         const char *path = recent_projects_filtered_path(recent, (size_t)i);
         if (!path) continue;
         int selected = i == recent->selected;
-        float ry = row_y + (float)i * line_h * 1.65f;
+        float ry = row_y + (float)i * row_h;
         if (selected)
             draw_round_rect(r, x + pad * 0.75f, ry - line_h * 0.2f,
-                            w - pad * 1.5f, line_h * 1.45f, radius,
+                            w - pad * 1.5f, line_h * 1.28f, radius,
                             (Color){0.16f, 0.19f, 0.24f}, 1.0f);
 
-        float icon = line_h * 0.78f;
+        float icon = line_h * 0.72f;
         draw_folder_icon(r, x + pad, ry + line_h * 0.1f, icon,
                          selected ? (Color){0.62f, 0.75f, 0.98f}
                                   : (Color){0.50f, 0.63f, 0.86f});
