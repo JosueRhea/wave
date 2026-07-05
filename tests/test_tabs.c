@@ -31,6 +31,28 @@ int main(void) {
     CHECK(tabs_current(&tabs) == a);
     CHECK(a->buf == NULL);
 
+    tabs_free(&tabs);
+    memset(&tabs, 0, sizeof tabs);
+    const char *term_argv[] = {"/bin/sh", "-lc", "printf tabterm", NULL};
+    Terminal *term = tabs_new_terminal(&tabs, "term", ".", term_argv);
+    CHECK(term != NULL);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    CHECK_EQ(tabs_current_kind(&tabs), TAB_ITEM_TERMINAL);
+    CHECK(tabs_current_terminal(&tabs) == term);
+    CHECK(tabs_current(&tabs) == NULL);
+    char label[64];
+    tabs_label(&tabs, 0, label, sizeof label);
+    CHECK_STR(label, "term");
+    CHECK_EQ(tabs_close(&tabs, 0), 0);
+
+    memset(&tabs, 0, sizeof tabs);
+    a = tabs_new(&tabs);
+    CHECK(a != NULL);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    CHECK_EQ(tabs_active_index(&tabs), 0);
+    CHECK(tabs_current(&tabs) == a);
+    CHECK(a->buf == NULL);
+
     a->buf = buffer_new();
     CHECK(tabs_find_empty_scratch(&tabs) == a);
     CHECK(tabs_use_empty_scratch(&tabs) == a);

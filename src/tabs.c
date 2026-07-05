@@ -1,31 +1,91 @@
 #include "tabs.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "buffer.h"
 #include "runtime.h"
+#include "view.h"
+
+static void tab_item_init_editor(TabItem *item) {
+    if (!item) return;
+    memset(item, 0, sizeof *item);
+    item->kind = TAB_ITEM_EDITOR;
+    editor_init(&item->editor);
+}
+
+static void tab_item_init_terminal(TabItem *item) {
+    if (!item) return;
+    memset(item, 0, sizeof *item);
+    item->kind = TAB_ITEM_TERMINAL;
+    terminal_init(&item->terminal);
+}
+
+static void tab_item_close(TabItem *item) {
+    if (!item) return;
+    if (item->kind == TAB_ITEM_TERMINAL)
+        terminal_free(&item->terminal);
+    else
+        editor_close(&item->editor);
+}
 
 Editor *tabs_current(TabSet *tabs) {
     if (!tabs || tabs->count <= 0) return NULL;
     if (tabs->active < 0) tabs->active = 0;
     if (tabs->active >= tabs->count) tabs->active = tabs->count - 1;
-    return &tabs->items[tabs->active];
+    if (tabs->items[tabs->active].kind != TAB_ITEM_EDITOR) return NULL;
+    return &tabs->items[tabs->active].editor;
 }
 
 const Editor *tabs_current_const(const TabSet *tabs) {
     if (!tabs || tabs->count <= 0 || tabs->active < 0 || tabs->active >= tabs->count)
         return NULL;
-    return &tabs->items[tabs->active];
+    if (tabs->items[tabs->active].kind != TAB_ITEM_EDITOR) return NULL;
+    return &tabs->items[tabs->active].editor;
+}
+
+Terminal *tabs_current_terminal(TabSet *tabs) {
+    if (!tabs || tabs->count <= 0) return NULL;
+    if (tabs->active < 0) tabs->active = 0;
+    if (tabs->active >= tabs->count) tabs->active = tabs->count - 1;
+    if (tabs->items[tabs->active].kind != TAB_ITEM_TERMINAL) return NULL;
+    return &tabs->items[tabs->active].terminal;
+}
+
+const Terminal *tabs_current_terminal_const(const TabSet *tabs) {
+    if (!tabs || tabs->count <= 0 || tabs->active < 0 || tabs->active >= tabs->count)
+        return NULL;
+    if (tabs->items[tabs->active].kind != TAB_ITEM_TERMINAL) return NULL;
+    return &tabs->items[tabs->active].terminal;
+}
+
+TabItemKind tabs_current_kind(const TabSet *tabs) {
+    if (!tabs || tabs->count <= 0 || tabs->active < 0 || tabs->active >= tabs->count)
+        return TAB_ITEM_EDITOR;
+    return tabs->items[tabs->active].kind;
 }
 
 Editor *tabs_at(TabSet *tabs, int index) {
     if (!tabs || index < 0 || index >= tabs->count) return NULL;
-    return &tabs->items[index];
+    if (tabs->items[index].kind != TAB_ITEM_EDITOR) return NULL;
+    return &tabs->items[index].editor;
 }
 
 const Editor *tabs_at_const(const TabSet *tabs, int index) {
     if (!tabs || index < 0 || index >= tabs->count) return NULL;
-    return &tabs->items[index];
+    if (tabs->items[index].kind != TAB_ITEM_EDITOR) return NULL;
+    return &tabs->items[index].editor;
+}
+
+Terminal *tabs_terminal_at(TabSet *tabs, int index) {
+    if (!tabs || index < 0 || index >= tabs->count) return NULL;
+    if (tabs->items[index].kind != TAB_ITEM_TERMINAL) return NULL;
+    return &tabs->items[index].terminal;
+}
+
+TabItemKind tabs_kind_at(const TabSet *tabs, int index) {
+    if (!tabs || index < 0 || index >= tabs->count) return TAB_ITEM_EDITOR;
+    return tabs->items[index].kind;
 }
 
 Editor *tabs_new(TabSet *tabs) {
@@ -36,14 +96,25 @@ Editor *tabs_new(TabSet *tabs) {
         return e;
     }
     tabs->active = tabs->count++;
-    Editor *e = tabs_current(tabs);
-    if (e) editor_init(e);
-    return e;
+    tab_item_init_editor(&tabs->items[tabs->active]);
+    return &tabs->items[tabs->active].editor;
+}
+
+Terminal *tabs_new_terminal(TabSet *tabs, const char *label, const char *cwd,
+                            const char *const argv[]) {
+    if (!tabs || !argv || !argv[0]) return NULL;
+    if (tabs->count >= WAVE_MAX_TABS) return tabs_current_terminal(tabs);
+    tabs->active = tabs->count++;
+    TabItem *item = &tabs->items[tabs->active];
+    tab_item_init_terminal(item);
+    snprintf(item->label, sizeof item->label, "%s", label ? label : argv[0]);
+    if (!terminal_spawn(&item->terminal, item->label, cwd, argv)) return &item->terminal;
+    return &item->terminal;
 }
 
 int tabs_close(TabSet *tabs, int index) {
     if (!tabs || index < 0 || index >= tabs->count) return tabs ? tabs->count : 0;
-    editor_close(&tabs->items[index]);
+    tab_item_close(&tabs->items[index]);
     for (int j = index; j < tabs->count - 1; j++) tabs->items[j] = tabs->items[j + 1];
     tabs->count--;
     if (tabs->count <= 0) {
@@ -115,7 +186,8 @@ TabStartupEffect tabs_ensure_startup(TabSet *tabs, int workspace_open) {
 int tabs_find_path(const TabSet *tabs, const char *path) {
     if (!tabs || !path) return -1;
     for (int i = 0; i < tabs->count; i++)
-        if (tabs->items[i].path && !strcmp(tabs->items[i].path, path))
+        if (tabs->items[i].kind == TAB_ITEM_EDITOR &&
+            tabs->items[i].editor.path && !strcmp(tabs->items[i].editor.path, path))
             return i;
     return -1;
 }
@@ -123,9 +195,9 @@ int tabs_find_path(const TabSet *tabs, const char *path) {
 Editor *tabs_find_preview(TabSet *tabs) {
     if (!tabs) return NULL;
     for (int i = 0; i < tabs->count; i++) {
-        if (tabs->items[i].preview) {
+        if (tabs->items[i].kind == TAB_ITEM_EDITOR && tabs->items[i].editor.preview) {
             tabs->active = i;
-            return &tabs->items[i];
+            return &tabs->items[i].editor;
         }
     }
     return NULL;
@@ -133,7 +205,8 @@ Editor *tabs_find_preview(TabSet *tabs) {
 
 Editor *tabs_find_empty_scratch(TabSet *tabs) {
     if (!tabs || tabs->count != 1) return NULL;
-    Editor *e = &tabs->items[0];
+    if (tabs->items[0].kind != TAB_ITEM_EDITOR) return NULL;
+    Editor *e = &tabs->items[0].editor;
     if (e->path || e->modified || !e->buf || buffer_length(e->buf) != 0)
         return NULL;
     tabs->active = 0;
@@ -224,7 +297,8 @@ TabOpenResult tabs_open_file(TabSet *tabs, const char *path, int preview,
 Editor *tabs_find_file_watch(TabSet *tabs, int native_id) {
     if (!tabs || native_id < 0) return NULL;
     for (int i = 0; i < tabs->count; i++) {
-        Editor *e = &tabs->items[i];
+        if (tabs->items[i].kind != TAB_ITEM_EDITOR) continue;
+        Editor *e = &tabs->items[i].editor;
         if (watch_file_native_id(&e->watch) == native_id) return e;
     }
     return NULL;
@@ -244,7 +318,8 @@ int tabs_apply_file_watch_poll(TabSet *tabs, WatchService *watch,
     if (!tabs || !out || cap <= 0) return 0;
     int n = 0;
     for (int i = 0; i < tabs->count && n < cap; i++) {
-        Editor *e = &tabs->items[i];
+        if (tabs->items[i].kind != TAB_ITEM_EDITOR) continue;
+        Editor *e = &tabs->items[i].editor;
         EditorDiskChange change = editor_apply_disk_change(e, watch);
         if (change == EDITOR_DISK_NOOP) continue;
         out[n++] = (TabDiskChange){ e, change };
@@ -309,9 +384,21 @@ int tabs_active_index(const TabSet *tabs) {
     return tabs ? tabs->active : 0;
 }
 
+void tabs_label(const TabSet *tabs, int index, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!tabs || index < 0 || index >= tabs->count) return;
+    const TabItem *item = &tabs->items[index];
+    if (item->kind == TAB_ITEM_TERMINAL) {
+        snprintf(out, cap, "%s", item->label[0] ? item->label : "terminal");
+        return;
+    }
+    view_tab_label(&item->editor, out, cap);
+}
+
 void tabs_free(TabSet *tabs) {
     if (!tabs) return;
-    for (int i = 0; i < tabs->count; i++) editor_close(&tabs->items[i]);
+    for (int i = 0; i < tabs->count; i++) tab_item_close(&tabs->items[i]);
     tabs->count = 0;
     tabs->active = 0;
 }

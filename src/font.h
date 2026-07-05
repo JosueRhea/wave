@@ -1,7 +1,7 @@
-/* font.h — a baked monospace glyph atlas (ASCII 32..126) via stb_truetype.
+/* font.h — a baked monospace glyph atlas via stb_truetype.
  *
  * Rasterizes once at load into a single 8-bit (R8) atlas the renderer uploads
- * as a texture. Per-glyph quad geometry is produced on demand from the baked
+ * as a texture. Per-glyph quad geometry is produced on demand from cached
  * metrics — no per-frame rasterization. */
 #ifndef WAVE_FONT_H
 #define WAVE_FONT_H

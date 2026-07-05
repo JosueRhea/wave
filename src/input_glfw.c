@@ -55,6 +55,7 @@ InputKey wave_input_key_from_glfw(int key) {
     case GLFW_KEY_P: return INPUT_KEY_P;
     case GLFW_KEY_F: return INPUT_KEY_F;
     case GLFW_KEY_B: return INPUT_KEY_B;
+    case GLFW_KEY_J: return INPUT_KEY_J;
     case GLFW_KEY_S: return INPUT_KEY_S;
     case GLFW_KEY_RIGHT_BRACKET: return INPUT_KEY_RIGHT_BRACKET;
     case GLFW_KEY_LEFT_BRACKET: return INPUT_KEY_LEFT_BRACKET;

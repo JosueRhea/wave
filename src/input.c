@@ -9,6 +9,7 @@ WaveShortcut input_shortcut(InputKey key, int command, int control,
         case INPUT_KEY_P: return SHORTCUT_PALETTE;
         case INPUT_KEY_F: return shift ? SHORTCUT_SEARCH : SHORTCUT_NONE;
         case INPUT_KEY_B: return SHORTCUT_TOGGLE_SIDEBAR;
+        case INPUT_KEY_J: return SHORTCUT_NEW_TERMINAL;
         case INPUT_KEY_S: return SHORTCUT_SAVE;
         case INPUT_KEY_RIGHT_BRACKET: return SHORTCUT_TAB_NEXT;
         case INPUT_KEY_LEFT_BRACKET: return SHORTCUT_TAB_PREV;
@@ -84,6 +85,8 @@ InputShortcutAction input_shortcut_action(WaveShortcut shortcut,
     case SHORTCUT_PALETTE: return INPUT_SHORTCUT_ACTION_OPEN_PALETTE;
     case SHORTCUT_SEARCH: return INPUT_SHORTCUT_ACTION_OPEN_SEARCH;
     case SHORTCUT_TOGGLE_SIDEBAR: return INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR;
+    case SHORTCUT_NEW_TERMINAL:
+        return INPUT_SHORTCUT_ACTION_NEW_TERMINAL;
     case SHORTCUT_SAVE:
         return editor_has_path ? INPUT_SHORTCUT_ACTION_SAVE
                                : INPUT_SHORTCUT_ACTION_NONE;
@@ -113,6 +116,9 @@ InputShortcutEffect input_shortcut_effect(InputShortcutAction action) {
         break;
     case INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR:
         effect.toggle_sidebar = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_NEW_TERMINAL:
+        effect.new_terminal = 1;
         break;
     case INPUT_SHORTCUT_ACTION_SAVE:
         effect.save_file = 1;

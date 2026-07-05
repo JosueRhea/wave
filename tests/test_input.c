@@ -9,6 +9,7 @@ int main(void) {
     CHECK_EQ(input_shortcut(INPUT_KEY_F, 1, 0, 0, 1), SHORTCUT_SEARCH);
     CHECK_EQ(input_shortcut(INPUT_KEY_F, 1, 0, 0, 0), SHORTCUT_NONE);
     CHECK_EQ(input_shortcut(INPUT_KEY_B, 1, 0, 0, 0), SHORTCUT_TOGGLE_SIDEBAR);
+    CHECK_EQ(input_shortcut(INPUT_KEY_J, 1, 0, 0, 0), SHORTCUT_NEW_TERMINAL);
     CHECK_EQ(input_shortcut(INPUT_KEY_S, 1, 0, 0, 0), SHORTCUT_SAVE);
     CHECK_EQ(input_shortcut(INPUT_KEY_RIGHT_BRACKET, 1, 0, 0, 0), SHORTCUT_TAB_NEXT);
     CHECK_EQ(input_shortcut(INPUT_KEY_LEFT_BRACKET, 1, 0, 0, 0), SHORTCUT_TAB_PREV);
@@ -73,6 +74,7 @@ int main(void) {
     CHECK_EQ(input_shortcut_action(SHORTCUT_PALETTE, 0), INPUT_SHORTCUT_ACTION_OPEN_PALETTE);
     CHECK_EQ(input_shortcut_action(SHORTCUT_SEARCH, 0), INPUT_SHORTCUT_ACTION_OPEN_SEARCH);
     CHECK_EQ(input_shortcut_action(SHORTCUT_TOGGLE_SIDEBAR, 0), INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR);
+    CHECK_EQ(input_shortcut_action(SHORTCUT_NEW_TERMINAL, 0), INPUT_SHORTCUT_ACTION_NEW_TERMINAL);
     CHECK_EQ(input_shortcut_action(SHORTCUT_SAVE, 0), INPUT_SHORTCUT_ACTION_NONE);
     CHECK_EQ(input_shortcut_action(SHORTCUT_SAVE, 1), INPUT_SHORTCUT_ACTION_SAVE);
     CHECK_EQ(input_shortcut_action(SHORTCUT_TAB_NEXT, 0), INPUT_SHORTCUT_ACTION_TAB_NEXT);
@@ -93,6 +95,10 @@ int main(void) {
     effect = input_shortcut_effect(INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR);
     CHECK(effect.toggle_sidebar);
     CHECK(!effect.save_file);
+
+    effect = input_shortcut_effect(INPUT_SHORTCUT_ACTION_NEW_TERMINAL);
+    CHECK(effect.new_terminal);
+    CHECK(!effect.toggle_sidebar);
 
     effect = input_shortcut_effect(INPUT_SHORTCUT_ACTION_SAVE);
     CHECK(effect.save_file);

@@ -5,6 +5,7 @@
 # GUI application (`wave`) against GLFW + OpenGL.
 
 CC      ?= cc
+ZIG     ?= zig
 CFLAGS  ?= -std=c11 -O2 -g -Wall -Wextra -Wno-unused-parameter
 CFLAGS  += -Isrc -Ivendor -Ivendor/tree-sitter/lib/include -Ivendor/tree-sitter/lib/src
 
@@ -53,9 +54,26 @@ TS_JS_TAG     := v0.21.4
 TS_TS_TAG     := v0.21.2
 
 BUILD   := build
+BUILD_CONFIG := $(BUILD)/.config
 QUERY_DIR := queries
+USE_GHOSTTY_VT ?= 0
+USE_GHOSTTY_INTERNAL ?= 0
+GHOSTTY_DIR ?= $(VENDOR)/ghostty
+GHOSTTY_REPO ?= https://github.com/ghostty-org/ghostty.git
+GHOSTTY_VT_PREFIX ?= $(GHOSTTY_DIR)/zig-out
+GHOSTTY_VT_LIB := $(GHOSTTY_VT_PREFIX)/lib/libghostty-vt.a
+GHOSTTY_VT_ARGS ?= -Demit-lib-vt -Dsimd=false -Doptimize=ReleaseFast
+GHOSTTY_INTERNAL_PREFIX ?= $(GHOSTTY_DIR)/macos/GhosttyKit.xcframework/macos-arm64
+GHOSTTY_INTERNAL_LIB := $(GHOSTTY_INTERNAL_PREFIX)/libghostty-internal-fat.a
+GHOSTTY_INTERNAL_ARGS ?= -Dapp-runtime=none -Demit-lib-vt=false -Demit-xcframework=true -Dxcframework-target=native -Demit-macos-app=false -Doptimize=ReleaseFast
+GHOSTTY_DEP :=
+GHOSTTY_GUI_LIBS :=
+GHOSTTY_TEST_LIBS :=
+GHOSTTY_INTERNAL_FRAMEWORKS := -framework Metal -framework QuartzCore \
+                               -framework Foundation -framework IOSurface \
+                               -framework GameController -framework Carbon -lc++
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
-CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c
+CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
 
 # tree-sitter runtime is a single translation unit (lib.c includes the rest).
@@ -71,16 +89,30 @@ GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o \
 
 TEST_LIBS := -framework CoreServices -framework CoreFoundation
 
-TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager test_updater test_recent
+ifneq ($(filter 1,$(USE_GHOSTTY_VT) $(USE_GHOSTTY_INTERNAL)),)
+CFLAGS += -DWAVE_USE_GHOSTTY_VT -DGHOSTTY_STATIC -I$(GHOSTTY_VT_PREFIX)/include
+GHOSTTY_DEP += $(GHOSTTY_VT_LIB)
+GHOSTTY_GUI_LIBS += $(GHOSTTY_VT_LIB)
+GHOSTTY_TEST_LIBS += $(GHOSTTY_VT_LIB)
+endif
+
+ifeq ($(USE_GHOSTTY_INTERNAL),1)
+CFLAGS += -DWAVE_USE_GHOSTTY_INTERNAL -I$(GHOSTTY_INTERNAL_PREFIX)/Headers
+GHOSTTY_DEP += $(GHOSTTY_INTERNAL_LIB)
+GHOSTTY_GUI_LIBS += -Wl,-force_load,$(GHOSTTY_INTERNAL_LIB)
+GUI_LIBS += $(GHOSTTY_INTERNAL_FRAMEWORKS)
+endif
+
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
-        dmg notarize release-macos
+        dmg notarize release-macos ghostty-vt ghostty-internal FORCE
 
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
 #   make dist VERSION=0.1.7-alpha
-VERSION  ?= 0.1.7-alpha
+VERSION  ?= 0.1.8-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources
@@ -126,6 +158,26 @@ $(LSP_STAMP): $(LSP_DIR)/package.json
 vendor: $(TS_DIR)/lib/src/lib.c $(TS_C_DIR)/src/parser.c \
         $(TS_JS_DIR)/src/parser.c $(TS_TS_DIR)/typescript/src/parser.c
 
+ghostty-vt: $(GHOSTTY_VT_LIB)
+
+ghostty-internal: $(GHOSTTY_INTERNAL_LIB)
+
+$(GHOSTTY_INTERNAL_LIB): $(GHOSTTY_DIR)/build.zig
+	@command -v $(ZIG) >/dev/null 2>&1 || \
+	    (echo "zig is required to build Ghostty internal lib artifacts; install Zig 0.15.2+"; exit 1)
+	@echo "  GHOSTTY-INTERNAL libghostty experimental"
+	@cd $(GHOSTTY_DIR) && $(ZIG) build $(GHOSTTY_INTERNAL_ARGS)
+
+$(GHOSTTY_DIR)/build.zig:
+	@echo "  GIT   ghostty"
+	@git clone --depth 1 $(GHOSTTY_REPO) $(GHOSTTY_DIR)
+
+$(GHOSTTY_VT_LIB): $(GHOSTTY_DIR)/build.zig
+	@command -v $(ZIG) >/dev/null 2>&1 || \
+	    (echo "zig is required to build libghostty-vt; install Zig 0.15.2+"; exit 1)
+	@echo "  GHOSTTY-VT libghostty-vt"
+	@cd $(GHOSTTY_DIR) && $(ZIG) build $(GHOSTTY_VT_ARGS)
+
 $(TS_DIR)/lib/src/lib.c:
 	@echo "  GIT   tree-sitter $(TS_TAG)"
 	@git clone --depth 1 --branch $(TS_TAG) $(TS_REPO) $(TS_DIR)
@@ -144,6 +196,16 @@ $(TS_TS_DIR)/typescript/src/parser.c:
 
 $(BUILD):
 	@mkdir -p $(BUILD)
+
+$(BUILD_CONFIG): FORCE | $(BUILD)
+	@tmp="$@.tmp"; \
+	printf '%s\n' \
+	    'USE_GHOSTTY_VT=$(USE_GHOSTTY_VT)' \
+	    'USE_GHOSTTY_INTERNAL=$(USE_GHOSTTY_INTERNAL)' \
+	    'GHOSTTY_VT_PREFIX=$(GHOSTTY_VT_PREFIX)' \
+	    'GHOSTTY_INTERNAL_PREFIX=$(GHOSTTY_INTERNAL_PREFIX)' > $$tmp; \
+	if test -f "$@" && cmp -s $$tmp "$@"; then rm -f $$tmp; \
+	else mv $$tmp "$@"; fi
 
 # --- tree-sitter objects ---
 $(BUILD)/ts_lib.o: vendor | $(BUILD)
@@ -171,6 +233,8 @@ $(BUILD)/ts_tsx_scanner.o: vendor | $(BUILD)
 $(BUILD)/%.o: src/%.c | $(BUILD) vendor
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(CORE_OBJ) $(TS_OBJ) $(GUI_OBJ): $(GHOSTTY_DEP) $(BUILD_CONFIG)
+
 $(BUILD)/libwave.a: $(CORE_OBJ) $(TS_OBJ)
 	@echo "  AR    $@"
 	@ar rcs $@ $^
@@ -189,13 +253,16 @@ $(BUILD)/main.o: src/main.c | $(BUILD) vendor
 $(BUILD)/mac.o: src/mac.m | $(BUILD)
 	$(CC) $(CFLAGS) $(GUI_CFLAGS) -fobjc-arc -c $< -o $@
 
-$(BUILD)/wave: $(GUI_OBJ) $(BUILD)/libwave.a
+$(BUILD)/wave: $(GUI_OBJ) $(BUILD)/libwave.a $(GHOSTTY_DEP)
 	@echo "  LD    $@"
-	@$(CC) $(CFLAGS) $(GUI_OBJ) $(BUILD)/libwave.a $(GUI_LIBS) -o $@
+	@$(CC) $(CFLAGS) $(GUI_OBJ) $(BUILD)/libwave.a $(GHOSTTY_GUI_LIBS) $(GUI_LIBS) -o $@
 
 # --- tests ---
 $(BUILD)/%: tests/%.c $(BUILD)/libwave.a
-	$(CC) $(CFLAGS) $< $(BUILD)/libwave.a $(TEST_LIBS) -o $@
+	$(CC) $(CFLAGS) $< $(BUILD)/libwave.a $(GHOSTTY_TEST_LIBS) $(TEST_LIBS) -o $@
+
+$(BUILD)/test_font: tests/test_font.c $(BUILD)/font.o $(BUILD)/stb_impl.o
+	$(CC) $(CFLAGS) $< $(BUILD)/font.o $(BUILD)/stb_impl.o -o $@
 
 test: $(TEST_BIN)
 	@echo "== running tests =="

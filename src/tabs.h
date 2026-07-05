@@ -2,11 +2,24 @@
 #define WAVE_TABS_H
 
 #include "editor.h"
+#include "terminal.h"
 
 #define WAVE_MAX_TABS 32
 
+typedef enum {
+    TAB_ITEM_EDITOR,
+    TAB_ITEM_TERMINAL
+} TabItemKind;
+
 typedef struct {
-    Editor items[WAVE_MAX_TABS];
+    TabItemKind kind;
+    Editor editor;
+    Terminal terminal;
+    char label[64];
+} TabItem;
+
+typedef struct {
+    TabItem items[WAVE_MAX_TABS];
     int count;
     int active;
 } TabSet;
@@ -59,9 +72,16 @@ typedef struct {
 
 Editor *tabs_current(TabSet *tabs);
 const Editor *tabs_current_const(const TabSet *tabs);
+Terminal *tabs_current_terminal(TabSet *tabs);
+const Terminal *tabs_current_terminal_const(const TabSet *tabs);
+TabItemKind tabs_current_kind(const TabSet *tabs);
 Editor *tabs_at(TabSet *tabs, int index);
 const Editor *tabs_at_const(const TabSet *tabs, int index);
+Terminal *tabs_terminal_at(TabSet *tabs, int index);
+TabItemKind tabs_kind_at(const TabSet *tabs, int index);
 Editor *tabs_new(TabSet *tabs);
+Terminal *tabs_new_terminal(TabSet *tabs, const char *label, const char *cwd,
+                            const char *const argv[]);
 int tabs_close(TabSet *tabs, int index);
 void tabs_goto(TabSet *tabs, int delta);
 int tabs_set_active(TabSet *tabs, int index);
@@ -91,6 +111,7 @@ TabWatchEffect tabs_process_file_watchers(TabSet *tabs, WatchService *watch,
                                           double poll_interval);
 int tabs_count(const TabSet *tabs);
 int tabs_active_index(const TabSet *tabs);
+void tabs_label(const TabSet *tabs, int index, char *out, size_t cap);
 void tabs_free(TabSet *tabs);
 
 #endif

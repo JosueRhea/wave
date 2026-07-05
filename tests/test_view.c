@@ -174,11 +174,19 @@ int main(void) {
                               "file.c", 1, "c", 4, 2, 3, 1, 4),
              VIEW_STATUS_NORMAL);
     CHECK_STR(out, "INSERT  file.c *  c  Ln 5, Col 3  3 errs  [2/4]");
+    CHECK_EQ(view_status_text(out, sizeof out, NULL, "", "NORMAL",
+                              NULL, 0, "text", 0, 0, 0, 0, 1),
+             VIEW_STATUS_NORMAL);
+    CHECK_STR(out, "NORMAL  [scratch]  text  Ln 1, Col 1  0 errs  [1/1]");
     ViewStatusLine status_line = view_status_line(out, sizeof out, &e, NULL, "saved",
                                                   "NORMAL", 0, 0, 0, 0, 1);
     CHECK_EQ(status_line.kind, VIEW_STATUS_INFO);
     CHECK(status_line.r > 0.85f && status_line.g > 0.83f && status_line.b > 0.54f);
     CHECK_STR(out, "saved");
+    status_line = view_editor_status_line(out, sizeof out, NULL, "term", "",
+                                          "NORMAL", 0, 0, 1);
+    CHECK_EQ(status_line.kind, VIEW_STATUS_COMMAND);
+    CHECK_STR(out, ":term");
     Editor status_editor;
     fill(&status_editor, "alpha\nbeta\n");
     status_editor.path = "/tmp/status.c";

@@ -9,6 +9,7 @@
 #include "recent.h"
 #include "render.h"
 #include "tabs.h"
+#include "terminal.h"
 #include "text_view.h"
 #include "theme.h"
 
@@ -58,5 +59,8 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
                                 Font *font, Renderer *r, float adv,
                                 float line_h, float ascent, float top_pad,
                                 float radius);
+void draw_terminal_panel(const Terminal *term, int focused, float x, float y,
+                         float w, float h, Font *font, Renderer *r,
+                         float adv, float line_h, float ascent, float opacity);
 
 #endif

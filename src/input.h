@@ -10,6 +10,7 @@ typedef enum {
     INPUT_KEY_P,
     INPUT_KEY_F,
     INPUT_KEY_B,
+    INPUT_KEY_J,
     INPUT_KEY_S,
     INPUT_KEY_RIGHT_BRACKET,
     INPUT_KEY_LEFT_BRACKET,
@@ -31,6 +32,7 @@ typedef enum {
     SHORTCUT_PALETTE,
     SHORTCUT_SEARCH,
     SHORTCUT_TOGGLE_SIDEBAR,
+    SHORTCUT_NEW_TERMINAL,
     SHORTCUT_SAVE,
     SHORTCUT_TAB_NEXT,
     SHORTCUT_TAB_PREV,
@@ -80,6 +82,7 @@ typedef enum {
     INPUT_SHORTCUT_ACTION_OPEN_PALETTE,
     INPUT_SHORTCUT_ACTION_OPEN_SEARCH,
     INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR,
+    INPUT_SHORTCUT_ACTION_NEW_TERMINAL,
     INPUT_SHORTCUT_ACTION_SAVE,
     INPUT_SHORTCUT_ACTION_TAB_NEXT,
     INPUT_SHORTCUT_ACTION_TAB_PREV,
@@ -102,6 +105,7 @@ typedef struct {
     int open_palette;
     int open_search;
     int toggle_sidebar;
+    int new_terminal;
     int save_file;
     int tab_delta;
     int close_tab;

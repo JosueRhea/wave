@@ -80,13 +80,19 @@ static void draw_file_badge(Renderer *r, float x, float y, float size, Color c,
                   0.09f, 0.10f, 0.13f, selected ? 0.58f : 0.78f);
 }
 
+static int draw_utf8_codepoint(const char *s, size_t n, unsigned int *cp);
+
 void draw_text_run(Font *f, Renderer *r, const char *s, int n, float x,
                    float y, Color c) {
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n;) {
+        unsigned int cp = 0;
+        int used = draw_utf8_codepoint(s + i, (size_t)(n - i), &cp);
+        if (used <= 0) used = 1;
         float x0, y0, x1, y1, s0, t0, s1, t1;
-        if (font_quad(f, (unsigned char)s[i], &x, &y, &x0, &y0, &x1, &y1, &s0,
+        if (font_quad(f, (int)cp, &x, &y, &x0, &y0, &x1, &y1, &s0,
                       &t0, &s1, &t1))
             renderer_glyph(r, x0, y0, x1, y1, s0, t0, s1, t1, c.r, c.g, c.b, 1.0f);
+        i += used;
     }
 }
 
@@ -123,6 +129,414 @@ void draw_file_icon(Renderer *r, float x, float y, float size, Color c) {
     renderer_rect(r, fx, y, w, h, c.r, c.g, c.b, 1.0f);
     float fold = size * 0.32f;
     renderer_rect(r, fx + w - fold, y, fold, fold, 0.09f, 0.10f, 0.12f, 1.0f);
+}
+
+static void draw_clipped_text(Font *font, Renderer *r, const char *s,
+                              float x, float y, float max_w, float adv,
+                              Color c) {
+    if (!s || max_w <= 0.0f || adv <= 0.0f) return;
+    int max_n = (int)(max_w / adv);
+    int n = (int)strlen(s);
+    if (n > max_n) n = max_n;
+    if (n > 0) draw_text_run(font, r, s, n, x, y, c);
+}
+
+static Color draw_terminal_color(TerminalColor c) {
+    return (Color){c.r, c.g, c.b};
+}
+
+static int draw_utf8_codepoint(const char *s, size_t n, unsigned int *cp) {
+    if (!s || !n || !cp) return 0;
+    unsigned char c0 = (unsigned char)s[0];
+    if (c0 < 0x80) {
+        *cp = c0;
+        return 1;
+    }
+    if ((c0 & 0xE0) == 0xC0 && n >= 2) {
+        *cp = ((unsigned int)(c0 & 0x1F) << 6) |
+              (unsigned int)(((unsigned char)s[1]) & 0x3F);
+        return 2;
+    }
+    if ((c0 & 0xF0) == 0xE0 && n >= 3) {
+        *cp = ((unsigned int)(c0 & 0x0F) << 12) |
+              ((unsigned int)(((unsigned char)s[1]) & 0x3F) << 6) |
+              (unsigned int)(((unsigned char)s[2]) & 0x3F);
+        return 3;
+    }
+    if ((c0 & 0xF8) == 0xF0 && n >= 4) {
+        *cp = ((unsigned int)(c0 & 0x07) << 18) |
+              ((unsigned int)(((unsigned char)s[1]) & 0x3F) << 12) |
+              ((unsigned int)(((unsigned char)s[2]) & 0x3F) << 6) |
+              (unsigned int)(((unsigned char)s[3]) & 0x3F);
+        return 4;
+    }
+    *cp = '?';
+    return 1;
+}
+
+static int draw_terminal_box_glyph(Renderer *r, unsigned int cp, float x,
+                                   float top, float adv, float line_h,
+                                   Color c) {
+    if (cp < 0x2500 || cp > 0x257F) return 0;
+
+    float thin = adv * 0.12f;
+    if (thin < 1.25f) thin = 1.25f;
+    if (thin > 2.5f) thin = 2.5f;
+    float thick = thin * 1.55f;
+    float t = (cp == 0x2501 || cp == 0x2503) ? thick : thin;
+    float mid_x = x + adv * 0.5f;
+    float mid_y = top + line_h * 0.5f;
+    int left = 0, right = 0, up = 0, down = 0;
+
+    switch (cp) {
+    case 0x2500: case 0x2501: case 0x2550:
+        left = right = 1;
+        break;
+    case 0x2502: case 0x2503: case 0x2551:
+        up = down = 1;
+        break;
+    case 0x250C: case 0x250F: case 0x2554: case 0x256D:
+        right = down = 1;
+        break;
+    case 0x2510: case 0x2513: case 0x2557: case 0x256E:
+        left = down = 1;
+        break;
+    case 0x2514: case 0x2517: case 0x255A: case 0x2570:
+        right = up = 1;
+        break;
+    case 0x2518: case 0x251B: case 0x255D: case 0x256F:
+        left = up = 1;
+        break;
+    case 0x251C: case 0x2523: case 0x2560:
+        up = down = right = 1;
+        break;
+    case 0x2524: case 0x252B: case 0x2563:
+        up = down = left = 1;
+        break;
+    case 0x252C: case 0x2533: case 0x2566:
+        left = right = down = 1;
+        break;
+    case 0x2534: case 0x253B: case 0x2569:
+        left = right = up = 1;
+        break;
+    case 0x253C: case 0x254B: case 0x256C:
+        left = right = up = down = 1;
+        break;
+    default:
+        return 0;
+    }
+
+    if (left)
+        renderer_rect(r, x, mid_y - t * 0.5f, adv * 0.5f + t * 0.5f, t,
+                      c.r, c.g, c.b, 1.0f);
+    if (right)
+        renderer_rect(r, mid_x - t * 0.5f, mid_y - t * 0.5f,
+                      adv * 0.5f + t * 0.5f, t, c.r, c.g, c.b, 1.0f);
+    if (up)
+        renderer_rect(r, mid_x - t * 0.5f, top, t,
+                      line_h * 0.5f + t * 0.5f, c.r, c.g, c.b, 1.0f);
+    if (down)
+        renderer_rect(r, mid_x - t * 0.5f, mid_y - t * 0.5f, t,
+                      line_h * 0.5f + t * 0.5f, c.r, c.g, c.b, 1.0f);
+    return 1;
+}
+
+static int draw_terminal_block_glyph(Renderer *r, unsigned int cp, float x,
+                                     float top, float adv, float line_h,
+                                     Color c) {
+    switch (cp) {
+    case 0x2588:
+        renderer_rect(r, x, top, adv, line_h, c.r, c.g, c.b, 1.0f);
+        return 1;
+    case 0x2580:
+        renderer_rect(r, x, top, adv, line_h * 0.5f, c.r, c.g, c.b, 1.0f);
+        return 1;
+    case 0x2584:
+        renderer_rect(r, x, top + line_h * 0.5f, adv, line_h * 0.5f,
+                      c.r, c.g, c.b, 1.0f);
+        return 1;
+    case 0x258C:
+        renderer_rect(r, x, top, adv * 0.5f, line_h, c.r, c.g, c.b, 1.0f);
+        return 1;
+    case 0x2590:
+        renderer_rect(r, x + adv * 0.5f, top, adv * 0.5f, line_h,
+                      c.r, c.g, c.b, 1.0f);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void draw_cell_triangle_right(Renderer *r, float x, float top,
+                                     float adv, float line_h, Color c) {
+    int slices = 9;
+    float left = x + adv * 0.24f;
+    float width = adv * 0.54f;
+    float mid = top + line_h * 0.5f;
+    for (int i = 0; i < slices; i++) {
+        float t = ((float)(slices - i) - 0.5f) / (float)slices;
+        float h = line_h * 0.58f * t;
+        float sx = left + width * (float)i / (float)slices;
+        renderer_rect(r, sx, mid - h * 0.5f, width / (float)slices + 0.75f, h,
+                      c.r, c.g, c.b, 1.0f);
+    }
+}
+
+static void draw_cell_triangle_left(Renderer *r, float x, float top,
+                                    float adv, float line_h, Color c) {
+    int slices = 9;
+    float left = x + adv * 0.22f;
+    float width = adv * 0.54f;
+    float mid = top + line_h * 0.5f;
+    for (int i = 0; i < slices; i++) {
+        float t = ((float)i + 0.5f) / (float)slices;
+        float h = line_h * 0.58f * t;
+        float sx = left + width * (float)i / (float)slices;
+        renderer_rect(r, sx, mid - h * 0.5f, width / (float)slices + 0.75f, h,
+                      c.r, c.g, c.b, 1.0f);
+    }
+}
+
+static void draw_cell_angle_right(Renderer *r, float x, float top,
+                                  float adv, float line_h, Color c) {
+    float thick = adv * 0.12f;
+    if (thick < 1.2f) thick = 1.2f;
+    if (thick > 2.3f) thick = 2.3f;
+    float left = x + adv * 0.35f;
+    float tip = x + adv * 0.66f;
+    float mid = top + line_h * 0.50f;
+    float upper = top + line_h * 0.34f;
+    float lower = top + line_h * 0.66f;
+    int steps = 6;
+    for (int i = 0; i < steps; i++) {
+        float t = (float)i / (float)(steps - 1);
+        float ux = left + (tip - left) * t;
+        float uy = upper + (mid - upper) * t;
+        float lx = left + (tip - left) * t;
+        float ly = lower + (mid - lower) * t;
+        renderer_rect(r, ux, uy - thick * 0.5f, thick, thick,
+                      c.r, c.g, c.b, 1.0f);
+        renderer_rect(r, lx, ly - thick * 0.5f, thick, thick,
+                      c.r, c.g, c.b, 1.0f);
+    }
+}
+
+static void draw_cell_angle_left(Renderer *r, float x, float top,
+                                 float adv, float line_h, Color c) {
+    float thick = adv * 0.12f;
+    if (thick < 1.2f) thick = 1.2f;
+    if (thick > 2.3f) thick = 2.3f;
+    float left = x + adv * 0.34f;
+    float right = x + adv * 0.65f;
+    float mid = top + line_h * 0.50f;
+    float upper = top + line_h * 0.34f;
+    float lower = top + line_h * 0.66f;
+    int steps = 6;
+    for (int i = 0; i < steps; i++) {
+        float t = (float)i / (float)(steps - 1);
+        float ux = right + (left - right) * t;
+        float uy = upper + (mid - upper) * t;
+        float lx = right + (left - right) * t;
+        float ly = lower + (mid - lower) * t;
+        renderer_rect(r, ux, uy - thick * 0.5f, thick, thick,
+                      c.r, c.g, c.b, 1.0f);
+        renderer_rect(r, lx, ly - thick * 0.5f, thick, thick,
+                      c.r, c.g, c.b, 1.0f);
+    }
+}
+
+static int draw_terminal_angle_glyph(Renderer *r, unsigned int cp, float x,
+                                     float top, float adv, float line_h,
+                                     Color c) {
+    switch (cp) {
+    case 0x203A: /* single right-pointing angle quotation mark */
+    case 0x276F: /* heavy right-pointing angle quotation mark */
+        draw_cell_angle_right(r, x, top, adv, line_h, c);
+        return 1;
+    case 0x2039: /* single left-pointing angle quotation mark */
+    case 0x276E: /* heavy left-pointing angle quotation mark */
+        draw_cell_angle_left(r, x, top, adv, line_h, c);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int draw_terminal_playback_glyph(Renderer *r, unsigned int cp, float x,
+                                        float top, float adv, float line_h,
+                                        Color c) {
+    float cy = top + line_h * 0.5f;
+    switch (cp) {
+    case 0x23F5: /* black medium right-pointing triangle */
+        draw_cell_triangle_right(r, x, top, adv, line_h, c);
+        return 1;
+    case 0x23F4: /* black medium left-pointing triangle */
+        draw_cell_triangle_left(r, x, top, adv, line_h, c);
+        return 1;
+    case 0x23F8: { /* double vertical bar */
+        float w = adv * 0.16f;
+        float h = line_h * 0.58f;
+        renderer_rect(r, x + adv * 0.30f, cy - h * 0.5f, w, h,
+                      c.r, c.g, c.b, 1.0f);
+        renderer_rect(r, x + adv * 0.54f, cy - h * 0.5f, w, h,
+                      c.r, c.g, c.b, 1.0f);
+        return 1;
+    }
+    case 0x23F9: { /* black square for stop */
+        float s = adv * 0.55f;
+        renderer_rect(r, x + (adv - s) * 0.5f, cy - s * 0.5f, s, s,
+                      c.r, c.g, c.b, 1.0f);
+        return 1;
+    }
+    case 0x23FA: { /* black circle for record */
+        float s = adv * 0.52f;
+        int rows = 9;
+        for (int i = 0; i < rows; i++) {
+            float yy = ((float)i + 0.5f) / (float)rows * 2.0f - 1.0f;
+            float ww = s * (1.0f - yy * yy);
+            renderer_rect(r, x + (adv - ww) * 0.5f,
+                          cy - s * 0.5f + s * (float)i / (float)rows,
+                          ww, s / (float)rows + 0.75f,
+                          c.r, c.g, c.b, 1.0f);
+        }
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
+static int draw_terminal_prompt_marker_line(const char *s, size_t n) {
+    if (!s || n == 0) return 0;
+    int saw_marker = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == ' ') continue;
+        if (s[i] == '?' && !saw_marker) {
+            saw_marker = 1;
+            continue;
+        }
+        return 0;
+    }
+    return saw_marker;
+}
+
+static void draw_terminal_cell_text(Font *font, Renderer *r, const char *s,
+                                    size_t n, float x, float y, float top,
+                                    float adv, float line_h, Color c,
+                                    int prompt_marker) {
+    if (!s || n == 0) return;
+    unsigned int cp = 0;
+    (void)draw_utf8_codepoint(s, n, &cp);
+    if (prompt_marker && cp == '?') cp = 0x203A;
+    if (draw_terminal_box_glyph(r, cp, x, top, adv, line_h, c)) return;
+    if (draw_terminal_block_glyph(r, cp, x, top, adv, line_h, c)) return;
+    if (draw_terminal_angle_glyph(r, cp, x, top, adv, line_h, c)) return;
+    if (draw_terminal_playback_glyph(r, cp, x, top, adv, line_h, c)) return;
+    float pen_x = x;
+    float pen_y = y;
+    float x0, y0, x1, y1, s0, t0, s1, t1;
+    if (font_quad(font, (int)cp, &pen_x, &pen_y, &x0, &y0, &x1, &y1, &s0,
+                  &t0, &s1, &t1))
+        renderer_glyph(r, x0, y0, x1, y1, s0, t0, s1, t1,
+                       c.r, c.g, c.b, 1.0f);
+}
+
+static void draw_terminal_line(Font *font, Renderer *r, const Terminal *term,
+                               size_t line_index, float x, float y,
+                               float top, float max_w, float adv,
+                               float line_h, Color default_fg) {
+    const char *s = terminal_line(term, line_index);
+    if (!s || max_w <= 0.0f || adv <= 0.0f) return;
+    size_t max_cols = (size_t)(max_w / adv);
+    size_t n = strlen(s);
+
+    const TerminalLineStyle *style = terminal_line_style(term, line_index);
+    int prompt_marker = draw_terminal_prompt_marker_line(s, n);
+    if (!style || style->ncells == 0) {
+        if (prompt_marker) {
+            for (size_t i = 0; i < n && i < max_cols; i++) {
+                if (s[i] != '?') continue;
+                draw_terminal_cell_text(font, r, s + i, 1, x + adv * (float)i,
+                                        y, top, adv, line_h, default_fg, 1);
+                return;
+            }
+        } else {
+            int max_n = (int)max_cols;
+            int draw_n = (int)n;
+            if (draw_n > max_n) draw_n = max_n;
+            if (draw_n > 0) draw_text_run(font, r, s, draw_n, x, y, default_fg);
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < style->ncells; i++) {
+        const TerminalCellStyle *cell = &style->cells[i];
+        if (!cell->has_bg || cell->col_start >= max_cols) continue;
+        size_t cols = cell->col_len;
+        if (cell->col_start + cols > max_cols) cols = max_cols - cell->col_start;
+        if (cols == 0) continue;
+        Color bg = draw_terminal_color(cell->bg);
+        renderer_rect(r, x + adv * (float)cell->col_start, top,
+                      adv * (float)cols, line_h,
+                      bg.r, bg.g, bg.b, 0.92f);
+    }
+
+    for (size_t i = 0; i < style->ncells; i++) {
+        const TerminalCellStyle *cell = &style->cells[i];
+        if (cell->col_start >= max_cols || cell->byte_start >= n ||
+            cell->byte_len == 0)
+            continue;
+        Color fg = cell->has_fg ? draw_terminal_color(cell->fg) : default_fg;
+        draw_terminal_cell_text(font, r, s + cell->byte_start, cell->byte_len,
+                                x + adv * (float)cell->col_start, y, top,
+                                adv, line_h, fg, prompt_marker);
+    }
+}
+
+void draw_terminal_panel(const Terminal *term, int focused, float x, float y,
+                         float w, float h, Font *font, Renderer *r,
+                         float adv, float line_h, float ascent, float opacity) {
+    if (!term || w <= 0.0f || h <= 0.0f) return;
+    renderer_rect(r, x, y, w, h, 0.075f, 0.085f, 0.105f, opacity);
+
+    float pad = 14.0f;
+    char title[192];
+    snprintf(title, sizeof title, "%s  %s%s", term->title[0] ? term->title : "Terminal",
+             terminal_status(term), focused ? "  input" : "");
+    draw_clipped_text(font, r, title, x + pad, y + ascent + 10.0f,
+                      w - pad * 2.0f, adv,
+                      focused ? (Color){0.80f, 0.88f, 1.00f}
+                              : (Color){0.62f, 0.68f, 0.76f});
+
+    float body_y = y + line_h + 20.0f;
+    float bottom = y + h - 8.0f;
+    int rows = (int)((bottom - body_y) / line_h);
+    if (rows < 1) return;
+    size_t start = terminal_visible_start(term, rows);
+    size_t total = term->nlines + (term->current_len ? 1u : 0u);
+    size_t end = start + (size_t)rows;
+    if (end > total) end = total;
+    float row_y = body_y + ascent;
+    float row_top = body_y;
+    for (size_t i = start; i < end; i++) {
+        draw_terminal_line(font, r, term, i, x + pad, row_y, row_top,
+                           w - pad * 2.0f, adv, line_h,
+                           (Color){0.84f, 0.86f, 0.88f});
+        row_y += line_h;
+        row_top += line_h;
+    }
+    if (focused && term->running) {
+        float cx = x + pad;
+        float cy = row_y - ascent + 2.0f;
+        if (term->ghostty_enabled && term->cursor_visible) {
+            cx = x + pad + adv * (float)term->cursor_col;
+            int visible_row = term->cursor_row - (int)start;
+            cy = body_y + line_h * (float)visible_row + 2.0f;
+        }
+        if (cy >= body_y && cy < bottom && cx < x + w - pad)
+            renderer_rect(r, cx, cy, adv * 0.7f, line_h - 4.0f,
+                          0.52f, 0.70f, 1.0f, 0.75f);
+    }
 }
 
 void draw_sidebar_panel(Workspace *ws, const char *active_path, int side_cells,
@@ -239,9 +653,8 @@ float draw_tabs_panel(TabSet *tabs, int fb_w, Font *font, Renderer *r,
             renderer_rect(r, x, top_y + tab_h - 2.0f, tab_w - 1.0f, 2.0f,
                           0.45f, 0.60f, 0.95f, 1.0f);
 
-        Editor *e = tabs_at(tabs, i);
         char label[64];
-        view_tab_label(e, label, sizeof label);
+        tabs_label(tabs, i, label, sizeof label);
         int nl = view_clamp_text_len(label, (int)(tab_w / adv) - 3);
         Color c = act ? (Color){0.92f, 0.93f, 0.95f}
                       : (Color){0.62f, 0.66f, 0.72f};
