@@ -255,9 +255,35 @@ static int terminal_argc(const char *const argv[], int max_args) {
     return argc;
 }
 
+static int terminal_bare_command(const char *cmd) {
+    return cmd && cmd[0] && !strchr(cmd, '/');
+}
+
+static void terminal_apply_login_shell_path(const char *const argv[]) {
+    if (!argv || !terminal_bare_command(argv[0])) return;
+
+    const char *begin = "__WAVE_PATH_BEGIN__";
+    const char *end = "__WAVE_PATH_END__";
+    FILE *fp = popen("/bin/zsh -lic 'printf \"__WAVE_PATH_BEGIN__%s__WAVE_PATH_END__\" \"$PATH\"' 2>/dev/null", "r");
+    if (!fp) return;
+
+    char buf[8192];
+    size_t n = fread(buf, 1, sizeof buf - 1, fp);
+    buf[n] = '\0';
+    pclose(fp);
+
+    char *start = strstr(buf, begin);
+    if (!start) return;
+    start += strlen(begin);
+    char *stop = strstr(start, end);
+    if (!stop || stop == start) return;
+    *stop = '\0';
+    setenv("PATH", start, 1);
+}
+
 static void terminal_exec_login_shell(const char *const argv[]) {
     enum { MAX_ARGS = 60 };
-    if (!argv || !argv[0] || strchr(argv[0], '/')) return;
+    if (!argv || !terminal_bare_command(argv[0])) return;
 
     int argc = terminal_argc(argv, MAX_ARGS);
     if (argc <= 0 || argc >= MAX_ARGS) return;
@@ -303,6 +329,7 @@ int terminal_spawn(Terminal *t, const char *title, const char *cwd,
     if (pid == 0) {
         if (cwd && chdir(cwd) != 0) _exit(127);
         setenv("TERM", "xterm-256color", 0);
+        terminal_apply_login_shell_path(argv);
         execvp(argv[0], (char *const *)argv);
         if (errno == ENOENT) terminal_exec_login_shell(argv);
         fprintf(stderr, "wave: command not found: %s\r\n", argv[0]);

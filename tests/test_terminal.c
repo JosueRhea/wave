@@ -84,12 +84,21 @@ int main(void) {
         CHECK(tmp != NULL);
         if (tmp) {
             char bin_dir[512];
+            char direct_dir[512];
             char script_path[512];
+            char direct_script_path[512];
+            char hook_script_path[512];
             char zshrc_path[512];
             snprintf(bin_dir, sizeof bin_dir, "%s/bin", tmp);
+            snprintf(direct_dir, sizeof direct_dir, "%s/direct-bin", tmp);
             snprintf(script_path, sizeof script_path, "%s/wave-shell-path-test", bin_dir);
+            snprintf(direct_script_path, sizeof direct_script_path,
+                     "%s/wave-direct-path-test", direct_dir);
+            snprintf(hook_script_path, sizeof hook_script_path,
+                     "%s/wave-hook-path-test", bin_dir);
             snprintf(zshrc_path, sizeof zshrc_path, "%s/.zshrc", tmp);
             CHECK_EQ(mkdir(bin_dir, 0700), 0);
+            CHECK_EQ(mkdir(direct_dir, 0700), 0);
 
             FILE *script = fopen(script_path, "w");
             CHECK(script != NULL);
@@ -99,9 +108,26 @@ int main(void) {
                 CHECK_EQ(chmod(script_path, 0700), 0);
             }
 
+            FILE *hook_script = fopen(hook_script_path, "w");
+            CHECK(hook_script != NULL);
+            if (hook_script) {
+                fprintf(hook_script, "#!/bin/sh\nprintf hook-path-ok\n");
+                fclose(hook_script);
+                CHECK_EQ(chmod(hook_script_path, 0700), 0);
+            }
+
+            FILE *direct_script = fopen(direct_script_path, "w");
+            CHECK(direct_script != NULL);
+            if (direct_script) {
+                fprintf(direct_script, "#!/bin/sh\n/bin/sh -c wave-hook-path-test\n");
+                fclose(direct_script);
+                CHECK_EQ(chmod(direct_script_path, 0700), 0);
+            }
+
             FILE *zshrc = fopen(zshrc_path, "w");
             CHECK(zshrc != NULL);
             if (zshrc) {
+                fprintf(zshrc, "printf startup-noise\n");
                 fprintf(zshrc, "export PATH=\"%s:$PATH\"\n", bin_dir);
                 fclose(zshrc);
             }
@@ -119,6 +145,17 @@ int main(void) {
             CHECK(terminal_spawn(&t, "path", ".", shell_path_argv));
             poll_terminal_until_done(&t);
             CHECK(terminal_contains(&t, "shell-path-ok"));
+            terminal_free(&t);
+
+            char direct_path[640];
+            snprintf(direct_path, sizeof direct_path, "%s:/usr/bin:/bin", direct_dir);
+            setenv("PATH", direct_path, 1);
+
+            terminal_init(&t);
+            const char *direct_path_argv[] = {"wave-direct-path-test", NULL};
+            CHECK(terminal_spawn(&t, "direct-path", ".", direct_path_argv));
+            poll_terminal_until_done(&t);
+            CHECK(terminal_contains(&t, "hook-path-ok"));
             terminal_free(&t);
 
             restore_env_value("PATH", old_path);
