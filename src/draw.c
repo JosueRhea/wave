@@ -621,10 +621,18 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
     int max_rows = 7;
     if (visible > max_rows) visible = max_rows;
     int rows_for_height = visible ? visible : 1;
+    float descent = line_h - ascent;
+    if (descent < 0.0f) descent = line_h * 0.25f;
     float input_h = line_h * 1.55f;
-    float row_h = line_h * 1.72f;
-    float h = pad * 2.0f + line_h * 1.35f + input_h +
-              line_h * 0.45f + (float)rows_for_height * row_h;
+    float title_baseline = pad + ascent;
+    float title_bottom = title_baseline + descent;
+    float input_y_rel = title_bottom + line_h * 0.62f;
+    float row_y_rel = input_y_rel + input_h + line_h * 0.42f;
+    float row_pad_y = line_h * 0.18f;
+    float row_name_baseline = row_pad_y + ascent;
+    float row_path_baseline = row_name_baseline + line_h * 0.78f;
+    float row_h = row_path_baseline + descent + row_pad_y;
+    float h = row_y_rel + (float)rows_for_height * row_h + pad;
     float x = ((float)fb_w - w) * 0.5f;
     float available_h = (float)fb_h - top_pad;
     float y = top_pad + (available_h - h) * 0.24f;
@@ -638,10 +646,10 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
 
     const char *title = "Recent Projects";
     draw_text_run(font, r, title, (int)strlen(title),
-                  x + pad, y + pad + ascent,
+                  x + pad, y + title_baseline,
                   (Color){0.91f, 0.93f, 0.96f});
 
-    float input_y = y + pad + line_h * 1.45f;
+    float input_y = y + input_y_rel;
     draw_round_rect(r, x + pad, input_y, w - pad * 2.0f, input_h,
                     radius, (Color){0.12f, 0.14f, 0.17f}, 1.0f);
     const char *query = recent ? recent->query : "";
@@ -657,7 +665,7 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
     renderer_rect(r, cursor_x + adv * 0.12f, input_y + 6.0f,
                   1.4f, input_h - 12.0f, 0.78f, 0.86f, 1.0f, 1.0f);
 
-    float row_y = input_y + input_h + line_h * 0.45f;
+    float row_y = y + row_y_rel;
     if (!recent || recent->count == 0) {
         const char *msg = "Open a folder to start building history";
         draw_text_run(font, r, msg, (int)strlen(msg), x + pad,
@@ -677,25 +685,26 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
         int selected = i == recent->selected;
         float ry = row_y + (float)i * row_h;
         if (selected)
-            draw_round_rect(r, x + pad * 0.75f, ry - line_h * 0.2f,
-                            w - pad * 1.5f, line_h * 1.62f, radius,
+            draw_round_rect(r, x + pad * 0.75f, ry,
+                            w - pad * 1.5f, row_h, radius,
                             (Color){0.16f, 0.19f, 0.24f}, 1.0f);
 
         float icon = line_h * 0.72f;
-        draw_folder_icon(r, x + pad, ry + line_h * 0.22f, icon,
+        draw_folder_icon(r, x + pad, ry + (row_h - icon) * 0.5f, icon,
                          selected ? (Color){0.62f, 0.75f, 0.98f}
                                   : (Color){0.50f, 0.63f, 0.86f});
         const char *base = draw_path_basename(path);
         int base_len = view_clamp_text_len(base, (int)((w - pad * 4.0f) / adv));
         draw_text_run(font, r, base, base_len, x + pad + adv * 2.4f,
-                      ry + ascent, selected ? (Color){0.94f, 0.96f, 0.99f}
-                                            : (Color){0.78f, 0.82f, 0.88f});
+                      ry + row_name_baseline,
+                      selected ? (Color){0.94f, 0.96f, 0.99f}
+                               : (Color){0.78f, 0.82f, 0.88f});
 
         int parent_len = draw_path_parent_len(path, base);
         int max_parent = (int)((w - pad * 4.0f) / adv);
         if (parent_len > max_parent) parent_len = max_parent;
         draw_text_run(font, r, path, parent_len, x + pad + adv * 2.4f,
-                      ry + line_h * 0.78f + ascent,
+                      ry + row_path_baseline,
                       selected ? (Color){0.56f, 0.62f, 0.70f}
                                : (Color){0.42f, 0.47f, 0.54f});
     }
