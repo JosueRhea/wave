@@ -2,7 +2,10 @@
 #include "test.h"
 #include "terminal.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static int terminal_contains(const Terminal *t, const char *needle) {
@@ -11,6 +14,19 @@ static int terminal_contains(const Terminal *t, const char *needle) {
         if (strstr(terminal_line(t, i), needle)) return 1;
     }
     return t->current_len > 0 && strstr(t->current, needle);
+}
+
+static void poll_terminal_until_done(Terminal *t) {
+    for (int i = 0; i < 160 && t->running; i++) {
+        terminal_poll(t);
+        usleep(10000);
+    }
+    terminal_poll(t);
+}
+
+static void restore_env_value(const char *name, const char *value) {
+    if (value) setenv(name, value, 1);
+    else unsetenv(name);
 }
 
 #ifdef WAVE_USE_GHOSTTY_VT
@@ -56,15 +72,63 @@ int main(void) {
     const char *argv[] = {"/bin/sh", "-lc", "printf hello", NULL};
     CHECK(terminal_spawn(&t, "test", ".", argv));
 
-    for (int i = 0; i < 100 && t.running; i++) {
-        terminal_poll(&t);
-        usleep(10000);
-    }
-    terminal_poll(&t);
+    poll_terminal_until_done(&t);
 
     CHECK(terminal_contains(&t, "hello"));
 
     terminal_free(&t);
+
+    if (access("/bin/zsh", X_OK) == 0) {
+        char root[] = "/tmp/wave-terminal-test-XXXXXX";
+        char *tmp = mkdtemp(root);
+        CHECK(tmp != NULL);
+        if (tmp) {
+            char bin_dir[512];
+            char script_path[512];
+            char zshrc_path[512];
+            snprintf(bin_dir, sizeof bin_dir, "%s/bin", tmp);
+            snprintf(script_path, sizeof script_path, "%s/wave-shell-path-test", bin_dir);
+            snprintf(zshrc_path, sizeof zshrc_path, "%s/.zshrc", tmp);
+            CHECK_EQ(mkdir(bin_dir, 0700), 0);
+
+            FILE *script = fopen(script_path, "w");
+            CHECK(script != NULL);
+            if (script) {
+                fprintf(script, "#!/bin/sh\nprintf shell-path-ok\n");
+                fclose(script);
+                CHECK_EQ(chmod(script_path, 0700), 0);
+            }
+
+            FILE *zshrc = fopen(zshrc_path, "w");
+            CHECK(zshrc != NULL);
+            if (zshrc) {
+                fprintf(zshrc, "export PATH=\"%s:$PATH\"\n", bin_dir);
+                fclose(zshrc);
+            }
+
+            char *old_path = getenv("PATH") ? strdup(getenv("PATH")) : NULL;
+            char *old_zdotdir = getenv("ZDOTDIR") ? strdup(getenv("ZDOTDIR")) : NULL;
+            char *old_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+
+            setenv("PATH", "/usr/bin:/bin", 1);
+            setenv("ZDOTDIR", tmp, 1);
+            setenv("HOME", tmp, 1);
+
+            terminal_init(&t);
+            const char *shell_path_argv[] = {"wave-shell-path-test", NULL};
+            CHECK(terminal_spawn(&t, "path", ".", shell_path_argv));
+            poll_terminal_until_done(&t);
+            CHECK(terminal_contains(&t, "shell-path-ok"));
+            terminal_free(&t);
+
+            restore_env_value("PATH", old_path);
+            restore_env_value("ZDOTDIR", old_zdotdir);
+            restore_env_value("HOME", old_home);
+            free(old_path);
+            free(old_zdotdir);
+            free(old_home);
+        }
+    }
 
 #ifdef WAVE_USE_GHOSTTY_VT
     terminal_init(&t);
@@ -72,11 +136,7 @@ int main(void) {
         "/bin/sh", "-lc", "printf '\\033[31mred\\033[0m'", NULL
     };
     CHECK(terminal_spawn(&t, "color", ".", color_argv));
-    for (int i = 0; i < 100 && t.running; i++) {
-        terminal_poll(&t);
-        usleep(10000);
-    }
-    terminal_poll(&t);
+    poll_terminal_until_done(&t);
     CHECK(terminal_contains_red_style(&t, "red"));
     terminal_free(&t);
 #endif

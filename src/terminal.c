@@ -249,6 +249,31 @@ static void terminal_feed(Terminal *t, const char *s, size_t n) {
     }
 }
 
+static int terminal_argc(const char *const argv[], int max_args) {
+    int argc = 0;
+    while (argv && argv[argc] && argc < max_args) argc++;
+    return argc;
+}
+
+static void terminal_exec_login_shell(const char *const argv[]) {
+    enum { MAX_ARGS = 60 };
+    if (!argv || !argv[0] || strchr(argv[0], '/')) return;
+
+    int argc = terminal_argc(argv, MAX_ARGS);
+    if (argc <= 0 || argc >= MAX_ARGS) return;
+
+    const char *shell = "/bin/zsh";
+    char *shell_argv[MAX_ARGS + 5];
+    int n = 0;
+    shell_argv[n++] = (char *)shell;
+    shell_argv[n++] = "-lic";
+    shell_argv[n++] = "exec \"$@\"";
+    shell_argv[n++] = "wave-terminal";
+    for (int i = 0; i < argc; i++) shell_argv[n++] = (char *)argv[i];
+    shell_argv[n] = NULL;
+    execv(shell, shell_argv);
+}
+
 int terminal_spawn(Terminal *t, const char *title, const char *cwd,
                    const char *const argv[]) {
     if (!t || !argv || !argv[0]) return 0;
@@ -279,6 +304,7 @@ int terminal_spawn(Terminal *t, const char *title, const char *cwd,
         if (cwd && chdir(cwd) != 0) _exit(127);
         setenv("TERM", "xterm-256color", 0);
         execvp(argv[0], (char *const *)argv);
+        if (errno == ENOENT) terminal_exec_login_shell(argv);
         fprintf(stderr, "wave: command not found: %s\r\n", argv[0]);
         _exit(127);
     }
