@@ -2,6 +2,8 @@
 
 WaveShortcut input_shortcut(InputKey key, int command, int control,
                             int alt, int shift) {
+    if (control && key == INPUT_KEY_TAB)
+        return shift ? SHORTCUT_TAB_PREV : SHORTCUT_TAB_NEXT;
     if (command) {
         switch (key) {
         case INPUT_KEY_C: return SHORTCUT_COPY;

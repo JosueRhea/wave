@@ -66,6 +66,12 @@ int main(void) {
     CHECK(!strcmp(seq, "\033[3~"));
     CHECK_EQ(terminal_key_sequence(74, 0, 0, 1, seq, sizeof seq), 1);
     CHECK_EQ((unsigned char)seq[0], 10);
+    CHECK_EQ(terminal_key_sequence(257, 0, 0, 0, seq, sizeof seq), 1);
+    CHECK(!strcmp(seq, "\r"));
+    CHECK_EQ(terminal_key_sequence(257, 1, 0, 0, seq, sizeof seq), 7);
+    CHECK(!strcmp(seq, "\033[13;2u"));
+    CHECK_EQ(terminal_key_sequence(257, 0, 0, 1, seq, sizeof seq), 7);
+    CHECK(!strcmp(seq, "\033[13;5u"));
 
     Terminal t;
     terminal_init(&t);

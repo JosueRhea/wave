@@ -442,8 +442,11 @@ size_t terminal_key_sequence(int key, int shift, int alt, int control,
 
     switch (key) {
     case 256: plain = "\033"; break;
-    case 257: plain = "\r"; break;
-    case 335: plain = "\r"; break;
+    case 257:
+    case 335:
+        if (mod == 1) plain = "\r";
+        else { snprintf(seq, sizeof seq, "\033[13;%du", mod); plain = seq; }
+        break;
     case 258: plain = shift ? "\033[Z" : "\t"; break;
     case 259: plain = "\177"; break;
     case 260:

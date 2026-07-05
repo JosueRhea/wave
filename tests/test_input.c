@@ -13,6 +13,8 @@ int main(void) {
     CHECK_EQ(input_shortcut(INPUT_KEY_S, 1, 0, 0, 0), SHORTCUT_SAVE);
     CHECK_EQ(input_shortcut(INPUT_KEY_RIGHT_BRACKET, 1, 0, 0, 0), SHORTCUT_TAB_NEXT);
     CHECK_EQ(input_shortcut(INPUT_KEY_LEFT_BRACKET, 1, 0, 0, 0), SHORTCUT_TAB_PREV);
+    CHECK_EQ(input_shortcut(INPUT_KEY_TAB, 0, 1, 0, 0), SHORTCUT_TAB_NEXT);
+    CHECK_EQ(input_shortcut(INPUT_KEY_TAB, 0, 1, 0, 1), SHORTCUT_TAB_PREV);
     CHECK_EQ(input_shortcut(INPUT_KEY_W, 1, 0, 0, 0), SHORTCUT_CLOSE_TAB);
     CHECK_EQ(input_shortcut(INPUT_KEY_Z, 1, 0, 0, 0), SHORTCUT_UNDO);
     CHECK_EQ(input_shortcut(INPUT_KEY_Z, 1, 0, 0, 1), SHORTCUT_REDO);

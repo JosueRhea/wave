@@ -68,6 +68,7 @@ InputKey wave_input_key_from_glfw(int key) {
     case GLFW_KEY_KP_SUBTRACT: return INPUT_KEY_SUBTRACT;
     case GLFW_KEY_0: return INPUT_KEY_0;
     case GLFW_KEY_KP_0: return INPUT_KEY_KP_0;
+    case GLFW_KEY_TAB: return INPUT_KEY_TAB;
     default: return INPUT_KEY_NONE;
     }
 }

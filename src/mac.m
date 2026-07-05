@@ -33,6 +33,9 @@ enum {
 static void (*g_open_file_cb)(void);
 static void (*g_open_folder_cb)(void);
 static void (*g_check_updates_cb)(void);
+static void (*g_next_tab_cb)(void);
+static void (*g_prev_tab_cb)(void);
+static id g_tab_key_monitor;
 
 typedef void (*MacUpdateCallback)(int state, const char *version,
                                   const char *detail, double progress);
@@ -50,6 +53,8 @@ enum {
 - (void)openFile:(id)sender;
 - (void)openFolder:(id)sender;
 - (void)checkUpdates:(id)sender;
+- (void)nextTab:(id)sender;
+- (void)previousTab:(id)sender;
 @end
 
 @interface WaveDownloadDelegate : NSObject <NSURLSessionDownloadDelegate>
@@ -136,6 +141,14 @@ static BOOL mac_apply_update_from_dmg(NSString *dmgPath, NSString *version,
 - (void)checkUpdates:(id)sender {
     (void)sender;
     if (g_check_updates_cb) g_check_updates_cb();
+}
+- (void)nextTab:(id)sender {
+    (void)sender;
+    if (g_next_tab_cb) g_next_tab_cb();
+}
+- (void)previousTab:(id)sender {
+    (void)sender;
+    if (g_prev_tab_cb) g_prev_tab_cb();
 }
 @end
 
@@ -254,6 +267,22 @@ static NSMenu *ensure_file_menu(void) {
     return file_menu;
 }
 
+static NSMenu *ensure_window_menu(void) {
+    NSMenu *main = ensure_main_menu();
+    for (NSMenuItem *item in main.itemArray) {
+        if ([item.title isEqualToString:@"Window"] && item.submenu) return item.submenu;
+    }
+
+    NSMenuItem *window_item = [[NSMenuItem alloc] initWithTitle:@"Window"
+                                                         action:nil
+                                                  keyEquivalent:@""];
+    NSMenu *window_menu = [[NSMenu alloc] initWithTitle:@"Window"];
+    window_item.submenu = window_menu;
+    [main addItem:window_item];
+    NSApp.windowsMenu = window_menu;
+    return window_menu;
+}
+
 static NSMenu *ensure_app_menu(void) {
     NSMenu *main = ensure_main_menu();
     if (main.numberOfItems > 0) {
@@ -282,11 +311,34 @@ static void upsert_menu_item(NSMenu *menu, NSString *title, SEL action,
     item.keyEquivalentModifierMask = mods;
 }
 
+static void install_tab_key_monitor(void) {
+    if (g_tab_key_monitor) return;
+    g_tab_key_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                              handler:^NSEvent *(NSEvent *event) {
+        NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+        BOOL control = (flags & NSEventModifierFlagControl) != 0;
+        BOOL command = (flags & NSEventModifierFlagCommand) != 0;
+        BOOL option = (flags & NSEventModifierFlagOption) != 0;
+        if (event.keyCode == 48 && control && !command && !option) {
+            if ((flags & NSEventModifierFlagShift) != 0) {
+                if (g_prev_tab_cb) g_prev_tab_cb();
+            } else {
+                if (g_next_tab_cb) g_next_tab_cb();
+            }
+            return nil;
+        }
+        return event;
+    }];
+}
+
 void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
-                          void (*check_updates)(void)) {
+                          void (*check_updates)(void), void (*next_tab)(void),
+                          void (*prev_tab)(void)) {
     g_open_file_cb = open_file;
     g_open_folder_cb = open_folder;
     g_check_updates_cb = check_updates;
+    g_next_tab_cb = next_tab;
+    g_prev_tab_cb = prev_tab;
     NSMenu *app = ensure_app_menu();
     upsert_menu_item(app, @"Check for Updates...", @selector(checkUpdates:), @"",
                      0);
@@ -298,6 +350,12 @@ void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
     if ([file numberOfItems] > 0) [file addItem:[NSMenuItem separatorItem]];
     upsert_menu_item(file, @"Check for Updates...", @selector(checkUpdates:), @"",
                      0);
+    NSMenu *window = ensure_window_menu();
+    upsert_menu_item(window, @"Next Tab", @selector(nextTab:), @"\t",
+                     NSEventModifierFlagControl);
+    upsert_menu_item(window, @"Previous Tab", @selector(previousTab:), @"\t",
+                     NSEventModifierFlagControl | NSEventModifierFlagShift);
+    install_tab_key_monitor();
 }
 
 static void updater_emit(MacUpdateCallback cb, int state, NSString *version,
@@ -547,6 +605,12 @@ int mac_open_panel(void *win_ptr, int folders, char *out, size_t cap) {
     if (response != NSModalResponseOK || panel.URLs.count < 1) return 0;
     snprintf(out, cap, "%s", panel.URL.path.UTF8String);
     return 1;
+}
+
+int mac_clipboard_has_image(void) {
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    NSImage *image = [[NSImage alloc] initWithPasteboard:pb];
+    return image != nil;
 }
 
 int mac_confirm_delete(void *win_ptr, const char *path) {

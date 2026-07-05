@@ -22,7 +22,8 @@ typedef enum {
     INPUT_KEY_MINUS,
     INPUT_KEY_SUBTRACT,
     INPUT_KEY_0,
-    INPUT_KEY_KP_0
+    INPUT_KEY_KP_0,
+    INPUT_KEY_TAB
 } InputKey;
 
 typedef enum {

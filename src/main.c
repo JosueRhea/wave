@@ -35,10 +35,12 @@ int mac_sidebar_context_menu(void *nswindow, const char *target_name,
                              int is_dir, int has_target, int has_clipboard);
 int mac_open_panel(void *nswindow, int folders, char *out, size_t cap);
 int mac_confirm_delete(void *nswindow, const char *path);
+int mac_clipboard_has_image(void);
 typedef void (*MacUpdateCallback)(int state, const char *version,
                                   const char *detail, double progress);
 void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
-                          void (*check_updates)(void));
+                          void (*check_updates)(void), void (*next_tab)(void),
+                          void (*prev_tab)(void));
 void mac_check_for_updates(const char *current_version, int manual,
                            MacUpdateCallback callback);
 #else
@@ -60,11 +62,14 @@ static int mac_open_panel(void *nswindow, int folders, char *out, size_t cap) {
 static int mac_confirm_delete(void *nswindow, const char *path) {
     (void)nswindow; (void)path; return 0;
 }
+static int mac_clipboard_has_image(void) { return 0; }
 typedef void (*MacUpdateCallback)(int state, const char *version,
                                   const char *detail, double progress);
 static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
-                                 void (*check_updates)(void)) {
+                                 void (*check_updates)(void),
+                                 void (*next_tab)(void), void (*prev_tab)(void)) {
     (void)open_file; (void)open_folder; (void)check_updates;
+    (void)next_tab; (void)prev_tab;
 }
 static void mac_check_for_updates(const char *current_version, int manual,
                                   MacUpdateCallback callback) {
@@ -359,6 +364,9 @@ static void tab_goto(int delta) {
     TabActionEffect effect = tabs_goto_with_effect(&g.tabs, delta);
     if (effect.reset_mode) modal_enter_normal(&g.modal);
 }
+
+static void app_menu_next_tab(void) { tab_goto(+1); }
+static void app_menu_prev_tab(void) { tab_goto(-1); }
 
 static void process_file_watchers(void) {
     TabWatchEffect effect = tabs_process_file_watchers(
@@ -912,10 +920,37 @@ static int terminal_put_codepoint(Terminal *term, unsigned int cp, int alt) {
     return 1;
 }
 
+static void terminal_paste_clipboard(Terminal *term) {
+    if (!term) return;
+    const char *clip = glfwGetClipboardString(g.win);
+    if (clip && clip[0]) {
+        terminal_write(term, clip, strlen(clip));
+        return;
+    }
+
+    if (mac_clipboard_has_image()) {
+        terminal_send_key_mods(term, GLFW_KEY_V, 0, 0, 1);
+    }
+}
+
+static int glfw_key_is_down(GLFWwindow *w, int key) {
+    int state = glfwGetKey(w, key);
+    return state == GLFW_PRESS || state == GLFW_REPEAT;
+}
+
 /* ---- GLFW callbacks ---- */
 static void on_char(GLFWwindow *w, unsigned int cp) {
-    (void)w;
     g.last_activity = glfwGetTime();
+    int control_down = (g.mods & GLFW_MOD_CONTROL) ||
+        glfw_key_is_down(w, GLFW_KEY_LEFT_CONTROL) ||
+        glfw_key_is_down(w, GLFW_KEY_RIGHT_CONTROL);
+    int shift_down = (g.mods & GLFW_MOD_SHIFT) ||
+        glfw_key_is_down(w, GLFW_KEY_LEFT_SHIFT) ||
+        glfw_key_is_down(w, GLFW_KEY_RIGHT_SHIFT);
+    if (cp == '\t' && control_down && glfw_key_is_down(w, GLFW_KEY_TAB)) {
+        tab_goto(shift_down ? -1 : +1);
+        return;
+    }
     Terminal *term = cur_term();
     if (g.buf_search.active) {
         char text[2] = {0};
@@ -976,19 +1011,35 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
 }
 
 static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
-    (void)sc;
+    (void)w;
     g.mods = mods;
     if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
     g.last_activity = glfwGetTime();
     if (sidebar_create_key(key)) return;
     Editor *e = cur();
 
+    InputKey input_key = wave_input_key_from_glfw(key);
+#ifdef __APPLE__
+    if (input_key == INPUT_KEY_NONE && sc == 48)
+        input_key = INPUT_KEY_TAB;
+#else
+    (void)sc;
+#endif
     WaveShortcut shortcut = input_shortcut(
-        wave_input_key_from_glfw(key),
+        input_key,
         (mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         (mods & GLFW_MOD_CONTROL) != 0,
         (mods & GLFW_MOD_ALT) != 0,
         (mods & GLFW_MOD_SHIFT) != 0);
+
+    if (shortcut == SHORTCUT_TAB_NEXT) {
+        tab_goto(+1);
+        return;
+    }
+    if (shortcut == SHORTCUT_TAB_PREV) {
+        tab_goto(-1);
+        return;
+    }
 
     if (g.buf_search.active) {
         if (shortcut == SHORTCUT_PASTE) {
@@ -1011,8 +1062,7 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
             return;
         }
         if ((mods & GLFW_MOD_SUPER) && shortcut == SHORTCUT_PASTE) {
-            const char *clip = glfwGetClipboardString(g.win);
-            if (clip) terminal_write(term, clip, strlen(clip));
+            terminal_paste_clipboard(term);
             return;
         }
         if (mods & GLFW_MOD_SUPER) {
@@ -1720,7 +1770,8 @@ int main(int argc, char **argv) {
     if (!win) { fprintf(stderr, "window creation failed\n"); glfwTerminate(); return 1; }
     g.win = win;
     mac_install_app_menu(app_menu_open_file, app_menu_open_folder,
-                         app_menu_check_updates);
+                         app_menu_check_updates, app_menu_next_tab,
+                         app_menu_prev_tab);
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 
