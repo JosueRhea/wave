@@ -45,6 +45,22 @@ typedef struct {
     float y;
 } ViewPoint;
 
+typedef enum {
+    VIEW_OVERLAY_DRAW_NONE,
+    VIEW_OVERLAY_DRAW_PALETTE,
+    VIEW_OVERLAY_DRAW_SEARCH
+} ViewOverlayDraw;
+
+typedef struct {
+    int sidebar;
+    int tabs;
+    int header;
+    int empty;
+    int editor;
+    int popover;
+    ViewOverlayDraw overlay;
+} ViewFramePlan;
+
 typedef struct {
     ViewStatusKind kind;
     const char *lang;
@@ -90,6 +106,8 @@ ViewEmptyLayout view_empty_layout(float fb_w, float fb_h, float side_px,
 ViewOverlayLayout view_overlay_layout(float fb_w, float width_fraction,
                                       int rows, int selected, float adv,
                                       float line_h);
+ViewFramePlan view_frame_plan(float side_px, float tab_strip, float header_h,
+                              int editor_has_buffer, int overlay_kind);
 ViewPoint view_popover_anchor(float text_x, float top_pad, float fb_h,
                               float bar_h, float adv, float line_h,
                               int cursor_vrow, int cursor_xcol,

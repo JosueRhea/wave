@@ -57,6 +57,14 @@ typedef enum {
     COMMAND_CLOSE_WINDOW
 } CommandCloseAction;
 
+typedef struct {
+    int save_config;
+    int apply_blur;
+    int apply_titlebar;
+    int write_file;
+    CommandCloseAction close;
+} CommandAppPlan;
+
 typedef enum {
     COMMAND_KEY_NONE,
     COMMAND_KEY_ESCAPE,
@@ -84,5 +92,6 @@ int command_info_text(CommandInfoKind info, const WaveConfig *config,
 CommandRun command_run(const char *text, WaveConfig *config,
                        const char *config_path);
 CommandCloseAction command_close_action(CommandEffect effect);
+CommandAppPlan command_app_plan(CommandEffect effect, int editor_has_path);
 
 #endif

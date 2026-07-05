@@ -82,6 +82,30 @@ int main(void) {
     CHECK_EQ(script.search_selection, 0);
     CHECK_EQ(script.popover_scroll, 0);
 
+    script = wave_runtime_snapshot_script(
+        "/a:/b", "typed", "dd", "1", "main", "needle", "2", "hover", "4");
+    WaveRuntimeSnapshotPlan plan = wave_runtime_snapshot_plan(script, 0, 0, 0);
+    CHECK_EQ(plan.open_count, 2);
+    CHECK(!plan.type_text);
+    CHECK(!plan.normal_keys);
+    CHECK(plan.open_palette);
+    CHECK(!plan.set_palette_query);
+    CHECK(!plan.run_search);
+    CHECK(!plan.show_popover);
+
+    plan = wave_runtime_snapshot_plan(script, 1, 1, 1);
+    CHECK_EQ(plan.open_count, 2);
+    CHECK(plan.type_text);
+    CHECK(plan.normal_keys);
+    CHECK(plan.open_palette);
+    CHECK(plan.set_palette_query);
+    CHECK(plan.run_search);
+    CHECK(plan.show_popover);
+
+    plan = wave_runtime_snapshot_plan(script, 1, 0, 1);
+    CHECK(!plan.set_palette_query);
+    CHECK(plan.run_search);
+
     CHECK_EQ(wave_runtime_int_value(NULL), 0);
     CHECK_EQ(wave_runtime_int_value("12"), 12);
     CHECK_EQ(wave_runtime_int_value("-4"), -4);

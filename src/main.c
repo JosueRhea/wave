@@ -247,19 +247,20 @@ static void cmd_exec(void) {
     config_path(path, sizeof path);
     CommandRun run = command_run(command_text(&g.cmd), &g.config, path);
     CommandEffect effect = run.effect;
-    if (effect.save_config) config_save();
-    if (effect.apply_blur)
+    CommandAppPlan plan = command_app_plan(effect, editor_has_path(cur()));
+    if (plan.save_config) config_save();
+    if (plan.apply_blur)
         mac_set_blur(glfwGetCocoaWindow(g.win), g.config.blur);
-    if (effect.apply_titlebar)
+    if (plan.apply_titlebar)
         mac_use_native_titlebar(glfwGetCocoaWindow(g.win), g.config.native_titlebar);
 
     snprintf(g.info, sizeof g.info, "%s", run.info);
 
-    if (effect.write && editor_has_path(cur())) {
+    if (plan.write_file) {
         editor_save_file(cur(), &g.watch);
     }
     command_close(&g.cmd);
-    switch (command_close_action(effect)) {
+    switch (plan.close) {
     case COMMAND_CLOSE_WINDOW:
         glfwSetWindowShouldClose(g.win, GLFW_TRUE);
         break;
@@ -342,26 +343,26 @@ static void ui_zoom(int dir) {
 static void on_char(GLFWwindow *w, unsigned int cp) {
     (void)w;
     g.last_activity = glfwGetTime();
-    InputTextTarget target = input_text_target(
+    InputTextPlan plan = input_text_plan(
         (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) != 0,
         overlay_active(&g.overlay) != OVERLAY_NONE,
         g.cmd.active,
         editor_has_buffer(cur()),
-        g.modal.mode == MODE_INSERT);
+        g.modal.mode == MODE_INSERT,
+        cp);
 
-    if (target == INPUT_TEXT_IGNORE || target == INPUT_TEXT_NONE) return;
-    if (target == INPUT_TEXT_OVERLAY) {
-        if (cp >= 32 && cp < 127) {
-            char s[2] = {(char)cp, '\0'};
-            overlay_insert_text(&g.overlay, g.ws, ws_root(g.ws), s);
-        }
+    if (plan.target == INPUT_TEXT_IGNORE || plan.target == INPUT_TEXT_NONE) return;
+    if (plan.target == INPUT_TEXT_OVERLAY) {
+        if (plan.has_text)
+            overlay_insert_text(&g.overlay, g.ws, ws_root(g.ws), plan.text);
         return;
     }
-    if (target == INPUT_TEXT_COMMAND) {
-        command_insert_char(&g.cmd, cp);
+    if (plan.target == INPUT_TEXT_COMMAND) {
+        if (plan.has_text)
+            command_insert_text(&g.cmd, plan.text);
         return;
     }
-    if (target == INPUT_TEXT_EDITOR_INSERT) {
+    if (plan.target == INPUT_TEXT_EDITOR_INSERT) {
         editor_apply_text_input(cur(), cp);
         return;
     }
@@ -382,16 +383,13 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         (mods & GLFW_MOD_ALT) != 0,
         (mods & GLFW_MOD_SHIFT) != 0);
 
-    InputKeyTarget target = input_key_target(
+    InputKeyPlan plan = input_key_plan(
         shortcut, overlay_active(&g.overlay) != OVERLAY_NONE,
-        g.cmd.active, editor_has_buffer(e));
-    InputShortcutAction shortcut_action =
-        input_shortcut_action(shortcut, editor_has_path(e));
+        g.cmd.active, editor_has_buffer(e), editor_has_path(e));
 
-    if (target == INPUT_KEY_TARGET_SHORTCUT &&
-        shortcut_action == INPUT_SHORTCUT_ACTION_COPY) {
-        switch (input_clipboard_target(overlay_active(&g.overlay) != OVERLAY_NONE,
-                                       g.cmd.active, editor_has_buffer(e))) {
+    if (plan.target == INPUT_KEY_TARGET_SHORTCUT &&
+        plan.shortcut_action == INPUT_SHORTCUT_ACTION_COPY) {
+        switch (plan.clipboard_target) {
         case INPUT_CLIPBOARD_OVERLAY:
             glfwSetClipboardString(g.win, overlay_query(&g.overlay));
             break;
@@ -406,12 +404,11 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         }
         return;
     }
-    if (target == INPUT_KEY_TARGET_SHORTCUT &&
-        shortcut_action == INPUT_SHORTCUT_ACTION_PASTE) {
+    if (plan.target == INPUT_KEY_TARGET_SHORTCUT &&
+        plan.shortcut_action == INPUT_SHORTCUT_ACTION_PASTE) {
         const char *clip = glfwGetClipboardString(g.win);
         if (!clip) return;
-        switch (input_clipboard_target(overlay_active(&g.overlay) != OVERLAY_NONE,
-                                       g.cmd.active, editor_has_buffer(e))) {
+        switch (plan.clipboard_target) {
         case INPUT_CLIPBOARD_OVERLAY:
             overlay_insert_text(&g.overlay, g.ws, ws_root(g.ws), clip);
             break;
@@ -428,76 +425,60 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         }
         return;
     }
-    if (target == INPUT_KEY_TARGET_SHORTCUT) {
-        switch (shortcut_action) {
-        case INPUT_SHORTCUT_ACTION_OPEN_PALETTE:
+    if (plan.target == INPUT_KEY_TARGET_SHORTCUT) {
+        InputShortcutEffect effect = input_shortcut_effect(plan.shortcut_action);
+        if (effect.open_palette)
             palette_open();
-            return;
-        case INPUT_SHORTCUT_ACTION_OPEN_SEARCH:
+        if (effect.open_search)
             search_open();
-            return;
-        case INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR:
+        if (effect.toggle_sidebar) {
             wave_config_toggle_sidebar(&g.config);
             config_save();
-            return;
-        case INPUT_SHORTCUT_ACTION_SAVE:
+        }
+        if (effect.save_file)
             editor_save_file(e, &g.watch);
-            return;
-        case INPUT_SHORTCUT_ACTION_TAB_NEXT:
-            tab_goto(+1);
-            return;
-        case INPUT_SHORTCUT_ACTION_TAB_PREV:
-            tab_goto(-1);
-            return;
-        case INPUT_SHORTCUT_ACTION_CLOSE_TAB:
+        if (effect.tab_delta)
+            tab_goto(effect.tab_delta);
+        if (effect.close_tab)
             close_tab(tabs_active_index(&g.tabs));
-            return;
-        case INPUT_SHORTCUT_ACTION_UNDO:
-        case INPUT_SHORTCUT_ACTION_REDO:
-            editor_apply_history_action(e, shortcut_action == INPUT_SHORTCUT_ACTION_REDO,
-                                        g.info, sizeof g.info);
-            return;
-        case INPUT_SHORTCUT_ACTION_ZOOM_IN:
-            ui_zoom(+1);
-            return;
-        case INPUT_SHORTCUT_ACTION_ZOOM_OUT:
-            ui_zoom(-1);
-            return;
-        case INPUT_SHORTCUT_ACTION_ZOOM_RESET:
-            ui_zoom(0);
-            return;
-        case INPUT_SHORTCUT_ACTION_TOGGLE_WRAP:
+        if (effect.history)
+            editor_apply_history_action(e, effect.history_redo, g.info, sizeof g.info);
+        if (effect.zoom)
+            ui_zoom(effect.zoom_dir);
+        if (effect.toggle_wrap) {
             wave_config_toggle_wrap(&g.config);
             config_save();
             wave_config_wrap_text(&g.config, g.info, sizeof g.info);
-            return;
-        case INPUT_SHORTCUT_ACTION_NONE:
-        case INPUT_SHORTCUT_ACTION_COPY:
-        case INPUT_SHORTCUT_ACTION_PASTE:
-        default:
-            return;
         }
+        return;
     }
 
-    if (target == INPUT_KEY_TARGET_OVERLAY) {
+    if (plan.target == INPUT_KEY_TARGET_OVERLAY) {
         OverlayKind active = overlay_active(&g.overlay);
         OverlayKeyResult overlay_key = overlay_apply_key(
             &g.overlay, g.ws, ws_root(g.ws), wave_overlay_key_from_glfw(key));
-        if (overlay_key == OVERLAY_KEY_RESULT_ACCEPT) {
-            if (active == OVERLAY_PALETTE) palette_accept();
-            else if (active == OVERLAY_SEARCH) search_accept();
+        switch (overlay_accept_action(active, overlay_key)) {
+        case OVERLAY_ACCEPT_PALETTE:
+            palette_accept();
+            break;
+        case OVERLAY_ACCEPT_SEARCH:
+            search_accept();
+            break;
+        case OVERLAY_ACCEPT_NONE:
+        default:
+            break;
         }
         return;
     }
 
     /* command line */
-    if (target == INPUT_KEY_TARGET_COMMAND) {
+    if (plan.target == INPUT_KEY_TARGET_COMMAND) {
         CommandKeyResult cmd_key = command_apply_key(&g.cmd, wave_command_key_from_glfw(key));
         if (cmd_key == COMMAND_KEY_RESULT_ACCEPT) cmd_exec();
         return;
     }
 
-    if (target != INPUT_KEY_TARGET_EDITOR) return;
+    if (plan.target != INPUT_KEY_TARGET_EDITOR) return;
 
     if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
                           g.modal.mode == MODE_INSERT))
@@ -565,39 +546,47 @@ static void on_cursor_pos(GLFWwindow *w, double mx, double my) {
 
 static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
     (void)mods;
-    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_RELEASE) {
+    LayoutClickTarget click = {0};
+    InputMousePlan plan = input_mouse_plan(
+        click, button == GLFW_MOUSE_BUTTON_LEFT, button == GLFW_MOUSE_BUTTON_RIGHT,
+        action == GLFW_PRESS, action == GLFW_RELEASE, g.pop.active, 0);
+    if (plan.action == INPUT_MOUSE_ACTION_RELEASE_DRAG) {
         layout_drag_release(&g.mouse_drag);
         return;
     }
     if (action != GLFW_PRESS) return;
+
     double mx, my;
     glfwGetCursorPos(w, &mx, &my);
     float x = (float)mx * g.fb_scale, y = (float)my * g.fb_scale;
 
-    if (g.pop.active) popover_close(&g.pop); /* a click anywhere dismisses the popover */
-
-    LayoutClickTarget click = layout_click_target(
+    click = layout_click_target(
         &g.layout, x, y, g.side_scroll, button == GLFW_MOUSE_BUTTON_RIGHT,
         g.ws != NULL, g.config.show_sidebar);
+    plan = input_mouse_plan(
+        click, button == GLFW_MOUSE_BUTTON_LEFT, button == GLFW_MOUSE_BUTTON_RIGHT,
+        1, 0, g.pop.active,
+        editor_has_buffer(cur()) && editor_has_visual_rows(cur()));
+
+    if (plan.dismiss_popover) popover_close(&g.pop); /* a click anywhere dismisses the popover */
+    if (plan.record_activity) g.last_activity = glfwGetTime();
 
     /* Title-bar band: our GL view covers it, so reproduce the native gestures —
      * drag to move, double-click to zoom/minimise (per System Settings), and
      * right-/control-click for the document path menu. */
-    if (click.kind == LAYOUT_CLICK_TITLEBAR) {
+    switch (plan.action) {
+    case INPUT_MOUSE_ACTION_TITLEBAR_MENU:
+        mac_window_titlebar_menu(glfwGetCocoaWindow(w));
+        return;
+    case INPUT_MOUSE_ACTION_TITLEBAR_LEFT: {
         void *nw = glfwGetCocoaWindow(w);
-        if (click.titlebar_right) { mac_window_titlebar_menu(nw); return; }
-        if (button != GLFW_MOUSE_BUTTON_LEFT) return;
         double now = glfwGetTime();
         if (layout_point_double_click(&g.title_click, now, x, y, 0.4, 6.0f))
             mac_window_titlebar_doubleclick(nw);
         else mac_window_drag(nw);
         return;
     }
-
-    if (button != GLFW_MOUSE_BUTTON_LEFT) return;
-    g.last_activity = glfwGetTime();
-
-    if (click.kind == LAYOUT_CLICK_SIDEBAR) {
+    case INPUT_MOUSE_ACTION_SIDEBAR: {
         WsClickAction action = ws_click_visible_timed(
             g.ws, &g.sidebar_click, click.row, glfwGetTime(), 0.4);
         if (action.kind == WS_CLICK_OPEN_FILE && action.entry) {
@@ -607,19 +596,16 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
         }
         return;
     }
-
-    /* tab strip: click to switch; click the trailing 'x' to close */
-    if (click.kind == LAYOUT_CLICK_TAB) {
+    case INPUT_MOUSE_ACTION_TAB: {
+        /* tab strip: click to switch; click the trailing 'x' to close */
         TabActionEffect effect = tabs_click_with_effect(
             &g.tabs, click.tab_index, click.tab_close);
         if (effect.close_window) glfwSetWindowShouldClose(g.win, GLFW_TRUE);
         if (effect.reset_mode) modal_enter_normal(&g.modal);
         return;
     }
-
-    /* click in the text area: map (visual row, x) back to a byte offset */
-    if (editor_has_buffer(cur()) && editor_has_visual_rows(cur()) &&
-        click.kind == LAYOUT_CLICK_TEXT) {
+    case INPUT_MOUSE_ACTION_TEXT: {
+        /* click in the text area: map (visual row, x) back to a byte offset */
         Editor *e = cur();
         size_t off = 0;
         if (!editor_apply_click_position(e, x, y, g.layout.text_x,
@@ -628,6 +614,12 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
             return;
         layout_drag_begin(&g.mouse_drag, off, x, y);
         if (g.modal.mode == MODE_VISUAL) modal_enter_normal(&g.modal);
+        break;
+    }
+    case INPUT_MOUSE_ACTION_NONE:
+    case INPUT_MOUSE_ACTION_RELEASE_DRAG:
+    default:
+        break;
     }
 }
 
@@ -662,23 +654,26 @@ static void draw_frame(int fb_w, int fb_h) {
     float header_h = metrics.header_h;
     float tab_strip = metrics.tab_strip;
     float top_pad = metrics.top_pad;
+    ViewFramePlan frame = view_frame_plan(
+        side_px, tab_strip, header_h, editor_has_buffer(e),
+        overlay_active(&g.overlay));
 
     renderer_begin(r, fb_w, fb_h, 0.11f, 0.12f, 0.14f, g.config.opacity);
 
-    if (side_px > 0)
+    if (frame.sidebar)
         draw_sidebar_panel(g.ws, editor_path(e), g.config.side_cells, g.side_scroll,
                            fb_h, font, r, adv, line_h, ascent, side_px,
                            header_h, g.layout.side_pad, g.config.opacity);
-    if (tab_strip > 0)
+    if (frame.tabs)
         g.layout.tab_w = draw_tabs_panel(&g.tabs, fb_w, font, r, side_px, adv,
                                          ascent, tab_h, header_h,
                                          g.config.opacity);
-    if (header_h > 0)
+    if (frame.header)
         draw_header_panel(g.ws ? ws_root(g.ws) : NULL, editor_path(e),
                           fb_w, font, r, adv, ascent, header_h, g.fb_scale,
                           g.config.opacity);
 
-    if (!editor_has_buffer(e)) { /* empty state: a folder is open but no file has been chosen */
+    if (frame.empty) { /* empty state: a folder is open but no file has been chosen */
         ViewEmptyState empty = view_empty_state(g.ws != NULL);
         ViewEmptyLayout empty_layout = view_empty_layout(
             (float)fb_w, (float)fb_h, side_px, top_pad, adv, line_h, &empty);
@@ -691,9 +686,9 @@ static void draw_frame(int fb_w, int fb_h) {
         /* The Cmd-P palette and Cmd-Shift-F search are reachable from the empty
          * state too — the primary ways to open a file here — so draw whichever
          * is active on top before bailing. */
-        if (overlay_active(&g.overlay) == OVERLAY_PALETTE)
+        if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
             draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h, ascent);
-        else if (overlay_active(&g.overlay) == OVERLAY_SEARCH)
+        else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
             draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent);
         renderer_flush(r);
         return;
@@ -734,7 +729,7 @@ static void draw_frame(int fb_w, int fb_h) {
 
     /* the `gh` popover floats over the text, anchored to the cursor (kept on
      * screen even when the cursor sits near an edge). Hidden under the palette. */
-    if (overlay_active(&g.overlay) == OVERLAY_NONE) {
+    if (frame.popover) {
         ViewPoint anchor = view_popover_anchor(text_x, top_pad, (float)fb_h, bar_h,
                                                adv, line_h, text.cursor.vrow,
                                                text.cursor.xcol, editor_scroll_y(e));
@@ -743,9 +738,9 @@ static void draw_frame(int fb_w, int fb_h) {
                            g.layout.side_px, g.fb_scale);
     }
 
-    if (overlay_active(&g.overlay) == OVERLAY_PALETTE)
+    if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
         draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h, ascent);
-    else if (overlay_active(&g.overlay) == OVERLAY_SEARCH)
+    else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
         draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent);
 
     renderer_flush(r);
@@ -819,30 +814,36 @@ int main(int argc, char **argv) {
             getenv("WAVE_PALETTE"), getenv("WAVE_QUERY"), getenv("WAVE_SEARCH"),
             getenv("WAVE_SEARCHSEL"), getenv("WAVE_POPTEST"), getenv("WAVE_POPSCROLL"));
 
-        for (int i = 0; i < script.opens.count; i++) open_path(script.opens.paths[i]);
-        if (script.typed && editor_has_buffer(cur())) {
+        WaveRuntimeSnapshotPlan script_plan = wave_runtime_snapshot_plan(script, 0, 0, g.ws != NULL);
+        for (int i = 0; i < script_plan.open_count; i++)
+            open_path(script.opens.paths[i]);
+        if (script_plan.open_palette) palette_open();
+
+        script_plan = wave_runtime_snapshot_plan(
+            script, editor_has_buffer(cur()),
+            overlay_active(&g.overlay) == OVERLAY_PALETTE, g.ws != NULL);
+        if (script_plan.type_text) {
             modal_enter_insert(&g.modal);
             editor_insert_encoded_text(cur(), script.typed);
         }
         editor_refresh_highlighter(cur());
-        if (script.keys && editor_has_buffer(cur())) {
+        if (script_plan.normal_keys) {
             modal_enter_normal(&g.modal);
             for (const char *p = script.keys; *p; p++) {
                 editor_refresh_highlighter(cur());
                 vim_normal_char((unsigned int)(unsigned char)*p);
             }
         }
-        if (script.palette) palette_open();
-        if (script.palette_query && overlay_active(&g.overlay) == OVERLAY_PALETTE) {
+        if (script_plan.set_palette_query) {
             overlay_set_palette_query(&g.overlay, g.ws, script.palette_query);
         }
-        if (script.search_query) {
+        if (script_plan.run_search) {
             search_open();
             overlay_set_search_query(&g.overlay, ws_root(g.ws), script.search_query);
             overlay_settle_search(&g.overlay);
             overlay_set_search_selection(&g.overlay, script.search_selection);
         }
-        if (script.popover_text && editor_has_buffer(cur())) {
+        if (script_plan.show_popover) {
             popover_show_encoded_base(&g.pop, script.popover_text, script.popover_scroll);
         }
         glfwGetFramebufferSize(win, &fb_w, &fb_h);
@@ -869,18 +870,19 @@ int main(int argc, char **argv) {
         editor_update_highlighter(e);
 
         /* drain language tooling and apply any UI-facing results */
-        LspManagerUpdate lsp_update = lsp_manager_update_ui(&g.lsp, e);
-        if (lsp_update.has_definition) {
-            if (open_path(lsp_update.definition.path) == 0) {
+        LspManagerUiPlan lsp_plan = lsp_manager_ui_plan(
+            lsp_manager_update_ui(&g.lsp, e));
+        if (lsp_plan.open_definition) {
+            if (open_path(lsp_plan.definition.path) == 0) {
                 Editor *te = cur();
-                if (editor_move_to_lsp_position(te, lsp_update.definition.line,
-                                                lsp_update.definition.col,
+                if (editor_move_to_lsp_position(te, lsp_plan.definition.line,
+                                                lsp_plan.definition.col,
                                                 g.info, sizeof g.info))
                     center_cursor(te);
             }
         }
-        if (lsp_update.has_hover) {
-            popover_show_hover(&g.pop, lsp_update.hover);
+        if (lsp_plan.show_hover) {
+            popover_show_hover(&g.pop, lsp_plan.hover);
         }
 
         /* drain any pending ripgrep output for the live search overlay */

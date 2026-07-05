@@ -35,6 +35,13 @@ typedef struct {
 } LspManagerUpdate;
 
 typedef struct {
+    int open_definition;
+    LspLocation definition;
+    int show_hover;
+    char hover[LSP_MANAGER_HOVER_CAP];
+} LspManagerUiPlan;
+
+typedef struct {
     int ok;
     int loading;
     size_t row;
@@ -63,6 +70,7 @@ int lsp_manager_poll(LspManager *m, LspLocation *definition,
 int lsp_manager_update(LspManager *m, Editor *active, LspLocation *definition,
                        char *hover, size_t hover_cap);
 LspManagerUpdate lsp_manager_update_ui(LspManager *m, Editor *active);
+LspManagerUiPlan lsp_manager_ui_plan(LspManagerUpdate update);
 int lsp_manager_active(const LspManager *m);
 
 #endif

@@ -73,6 +73,21 @@ WaveRuntimeSnapshotScript wave_runtime_snapshot_script(
     return script;
 }
 
+WaveRuntimeSnapshotPlan wave_runtime_snapshot_plan(WaveRuntimeSnapshotScript script,
+                                                   int editor_has_buffer,
+                                                   int palette_active,
+                                                   int workspace_open) {
+    WaveRuntimeSnapshotPlan plan = {0};
+    plan.open_count = script.opens.count;
+    plan.type_text = script.typed && editor_has_buffer;
+    plan.normal_keys = script.keys && editor_has_buffer;
+    plan.open_palette = script.palette;
+    plan.set_palette_query = script.palette_query && palette_active;
+    plan.run_search = script.search_query != NULL && workspace_open;
+    plan.show_popover = script.popover_text && editor_has_buffer;
+    return plan;
+}
+
 int wave_runtime_int_value(const char *text) {
     return text ? atoi(text) : 0;
 }

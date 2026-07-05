@@ -33,6 +33,16 @@ typedef struct {
     int popover_scroll;
 } WaveRuntimeSnapshotScript;
 
+typedef struct {
+    int open_count;
+    int type_text;
+    int normal_keys;
+    int open_palette;
+    int set_palette_query;
+    int run_search;
+    int show_popover;
+} WaveRuntimeSnapshotPlan;
+
 WaveRuntimeOptions wave_runtime_options(const char *snapshot,
                                         const char *wave_lsp,
                                         const char *wave_persist,
@@ -43,6 +53,10 @@ WaveRuntimeSnapshotScript wave_runtime_snapshot_script(
     const char *palette, const char *palette_query,
     const char *search_query, const char *search_selection,
     const char *popover_text, const char *popover_scroll);
+WaveRuntimeSnapshotPlan wave_runtime_snapshot_plan(WaveRuntimeSnapshotScript script,
+                                                   int editor_has_buffer,
+                                                   int palette_active,
+                                                   int workspace_open);
 int wave_runtime_int_value(const char *text);
 double wave_runtime_wait_timeout(int lsp_active, int search_running);
 int wave_runtime_periodic_due(double now, double *next_time, double interval);

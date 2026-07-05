@@ -42,6 +42,16 @@ int main(void) {
              OVERLAY_KEY_RESULT_HANDLED);
     CHECK_EQ(overlay_apply_key(&overlay, NULL, NULL, OVERLAY_KEY_ACCEPT),
              OVERLAY_KEY_RESULT_ACCEPT);
+    CHECK_EQ(overlay_accept_action(OVERLAY_PALETTE, OVERLAY_KEY_RESULT_ACCEPT),
+             OVERLAY_ACCEPT_PALETTE);
+    CHECK_EQ(overlay_accept_action(OVERLAY_SEARCH, OVERLAY_KEY_RESULT_ACCEPT),
+             OVERLAY_ACCEPT_SEARCH);
+    CHECK_EQ(overlay_accept_action(OVERLAY_NONE, OVERLAY_KEY_RESULT_ACCEPT),
+             OVERLAY_ACCEPT_NONE);
+    CHECK_EQ(overlay_accept_action(OVERLAY_PALETTE, OVERLAY_KEY_RESULT_HANDLED),
+             OVERLAY_ACCEPT_NONE);
+    CHECK_EQ(overlay_accept_action(OVERLAY_SEARCH, OVERLAY_KEY_RESULT_NONE),
+             OVERLAY_ACCEPT_NONE);
     CHECK_EQ(overlay_active(&overlay), OVERLAY_PALETTE);
     CHECK_EQ(overlay_apply_key(&overlay, NULL, NULL, OVERLAY_KEY_NONE),
              OVERLAY_KEY_RESULT_NONE);

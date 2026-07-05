@@ -51,14 +51,26 @@ int main(void) {
     CHECK(eff.quit);
     CHECK(!eff.quit_all);
     CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_TAB);
+    CommandAppPlan app = command_app_plan(eff, 0);
+    CHECK(!app.write_file);
+    CHECK_EQ(app.close, COMMAND_CLOSE_TAB);
+    app = command_app_plan(eff, 1);
+    CHECK(app.write_file);
+    CHECK_EQ(app.close, COMMAND_CLOSE_TAB);
 
     eff = command_effect((CommandAction){COMMAND_QUIT_ALL, 0}, &cfg);
     CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_WINDOW);
+    app = command_app_plan(eff, 1);
+    CHECK(!app.write_file);
+    CHECK_EQ(app.close, COMMAND_CLOSE_WINDOW);
 
     eff = command_effect((CommandAction){COMMAND_SET_NOWRAP, 0}, &cfg);
     CHECK(!cfg.wrap);
     CHECK(eff.save_config);
     CHECK_EQ(command_close_action(eff), COMMAND_CLOSE_NONE);
+    app = command_app_plan(eff, 1);
+    CHECK(app.save_config);
+    CHECK_EQ(app.close, COMMAND_CLOSE_NONE);
 
     eff = command_effect((CommandAction){COMMAND_SET_OPACITY, 0.75f}, &cfg);
     CHECK(eff.save_config);
@@ -76,6 +88,15 @@ int main(void) {
     CHECK(eff.save_config);
     CHECK(eff.apply_blur);
     CHECK_EQ(eff.info, COMMAND_INFO_BLUR);
+    app = command_app_plan(eff, 1);
+    CHECK(app.save_config);
+    CHECK(app.apply_blur);
+    CHECK(!app.apply_titlebar);
+
+    eff = command_effect((CommandAction){COMMAND_TOGGLE_TITLEBAR, 0}, &cfg);
+    app = command_app_plan(eff, 1);
+    CHECK(app.save_config);
+    CHECK(app.apply_titlebar);
 
     eff = command_effect((CommandAction){COMMAND_SAVE_CONFIG, 0}, &cfg);
     CHECK(eff.save_config);

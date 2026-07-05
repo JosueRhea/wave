@@ -166,6 +166,14 @@ OverlayKeyResult overlay_apply_key(OverlayState *overlay, Workspace *ws,
     }
 }
 
+OverlayAcceptAction overlay_accept_action(OverlayKind active,
+                                          OverlayKeyResult result) {
+    if (result != OVERLAY_KEY_RESULT_ACCEPT) return OVERLAY_ACCEPT_NONE;
+    if (active == OVERLAY_PALETTE) return OVERLAY_ACCEPT_PALETTE;
+    if (active == OVERLAY_SEARCH) return OVERLAY_ACCEPT_SEARCH;
+    return OVERLAY_ACCEPT_NONE;
+}
+
 void overlay_poll_search(OverlayState *overlay) {
     if (overlay) project_search_poll(&overlay->search);
 }

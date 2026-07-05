@@ -65,6 +65,29 @@ int main(void) {
     update = lsp_manager_update_ui(NULL, NULL);
     CHECK(!update.has_definition);
     CHECK(!update.has_hover);
+    LspManagerUiPlan plan = lsp_manager_ui_plan(update);
+    CHECK(!plan.open_definition);
+    CHECK(!plan.show_hover);
+
+    update.has_definition = 1;
+    snprintf(update.definition.path, sizeof update.definition.path, "%s", "/tmp/target.c");
+    update.definition.line = 7;
+    update.definition.col = 3;
+    update.has_hover = 1;
+    snprintf(update.hover, sizeof update.hover, "%s", "hover text");
+    plan = lsp_manager_ui_plan(update);
+    CHECK(plan.open_definition);
+    CHECK_STR(plan.definition.path, "/tmp/target.c");
+    CHECK_EQ(plan.definition.line, 7);
+    CHECK_EQ(plan.definition.col, 3);
+    CHECK(plan.show_hover);
+    CHECK_STR(plan.hover, "hover text");
+
+    update.definition.path[0] = '\0';
+    update.hover[0] = '\0';
+    plan = lsp_manager_ui_plan(update);
+    CHECK(!plan.open_definition);
+    CHECK(!plan.show_hover);
 
     lsp_manager_shutdown(&m);
 

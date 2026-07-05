@@ -40,6 +40,12 @@ typedef enum {
     OVERLAY_KEY_RESULT_ACCEPT
 } OverlayKeyResult;
 
+typedef enum {
+    OVERLAY_ACCEPT_NONE,
+    OVERLAY_ACCEPT_PALETTE,
+    OVERLAY_ACCEPT_SEARCH
+} OverlayAcceptAction;
+
 void overlay_init(OverlayState *overlay);
 void overlay_free(OverlayState *overlay);
 OverlayKind overlay_active(const OverlayState *overlay);
@@ -64,6 +70,8 @@ void overlay_backspace(OverlayState *overlay, Workspace *ws, const char *root);
 void overlay_move(OverlayState *overlay, int delta);
 OverlayKeyResult overlay_apply_key(OverlayState *overlay, Workspace *ws,
                                    const char *root, OverlayKey key);
+OverlayAcceptAction overlay_accept_action(OverlayKind active,
+                                          OverlayKeyResult result);
 void overlay_poll_search(OverlayState *overlay);
 int overlay_settle_search(OverlayState *overlay);
 int overlay_search_running(const OverlayState *overlay);

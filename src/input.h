@@ -1,6 +1,8 @@
 #ifndef WAVE_INPUT_H
 #define WAVE_INPUT_H
 
+#include "layout.h"
+
 typedef enum {
     INPUT_KEY_NONE,
     INPUT_KEY_C,
@@ -50,6 +52,12 @@ typedef enum {
     INPUT_TEXT_EDITOR_COMMAND
 } InputTextTarget;
 
+typedef struct {
+    InputTextTarget target;
+    int has_text;
+    char text[2];
+} InputTextPlan;
+
 typedef enum {
     INPUT_CLIPBOARD_NONE,
     INPUT_CLIPBOARD_OVERLAY,
@@ -84,11 +92,50 @@ typedef enum {
     INPUT_SHORTCUT_ACTION_TOGGLE_WRAP
 } InputShortcutAction;
 
+typedef struct {
+    InputKeyTarget target;
+    InputShortcutAction shortcut_action;
+    InputClipboardTarget clipboard_target;
+} InputKeyPlan;
+
+typedef struct {
+    int open_palette;
+    int open_search;
+    int toggle_sidebar;
+    int save_file;
+    int tab_delta;
+    int close_tab;
+    int history;
+    int history_redo;
+    int zoom;
+    int zoom_dir;
+    int toggle_wrap;
+} InputShortcutEffect;
+
+typedef enum {
+    INPUT_MOUSE_ACTION_NONE,
+    INPUT_MOUSE_ACTION_RELEASE_DRAG,
+    INPUT_MOUSE_ACTION_TITLEBAR_MENU,
+    INPUT_MOUSE_ACTION_TITLEBAR_LEFT,
+    INPUT_MOUSE_ACTION_SIDEBAR,
+    INPUT_MOUSE_ACTION_TAB,
+    INPUT_MOUSE_ACTION_TEXT
+} InputMouseAction;
+
+typedef struct {
+    InputMouseAction action;
+    int dismiss_popover;
+    int record_activity;
+} InputMousePlan;
+
 WaveShortcut input_shortcut(InputKey key, int command, int control,
                             int alt, int shift);
 InputTextTarget input_text_target(int command_modifier, int overlay_active,
                                   int command_active, int editor_available,
                                   int insert_mode);
+InputTextPlan input_text_plan(int command_modifier, int overlay_active,
+                              int command_active, int editor_available,
+                              int insert_mode, unsigned int cp);
 InputClipboardTarget input_clipboard_target(int overlay_active,
                                             int command_active,
                                             int editor_available);
@@ -96,5 +143,12 @@ InputKeyTarget input_key_target(WaveShortcut shortcut, int overlay_active,
                                 int command_active, int editor_available);
 InputShortcutAction input_shortcut_action(WaveShortcut shortcut,
                                           int editor_has_path);
+InputShortcutEffect input_shortcut_effect(InputShortcutAction action);
+InputKeyPlan input_key_plan(WaveShortcut shortcut, int overlay_active,
+                            int command_active, int editor_available,
+                            int editor_has_path);
+InputMousePlan input_mouse_plan(LayoutClickTarget click, int left_button,
+                                int right_button, int press, int release,
+                                int popover_active, int editor_selectable);
 
 #endif

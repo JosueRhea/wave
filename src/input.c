@@ -42,6 +42,22 @@ InputTextTarget input_text_target(int command_modifier, int overlay_active,
     return insert_mode ? INPUT_TEXT_EDITOR_INSERT : INPUT_TEXT_EDITOR_COMMAND;
 }
 
+InputTextPlan input_text_plan(int command_modifier, int overlay_active,
+                              int command_active, int editor_available,
+                              int insert_mode, unsigned int cp) {
+    InputTextPlan plan = {0};
+    plan.target = input_text_target(command_modifier, overlay_active,
+                                    command_active, editor_available,
+                                    insert_mode);
+    if ((plan.target == INPUT_TEXT_OVERLAY || plan.target == INPUT_TEXT_COMMAND) &&
+        cp >= 32 && cp < 127) {
+        plan.has_text = 1;
+        plan.text[0] = (char)cp;
+        plan.text[1] = '\0';
+    }
+    return plan;
+}
+
 InputClipboardTarget input_clipboard_target(int overlay_active,
                                             int command_active,
                                             int editor_available) {
@@ -84,4 +100,114 @@ InputShortcutAction input_shortcut_action(WaveShortcut shortcut,
     default:
         return INPUT_SHORTCUT_ACTION_NONE;
     }
+}
+
+InputShortcutEffect input_shortcut_effect(InputShortcutAction action) {
+    InputShortcutEffect effect = {0};
+    switch (action) {
+    case INPUT_SHORTCUT_ACTION_OPEN_PALETTE:
+        effect.open_palette = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_OPEN_SEARCH:
+        effect.open_search = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_TOGGLE_SIDEBAR:
+        effect.toggle_sidebar = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_SAVE:
+        effect.save_file = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_TAB_NEXT:
+        effect.tab_delta = +1;
+        break;
+    case INPUT_SHORTCUT_ACTION_TAB_PREV:
+        effect.tab_delta = -1;
+        break;
+    case INPUT_SHORTCUT_ACTION_CLOSE_TAB:
+        effect.close_tab = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_UNDO:
+        effect.history = 1;
+        effect.history_redo = 0;
+        break;
+    case INPUT_SHORTCUT_ACTION_REDO:
+        effect.history = 1;
+        effect.history_redo = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_ZOOM_IN:
+        effect.zoom = 1;
+        effect.zoom_dir = +1;
+        break;
+    case INPUT_SHORTCUT_ACTION_ZOOM_OUT:
+        effect.zoom = 1;
+        effect.zoom_dir = -1;
+        break;
+    case INPUT_SHORTCUT_ACTION_ZOOM_RESET:
+        effect.zoom = 1;
+        effect.zoom_dir = 0;
+        break;
+    case INPUT_SHORTCUT_ACTION_TOGGLE_WRAP:
+        effect.toggle_wrap = 1;
+        break;
+    case INPUT_SHORTCUT_ACTION_NONE:
+    case INPUT_SHORTCUT_ACTION_COPY:
+    case INPUT_SHORTCUT_ACTION_PASTE:
+    default:
+        break;
+    }
+    return effect;
+}
+
+InputKeyPlan input_key_plan(WaveShortcut shortcut, int overlay_active,
+                            int command_active, int editor_available,
+                            int editor_has_path) {
+    InputKeyPlan plan;
+    plan.target = input_key_target(shortcut, overlay_active,
+                                  command_active, editor_available);
+    plan.shortcut_action = input_shortcut_action(shortcut, editor_has_path);
+    plan.clipboard_target = input_clipboard_target(overlay_active,
+                                                   command_active,
+                                                   editor_available);
+    return plan;
+}
+
+InputMousePlan input_mouse_plan(LayoutClickTarget click, int left_button,
+                                int right_button, int press, int release,
+                                int popover_active, int editor_selectable) {
+    InputMousePlan plan = {0};
+    if (left_button && release) {
+        plan.action = INPUT_MOUSE_ACTION_RELEASE_DRAG;
+        return plan;
+    }
+    if (!press) return plan;
+
+    plan.dismiss_popover = popover_active;
+    if (click.kind == LAYOUT_CLICK_TITLEBAR) {
+        if (click.titlebar_right || right_button) {
+            plan.action = INPUT_MOUSE_ACTION_TITLEBAR_MENU;
+            return plan;
+        }
+        if (left_button) plan.action = INPUT_MOUSE_ACTION_TITLEBAR_LEFT;
+        return plan;
+    }
+
+    if (!left_button) return plan;
+    plan.record_activity = 1;
+    switch (click.kind) {
+    case LAYOUT_CLICK_SIDEBAR:
+        plan.action = INPUT_MOUSE_ACTION_SIDEBAR;
+        break;
+    case LAYOUT_CLICK_TAB:
+        plan.action = INPUT_MOUSE_ACTION_TAB;
+        break;
+    case LAYOUT_CLICK_TEXT:
+        plan.action = editor_selectable ? INPUT_MOUSE_ACTION_TEXT
+                                        : INPUT_MOUSE_ACTION_NONE;
+        break;
+    case LAYOUT_CLICK_NONE:
+    case LAYOUT_CLICK_TITLEBAR:
+    default:
+        break;
+    }
+    return plan;
 }

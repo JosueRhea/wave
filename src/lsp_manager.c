@@ -174,6 +174,19 @@ LspManagerUpdate lsp_manager_update_ui(LspManager *m, Editor *active) {
     return update;
 }
 
+LspManagerUiPlan lsp_manager_ui_plan(LspManagerUpdate update) {
+    LspManagerUiPlan plan = {0};
+    if (update.has_definition && update.definition.path[0]) {
+        plan.open_definition = 1;
+        plan.definition = update.definition;
+    }
+    if (update.has_hover && update.hover[0]) {
+        plan.show_hover = 1;
+        snprintf(plan.hover, sizeof plan.hover, "%s", update.hover);
+    }
+    return plan;
+}
+
 int lsp_manager_active(const LspManager *m) {
     return m && m->nservers > 0;
 }

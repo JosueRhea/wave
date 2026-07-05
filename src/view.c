@@ -71,6 +71,24 @@ ViewOverlayLayout view_overlay_layout(float fb_w, float width_fraction,
     return out;
 }
 
+ViewFramePlan view_frame_plan(float side_px, float tab_strip, float header_h,
+                              int editor_has_buffer, int overlay_kind) {
+    ViewFramePlan plan = {0};
+    plan.sidebar = side_px > 0.0f;
+    plan.tabs = tab_strip > 0.0f;
+    plan.header = header_h > 0.0f;
+    plan.empty = !editor_has_buffer;
+    plan.editor = editor_has_buffer;
+    plan.popover = editor_has_buffer && overlay_kind == 0;
+    if (overlay_kind == 1)
+        plan.overlay = VIEW_OVERLAY_DRAW_PALETTE;
+    else if (overlay_kind == 2)
+        plan.overlay = VIEW_OVERLAY_DRAW_SEARCH;
+    else
+        plan.overlay = VIEW_OVERLAY_DRAW_NONE;
+    return plan;
+}
+
 ViewPoint view_popover_anchor(float text_x, float top_pad, float fb_h,
                               float bar_h, float adv, float line_h,
                               int cursor_vrow, int cursor_xcol,

@@ -63,6 +63,39 @@ int main(void) {
                                       10.0f, 20.0f);
     CHECK_EQ(overlay_box.max_cells, 8);
 
+    ViewFramePlan frame_plan = view_frame_plan(100.0f, 24.0f, 36.0f, 1, 0);
+    CHECK(frame_plan.sidebar);
+    CHECK(frame_plan.tabs);
+    CHECK(frame_plan.header);
+    CHECK(!frame_plan.empty);
+    CHECK(frame_plan.editor);
+    CHECK(frame_plan.popover);
+    CHECK_EQ(frame_plan.overlay, VIEW_OVERLAY_DRAW_NONE);
+
+    frame_plan = view_frame_plan(0.0f, 0.0f, 0.0f, 0, 1);
+    CHECK(!frame_plan.sidebar);
+    CHECK(!frame_plan.tabs);
+    CHECK(!frame_plan.header);
+    CHECK(frame_plan.empty);
+    CHECK(!frame_plan.editor);
+    CHECK(!frame_plan.popover);
+    CHECK_EQ(frame_plan.overlay, VIEW_OVERLAY_DRAW_PALETTE);
+
+    frame_plan = view_frame_plan(1.0f, 1.0f, 1.0f, 0, 2);
+    CHECK(frame_plan.sidebar);
+    CHECK(frame_plan.tabs);
+    CHECK(frame_plan.header);
+    CHECK(frame_plan.empty);
+    CHECK(!frame_plan.editor);
+    CHECK(!frame_plan.popover);
+    CHECK_EQ(frame_plan.overlay, VIEW_OVERLAY_DRAW_SEARCH);
+
+    frame_plan = view_frame_plan(1.0f, 1.0f, 1.0f, 1, 99);
+    CHECK(frame_plan.editor);
+    CHECK(!frame_plan.empty);
+    CHECK(!frame_plan.popover);
+    CHECK_EQ(frame_plan.overlay, VIEW_OVERLAY_DRAW_NONE);
+
     ViewPoint anchor = view_popover_anchor(120.0f, 40.0f, 300.0f, 26.0f,
                                            10.0f, 20.0f, 3, 4, 10.0f);
     CHECK_EQ((int)anchor.x, 160);

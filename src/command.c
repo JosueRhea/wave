@@ -179,3 +179,13 @@ CommandCloseAction command_close_action(CommandEffect effect) {
     if (!effect.quit) return COMMAND_CLOSE_NONE;
     return effect.quit_all ? COMMAND_CLOSE_WINDOW : COMMAND_CLOSE_TAB;
 }
+
+CommandAppPlan command_app_plan(CommandEffect effect, int editor_has_path) {
+    CommandAppPlan plan = {0};
+    plan.save_config = effect.save_config;
+    plan.apply_blur = effect.apply_blur;
+    plan.apply_titlebar = effect.apply_titlebar;
+    plan.write_file = effect.write && editor_has_path;
+    plan.close = command_close_action(effect);
+    return plan;
+}
