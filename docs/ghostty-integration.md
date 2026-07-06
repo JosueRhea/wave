@@ -1,10 +1,9 @@
 # Ghostty terminal integration
 
-Wave's terminal tabs are PTY-backed. The terminal parser has two build modes:
+Wave's terminal tabs are PTY-backed and use Ghostty VT as their terminal
+backend.
 
-- Default: Wave's small built-in fallback parser keeps the editor buildable with
-  only the existing C toolchain.
-- `USE_GHOSTTY_VT=1`: terminal output is fed through `libghostty-vt` via
+- Terminal output is fed through `libghostty-vt` via
   `ghostty_terminal_vt_write`, snapshotted through `GhosttyRenderState`, and
   copied from Ghostty row/cell data into Wave's current text renderer.
 - `USE_GHOSTTY_INTERNAL=1`: additionally force-loads Ghostty's full static
@@ -15,8 +14,8 @@ Build `libghostty-vt` with:
 
 ```sh
 make ghostty-vt
-make USE_GHOSTTY_VT=1 test
-make USE_GHOSTTY_VT=1 app
+make test
+make app
 ```
 
 This requires Zig 0.15.2, because Ghostty pins the C library build to that Zig
@@ -24,7 +23,7 @@ release. If another Zig is first on `PATH`, pass the version explicitly:
 
 ```sh
 make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig ghostty-vt
-make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig USE_GHOSTTY_VT=1 app
+make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig app
 ```
 
 There is also an experimental probe for Ghostty's non-VT library artifacts:
@@ -34,9 +33,8 @@ make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig ghostty-internal
 make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig USE_GHOSTTY_INTERNAL=1 app
 ```
 
-`USE_GHOSTTY_INTERNAL=1` implies the VT integration, because Wave's terminal
-code uses the `ghostty/vt.h` C API directly. The Makefile links static archives
-only:
+Wave's terminal code uses the `ghostty/vt.h` C API directly. The Makefile links
+static archives only:
 
 - `vendor/ghostty/zig-out/lib/libghostty-vt.a`
 - `vendor/ghostty/macos/GhosttyKit.xcframework/macos-arm64/libghostty-internal-fat.a`

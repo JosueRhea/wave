@@ -1,6 +1,7 @@
 #include "tabs.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "buffer.h"
@@ -21,10 +22,23 @@ static void tab_item_init_terminal(TabItem *item) {
     terminal_init(&item->terminal);
 }
 
+static void tab_item_init_git(TabItem *item) {
+    if (!item) return;
+    memset(item, 0, sizeof *item);
+    item->kind = TAB_ITEM_GIT;
+    item->git = malloc(sizeof *item->git);
+    if (item->git) git_view_init(item->git);
+}
+
 static void tab_item_close(TabItem *item) {
     if (!item) return;
     if (item->kind == TAB_ITEM_TERMINAL)
         terminal_free(&item->terminal);
+    else if (item->kind == TAB_ITEM_GIT) {
+        git_view_free(item->git);
+        free(item->git);
+        item->git = NULL;
+    }
     else
         editor_close(&item->editor);
 }
@@ -59,6 +73,21 @@ const Terminal *tabs_current_terminal_const(const TabSet *tabs) {
     return &tabs->items[tabs->active].terminal;
 }
 
+GitView *tabs_current_git(TabSet *tabs) {
+    if (!tabs || tabs->count <= 0) return NULL;
+    if (tabs->active < 0) tabs->active = 0;
+    if (tabs->active >= tabs->count) tabs->active = tabs->count - 1;
+    if (tabs->items[tabs->active].kind != TAB_ITEM_GIT) return NULL;
+    return tabs->items[tabs->active].git;
+}
+
+const GitView *tabs_current_git_const(const TabSet *tabs) {
+    if (!tabs || tabs->count <= 0 || tabs->active < 0 || tabs->active >= tabs->count)
+        return NULL;
+    if (tabs->items[tabs->active].kind != TAB_ITEM_GIT) return NULL;
+    return tabs->items[tabs->active].git;
+}
+
 TabItemKind tabs_current_kind(const TabSet *tabs) {
     if (!tabs || tabs->count <= 0 || tabs->active < 0 || tabs->active >= tabs->count)
         return TAB_ITEM_EDITOR;
@@ -81,6 +110,12 @@ Terminal *tabs_terminal_at(TabSet *tabs, int index) {
     if (!tabs || index < 0 || index >= tabs->count) return NULL;
     if (tabs->items[index].kind != TAB_ITEM_TERMINAL) return NULL;
     return &tabs->items[index].terminal;
+}
+
+GitView *tabs_git_at(TabSet *tabs, int index) {
+    if (!tabs || index < 0 || index >= tabs->count) return NULL;
+    if (tabs->items[index].kind != TAB_ITEM_GIT) return NULL;
+    return tabs->items[index].git;
 }
 
 TabItemKind tabs_kind_at(const TabSet *tabs, int index) {
@@ -110,6 +145,17 @@ Terminal *tabs_new_terminal(TabSet *tabs, const char *label, const char *cwd,
     snprintf(item->label, sizeof item->label, "%s", label ? label : argv[0]);
     if (!terminal_spawn(&item->terminal, item->label, cwd, argv)) return &item->terminal;
     return &item->terminal;
+}
+
+GitView *tabs_new_git(TabSet *tabs, const char *label, const char *root) {
+    if (!tabs) return NULL;
+    if (tabs->count >= WAVE_MAX_TABS) return tabs_current_git(tabs);
+    tabs->active = tabs->count++;
+    TabItem *item = &tabs->items[tabs->active];
+    tab_item_init_git(item);
+    snprintf(item->label, sizeof item->label, "%s", label ? label : "git");
+    if (item->git) git_view_open(item->git, root);
+    return item->git;
 }
 
 int tabs_close(TabSet *tabs, int index) {
@@ -391,6 +437,10 @@ void tabs_label(const TabSet *tabs, int index, char *out, size_t cap) {
     const TabItem *item = &tabs->items[index];
     if (item->kind == TAB_ITEM_TERMINAL) {
         snprintf(out, cap, "%s", item->label[0] ? item->label : "terminal");
+        return;
+    }
+    if (item->kind == TAB_ITEM_GIT) {
+        snprintf(out, cap, "%s", item->label[0] ? item->label : "git");
         return;
     }
     view_tab_label(&item->editor, out, cap);

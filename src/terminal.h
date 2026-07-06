@@ -4,9 +4,11 @@
 #include <stddef.h>
 #include <sys/types.h>
 
-#ifdef WAVE_USE_GHOSTTY_VT
-#include <ghostty/vt.h>
+#ifndef WAVE_USE_GHOSTTY_VT
+#error "Wave terminal tabs require Ghostty VT; the Makefile enables it by default."
 #endif
+
+#include <ghostty/vt.h>
 
 typedef struct {
     float r, g, b;
@@ -49,13 +51,17 @@ typedef struct {
     int cursor_row;
     int cursor_col;
     int cursor_visible;
+    int selection_active;
+    int selection_dragging;
+    size_t selection_anchor_row;
+    size_t selection_head_row;
+    int selection_anchor_col;
+    int selection_head_col;
     int ghostty_enabled;
-#ifdef WAVE_USE_GHOSTTY_VT
     GhosttyTerminal ghostty_terminal;
     GhosttyRenderState ghostty_render_state;
     GhosttyRenderStateRowIterator ghostty_row_iter;
     GhosttyRenderStateRowCells ghostty_row_cells;
-#endif
 } Terminal;
 
 void terminal_init(Terminal *t);
@@ -75,5 +81,12 @@ size_t terminal_visible_start(const Terminal *t, int rows);
 const char *terminal_line(const Terminal *t, size_t index);
 const TerminalLineStyle *terminal_line_style(const Terminal *t, size_t index);
 const char *terminal_status(const Terminal *t);
+void terminal_selection_clear(Terminal *t);
+void terminal_selection_begin(Terminal *t, size_t row, int col);
+void terminal_selection_update(Terminal *t, size_t row, int col);
+void terminal_selection_end(Terminal *t);
+int terminal_selection_span(const Terminal *t, size_t row, int *start_col,
+                            int *end_col);
+char *terminal_copy_selection(const Terminal *t);
 
 #endif

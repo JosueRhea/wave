@@ -2,19 +2,22 @@
 #define WAVE_TABS_H
 
 #include "editor.h"
+#include "git_view.h"
 #include "terminal.h"
 
 #define WAVE_MAX_TABS 32
 
 typedef enum {
     TAB_ITEM_EDITOR,
-    TAB_ITEM_TERMINAL
+    TAB_ITEM_TERMINAL,
+    TAB_ITEM_GIT
 } TabItemKind;
 
 typedef struct {
     TabItemKind kind;
     Editor editor;
     Terminal terminal;
+    GitView *git;
     char label[64];
 } TabItem;
 
@@ -74,14 +77,18 @@ Editor *tabs_current(TabSet *tabs);
 const Editor *tabs_current_const(const TabSet *tabs);
 Terminal *tabs_current_terminal(TabSet *tabs);
 const Terminal *tabs_current_terminal_const(const TabSet *tabs);
+GitView *tabs_current_git(TabSet *tabs);
+const GitView *tabs_current_git_const(const TabSet *tabs);
 TabItemKind tabs_current_kind(const TabSet *tabs);
 Editor *tabs_at(TabSet *tabs, int index);
 const Editor *tabs_at_const(const TabSet *tabs, int index);
 Terminal *tabs_terminal_at(TabSet *tabs, int index);
+GitView *tabs_git_at(TabSet *tabs, int index);
 TabItemKind tabs_kind_at(const TabSet *tabs, int index);
 Editor *tabs_new(TabSet *tabs);
 Terminal *tabs_new_terminal(TabSet *tabs, const char *label, const char *cwd,
                             const char *const argv[]);
+GitView *tabs_new_git(TabSet *tabs, const char *label, const char *root);
 int tabs_close(TabSet *tabs, int index);
 void tabs_goto(TabSet *tabs, int delta);
 int tabs_set_active(TabSet *tabs, int index);

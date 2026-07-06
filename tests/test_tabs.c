@@ -46,6 +46,17 @@ int main(void) {
     CHECK_EQ(tabs_close(&tabs, 0), 0);
 
     memset(&tabs, 0, sizeof tabs);
+    GitView *git = tabs_new_git(&tabs, "git", "/tmp");
+    CHECK(git != NULL);
+    CHECK_EQ(tabs_count(&tabs), 1);
+    CHECK_EQ(tabs_current_kind(&tabs), TAB_ITEM_GIT);
+    CHECK(tabs_current_git(&tabs) == git);
+    CHECK(tabs_current(&tabs) == NULL);
+    tabs_label(&tabs, 0, label, sizeof label);
+    CHECK_STR(label, "git");
+    CHECK_EQ(tabs_close(&tabs, 0), 0);
+
+    memset(&tabs, 0, sizeof tabs);
     a = tabs_new(&tabs);
     CHECK(a != NULL);
     CHECK_EQ(tabs_count(&tabs), 1);

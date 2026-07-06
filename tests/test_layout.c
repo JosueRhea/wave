@@ -18,6 +18,12 @@ int main(void) {
     CHECK_EQ(layout_tab_index(&l, 200.0f), 0);
     CHECK_EQ(layout_tab_index(&l, 381.0f), 1);
     CHECK_EQ(layout_tab_index(&l, 375.0f), -1);
+    l.header_h = 20.0f;
+    l.top_pad = 50.0f;
+    CHECK(!layout_in_tab_strip(&l, 210.0f, 19.0f));
+    CHECK(layout_in_tab_strip(&l, 210.0f, 21.0f));
+    l.header_h = 28.0f;
+    l.top_pad = 52.0f;
     l.tab_scroll = 180.0f;
     CHECK_EQ(layout_tab_index(&l, 200.0f), 1);
     l.tab_scroll = 0.0f;

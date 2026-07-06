@@ -441,6 +441,31 @@ static void draw_terminal_cell_text(Font *font, Renderer *r, const char *s,
                        c.r, c.g, c.b, 1.0f);
 }
 
+static void draw_terminal_plain_text(Font *font, Renderer *r, const char *s,
+                                     size_t n, float x, float y, float top,
+                                     float max_w, float adv, float line_h,
+                                     Color c, int prompt_marker) {
+    if (!s || n == 0 || max_w <= 0.0f || adv <= 0.0f) return;
+    size_t max_cols = (size_t)(max_w / adv);
+    size_t col = 0;
+    for (size_t i = 0; i < n && col < max_cols;) {
+        unsigned int cp = 0;
+        int used = draw_utf8_codepoint(s + i, n - i, &cp);
+        if (used <= 0) used = 1;
+        if (prompt_marker && cp != '?') {
+            i += (size_t)used;
+            col++;
+            continue;
+        }
+        draw_terminal_cell_text(font, r, s + i, (size_t)used,
+                                x + adv * (float)col, y, top, adv, line_h,
+                                c, prompt_marker);
+        if (prompt_marker) return;
+        i += (size_t)used;
+        col++;
+    }
+}
+
 static void draw_terminal_line(Font *font, Renderer *r, const Terminal *term,
                                size_t line_index, float x, float y,
                                float top, float max_w, float adv,
@@ -452,20 +477,19 @@ static void draw_terminal_line(Font *font, Renderer *r, const Terminal *term,
 
     const TerminalLineStyle *style = terminal_line_style(term, line_index);
     int prompt_marker = draw_terminal_prompt_marker_line(s, n);
+    int sel_start = 0, sel_end = 0;
+    if (terminal_selection_span(term, line_index, &sel_start, &sel_end)) {
+        if (sel_start < 0) sel_start = 0;
+        if (sel_end > (int)max_cols) sel_end = (int)max_cols;
+        if (sel_end > sel_start)
+            renderer_rect(r, x + adv * (float)sel_start, top,
+                          adv * (float)(sel_end - sel_start), line_h,
+                          0.24f, 0.34f, 0.52f, 0.88f);
+    }
     if (!style || style->ncells == 0) {
-        if (prompt_marker) {
-            for (size_t i = 0; i < n && i < max_cols; i++) {
-                if (s[i] != '?') continue;
-                draw_terminal_cell_text(font, r, s + i, 1, x + adv * (float)i,
-                                        y, top, adv, line_h, default_fg, 1);
-                return;
-            }
-        } else {
-            int max_n = (int)max_cols;
-            int draw_n = (int)n;
-            if (draw_n > max_n) draw_n = max_n;
-            if (draw_n > 0) draw_text_run(font, r, s, draw_n, x, y, default_fg);
-        }
+        (void)max_cols;
+        draw_terminal_plain_text(font, r, s, n, x, y, top, max_w, adv,
+                                 line_h, default_fg, prompt_marker);
         return;
     }
 
@@ -536,6 +560,251 @@ void draw_terminal_panel(const Terminal *term, int focused, float x, float y,
         if (cy >= body_y && cy < bottom && cx < x + w - pad)
             renderer_rect(r, cx, cy, adv * 0.7f, line_h - 4.0f,
                           0.52f, 0.70f, 1.0f, 0.75f);
+    }
+}
+
+static Color git_line_color(const char *line) {
+    if (!line) return (Color){0.68f, 0.72f, 0.80f};
+    if (!strncmp(line, "diff --git", 10) || !strncmp(line, "index ", 6) ||
+        !strncmp(line, "@@", 2))
+        return (Color){0.48f, 0.68f, 0.96f};
+    if (line[0] == '+') return (Color){0.48f, 0.84f, 0.56f};
+    if (line[0] == '-') return (Color){0.94f, 0.44f, 0.42f};
+    return (Color){0.70f, 0.74f, 0.82f};
+}
+
+static int git_parse_hunk(const char *line, int *old_line, int *new_line) {
+    int old_start = 0, old_len = 0, new_start = 0, new_len = 0;
+    if (!line || strncmp(line, "@@ ", 3)) return 0;
+    if (sscanf(line, "@@ -%d,%d +%d,%d", &old_start, &old_len,
+               &new_start, &new_len) == 4 ||
+        sscanf(line, "@@ -%d +%d,%d", &old_start, &new_start, &new_len) == 3 ||
+        sscanf(line, "@@ -%d,%d +%d", &old_start, &old_len, &new_start) == 3 ||
+        sscanf(line, "@@ -%d +%d", &old_start, &new_start) == 2) {
+        if (old_line) *old_line = old_start;
+        if (new_line) *new_line = new_start;
+        return 1;
+    }
+    return 0;
+}
+
+static void draw_git_line_number(Font *font, Renderer *r, int value,
+                                 float x, float y, float adv, Color c) {
+    if (value <= 0) return;
+    char text[16];
+    snprintf(text, sizeof text, "%d", value);
+    int len = (int)strlen(text);
+    draw_text_run(font, r, text, len, x - adv * (float)len, y, c);
+}
+
+static void draw_git_diff_row(Font *font, Renderer *r, const char *line,
+                              int old_no, int new_no, float x, float y,
+                              float w, float line_h, float adv,
+                              float ascent, float opacity) {
+    int is_add = line && line[0] == '+' && strncmp(line, "+++", 3);
+    int is_del = line && line[0] == '-' && strncmp(line, "---", 3);
+    int is_hunk = line && !strncmp(line, "@@", 2);
+    int is_meta = line && (!strncmp(line, "diff --git", 10) ||
+                           !strncmp(line, "index ", 6) ||
+                           !strncmp(line, "--- ", 4) ||
+                           !strncmp(line, "+++ ", 4));
+
+    float old_w = adv * 5.0f;
+    float new_w = adv * 5.0f;
+    float mark_w = adv * 2.3f;
+    float content_x = x + old_w + new_w + mark_w;
+    float bg_y = y - ascent - 2.0f;
+    if (is_add)
+        renderer_rect(r, x, bg_y, w, line_h, 0.12f, 0.28f, 0.17f, opacity);
+    else if (is_del)
+        renderer_rect(r, x, bg_y, w, line_h, 0.30f, 0.13f, 0.15f, opacity);
+    else if (is_hunk)
+        renderer_rect(r, x, bg_y, w, line_h, 0.11f, 0.17f, 0.24f, opacity);
+
+    renderer_rect(r, x + old_w - 1.0f, bg_y, 1.0f, line_h,
+                  0.20f, 0.23f, 0.28f, opacity * 0.75f);
+    renderer_rect(r, x + old_w + new_w - 1.0f, bg_y, 1.0f, line_h,
+                  0.20f, 0.23f, 0.28f, opacity * 0.75f);
+
+    Color gutter = (Color){0.52f, 0.57f, 0.65f};
+    draw_git_line_number(font, r, old_no, x + old_w - adv * 0.7f, y, adv, gutter);
+    draw_git_line_number(font, r, new_no, x + old_w + new_w - adv * 0.7f, y, adv, gutter);
+
+    const char *text = line ? line : "";
+    const char *body = text;
+    char mark = ' ';
+    if (is_add || is_del) {
+        mark = text[0];
+        body = text + 1;
+    }
+    if (mark != ' ')
+        draw_text_run(font, r, &mark, 1, x + old_w + new_w + adv * 0.7f,
+                      y, is_add ? (Color){0.50f, 0.92f, 0.60f}
+                                : (Color){0.98f, 0.50f, 0.50f});
+
+    Color text_color = is_add ? (Color){0.62f, 0.96f, 0.68f}
+                     : is_del ? (Color){1.00f, 0.62f, 0.62f}
+                     : is_hunk ? (Color){0.56f, 0.72f, 0.96f}
+                     : is_meta ? (Color){0.45f, 0.53f, 0.66f}
+                     : git_line_color(text);
+    int text_len = view_clamp_text_len(body, (int)((w - (content_x - x) - adv) / adv));
+    draw_text_run(font, r, body, text_len, content_x, y, text_color);
+}
+
+void draw_git_panel(const GitView *git, float x, float y, float w, float h,
+                    Font *font, Renderer *r, float adv, float line_h,
+                    float ascent, float opacity, float radius) {
+    renderer_rect(r, x, y, w, h, 0.075f, 0.085f, 0.105f, opacity);
+    float pad = adv * 1.4f;
+    float split_w = w * 0.34f;
+    if (split_w < adv * 28.0f) split_w = adv * 28.0f;
+    if (split_w > w * 0.48f) split_w = w * 0.48f;
+    float right_x = x + split_w;
+    renderer_rect(r, right_x, y, 1.0f, h, 0.17f, 0.19f, 0.23f, opacity);
+
+    const char *title = "Git";
+    draw_text_run(font, r, title, (int)strlen(title),
+                  x + pad, y + ascent + line_h * 0.55f,
+                  (Color){0.93f, 0.94f, 0.97f});
+    if (git && git->repo[0]) {
+        int repo_len = view_clamp_text_len(git->repo, (int)((split_w - pad * 2.0f) / adv));
+        draw_text_run(font, r, git->repo, repo_len,
+                      x + pad, y + ascent + line_h * 1.65f,
+                      (Color){0.50f, 0.56f, 0.66f});
+    }
+
+    float row_y = y + line_h * 3.0f;
+    if (!git) return;
+    if (git->mode == GIT_VIEW_REPO_SELECT) {
+        const char *hint = git->repo_count ? "Select repository" : "No child git repositories found";
+        draw_text_run(font, r, hint, (int)strlen(hint), x + pad,
+                      row_y, (Color){0.68f, 0.73f, 0.82f});
+        row_y += line_h * 1.25f;
+        for (int i = 0; i < git->repo_count; i++) {
+            float iy = row_y + (float)i * line_h * 1.35f;
+            if (iy > y + h - line_h) break;
+            int selected = i == git->selected_repo;
+            if (selected)
+                draw_round_rect(r, x + pad * 0.6f, iy - ascent,
+                                split_w - pad * 1.2f, line_h * 1.15f,
+                                radius, (Color){0.16f, 0.19f, 0.25f}, 1.0f);
+            int label_len = view_clamp_text_len(git->repos[i].label,
+                                                (int)((split_w - pad * 2.0f) / adv));
+            draw_text_run(font, r, git->repos[i].label, label_len, x + pad, iy,
+                          selected ? (Color){0.92f, 0.94f, 0.98f}
+                                   : (Color){0.62f, 0.67f, 0.76f});
+        }
+        return;
+    }
+
+    const char *changes = "Changes";
+    draw_text_run(font, r, changes, (int)strlen(changes), x + pad, row_y,
+                  (Color){0.78f, 0.82f, 0.90f});
+    row_y += line_h * 1.2f;
+    if (git->file_count == 0) {
+        const char *clean = "Working tree clean";
+        draw_text_run(font, r, clean, (int)strlen(clean), x + pad, row_y,
+                      (Color){0.50f, 0.56f, 0.64f});
+    }
+    int max_change_rows = (int)((h * 0.52f) / line_h);
+    for (int i = git->scroll; i < git->file_count && i < git->scroll + max_change_rows; i++) {
+        float iy = row_y + (float)(i - git->scroll) * line_h * 1.25f;
+        int selected = i == git->selected_file;
+        if (selected)
+            draw_round_rect(r, x + pad * 0.55f, iy - ascent,
+                            split_w - pad * 1.1f, line_h * 1.10f,
+                            radius, (Color){0.16f, 0.19f, 0.25f}, 1.0f);
+        Color code_color = git->files[i].code[0] == '?' ? (Color){0.82f, 0.68f, 0.42f}
+                         : git->files[i].code[0] != ' ' ? (Color){0.48f, 0.84f, 0.56f}
+                         : (Color){0.72f, 0.76f, 0.84f};
+        draw_text_run(font, r, git->files[i].code, (int)strlen(git->files[i].code),
+                      x + pad, iy, code_color);
+        int path_len = view_clamp_text_len(git->files[i].path,
+                                           (int)((split_w - pad * 4.0f) / adv));
+        draw_text_run(font, r, git->files[i].path, path_len, x + pad + adv * 3.2f,
+                      iy, selected ? (Color){0.92f, 0.94f, 0.98f}
+                                   : (Color){0.62f, 0.67f, 0.76f});
+    }
+
+    float msg_y = y + h - line_h * 5.1f;
+    const char *commit_title = git->mode == GIT_VIEW_COMMIT_INPUT ? "Commit message" : "Recent commits";
+    draw_text_run(font, r, commit_title, (int)strlen(commit_title), x + pad, msg_y,
+                  (Color){0.78f, 0.82f, 0.90f});
+    msg_y += line_h * 1.25f;
+    if (git->mode == GIT_VIEW_COMMIT_INPUT) {
+        draw_round_rect(r, x + pad * 0.6f, msg_y - ascent, split_w - pad * 1.2f,
+                        line_h * 1.45f, radius, (Color){0.12f, 0.14f, 0.17f}, 1.0f);
+        const char *message = git->message[0] ? git->message : "Type message, Enter to commit";
+        int ml = view_clamp_text_len(message, (int)((split_w - pad * 2.4f) / adv));
+        draw_text_run(font, r, message, ml, x + pad, msg_y + line_h * 0.15f,
+                      git->message[0] ? (Color){0.92f, 0.94f, 0.98f}
+                                      : (Color){0.46f, 0.51f, 0.58f});
+    } else {
+        int rows = 3;
+        for (int i = 0; i < git->history_count && i < rows; i++) {
+            int hl = view_clamp_text_len(git->history[i],
+                                         (int)((split_w - pad * 2.0f) / adv));
+            draw_text_run(font, r, git->history[i], hl, x + pad,
+                          msg_y + (float)i * line_h * 1.15f,
+                          (Color){0.50f, 0.56f, 0.64f});
+        }
+    }
+
+    float rx = right_x + pad;
+    float ry = y + ascent + line_h * 0.55f;
+    const GitFileChange *selected = git_view_selected_file(git);
+    const char *diff_title = selected ? selected->path : "Diff";
+    int dl = view_clamp_text_len(diff_title, (int)((w - split_w - pad * 2.0f) / adv));
+    draw_text_run(font, r, diff_title, dl, rx, ry, (Color){0.93f, 0.94f, 0.97f});
+    ry += line_h * 1.35f;
+    if (git->info[0]) {
+        int il = view_clamp_text_len(git->info, (int)((w - split_w - pad * 2.0f) / adv));
+        draw_text_run(font, r, git->info, il, rx, ry, (Color){0.52f, 0.60f, 0.72f});
+        ry += line_h * 1.25f;
+    }
+    int visible_rows = (int)((y + h - ry - line_h * 0.5f) / line_h);
+    if (visible_rows < 0) visible_rows = 0;
+    int old_no = 0, new_no = 0, visible_index = 0;
+    for (int i = 0; i < git->diff_count; i++) {
+        const char *line = git->diff[i];
+        int row_old = 0, row_new = 0;
+        if (git_parse_hunk(line, &old_no, &new_no)) {
+            row_old = old_no;
+            row_new = new_no;
+        } else if (line && line[0] == '-' && strncmp(line, "---", 3)) {
+            row_old = old_no++;
+        } else if (line && line[0] == '+' && strncmp(line, "+++", 3)) {
+            row_new = new_no++;
+        } else if (line && strncmp(line, "diff --git", 10) &&
+                   strncmp(line, "index ", 6) &&
+                   strncmp(line, "--- ", 4) &&
+                   strncmp(line, "+++ ", 4)) {
+            if (old_no > 0) row_old = old_no++;
+            if (new_no > 0) row_new = new_no++;
+        }
+        if (i < git->diff_scroll) continue;
+        if (visible_index >= visible_rows) break;
+        int sel_start = 0, sel_end = 0;
+        if (git_view_diff_selection_span(git, i, &sel_start, &sel_end)) {
+            float old_w = adv * 5.0f;
+            float new_w = adv * 5.0f;
+            float mark_w = adv * 2.3f;
+            float content_x = rx + old_w + new_w + mark_w;
+            int max_cols = (int)((w - split_w - pad * 1.4f -
+                                  (content_x - rx)) / adv);
+            if (sel_start < 0) sel_start = 0;
+            if (sel_end > max_cols) sel_end = max_cols;
+            if (sel_end > sel_start)
+                renderer_rect(r, content_x + adv * (float)sel_start,
+                              ry + (float)visible_index * line_h - ascent - 2.0f,
+                              adv * (float)(sel_end - sel_start), line_h,
+                              0.24f, 0.34f, 0.52f, 0.82f);
+        }
+        draw_git_diff_row(font, r, line, row_old, row_new, rx,
+                          ry + (float)visible_index * line_h,
+                          w - split_w - pad * 1.4f, line_h, adv, ascent,
+                          opacity);
+        visible_index++;
     }
 }
 

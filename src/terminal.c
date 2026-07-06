@@ -1,6 +1,5 @@
 #include "terminal.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -13,10 +12,12 @@
 #include <unistd.h>
 #include <util.h>
 
-#ifdef WAVE_USE_GHOSTTY_VT
+#ifndef WAVE_USE_GHOSTTY_VT
+#error "Wave terminal tabs require Ghostty VT; the Makefile enables it by default."
+#endif
+
 static void terminal_ghostty_configure_effects(Terminal *t);
 static void terminal_ghostty_sync_cells(Terminal *t);
-#endif
 
 static char *term_strdup(const char *s) {
     size_t n = strlen(s) + 1;
@@ -33,7 +34,6 @@ static void terminal_line_style_free(TerminalLineStyle *style) {
     style->cap_cells = 0;
 }
 
-#ifdef WAVE_USE_GHOSTTY_VT
 static int terminal_line_style_push(TerminalLineStyle *style, size_t col_start,
                                     size_t col_len, size_t byte_start,
                                     size_t byte_len, TerminalColor fg,
@@ -58,7 +58,6 @@ static int terminal_line_style_push(TerminalLineStyle *style, size_t col_start,
     };
     return 1;
 }
-#endif
 
 void terminal_init(Terminal *t) {
     if (!t) return;
@@ -68,7 +67,6 @@ void terminal_init(Terminal *t) {
     t->cols = 80;
     t->rows = 24;
     t->cursor_visible = 0;
-#ifdef WAVE_USE_GHOSTTY_VT
     GhosttyTerminalOptions opts = {
         .cols = (uint16_t)t->cols,
         .rows = (uint16_t)t->rows,
@@ -98,7 +96,6 @@ void terminal_init(Terminal *t) {
             t->ghostty_terminal = NULL;
         }
     }
-#endif
 }
 
 static void terminal_clear_lines(Terminal *t) {
@@ -115,13 +112,13 @@ static void terminal_clear_lines(Terminal *t) {
     t->scroll = 0;
     t->current_len = 0;
     t->current[0] = '\0';
+    terminal_selection_clear(t);
 }
 
 void terminal_free(Terminal *t) {
     if (!t) return;
     terminal_stop(t);
     terminal_clear_lines(t);
-#ifdef WAVE_USE_GHOSTTY_VT
     if (t->ghostty_row_cells) {
         ghostty_render_state_row_cells_free(t->ghostty_row_cells);
         t->ghostty_row_cells = NULL;
@@ -139,7 +136,6 @@ void terminal_free(Terminal *t) {
         t->ghostty_terminal = NULL;
     }
     t->ghostty_enabled = 0;
-#endif
 }
 
 static void terminal_append_line_styled(Terminal *t, const char *line,
@@ -183,70 +179,10 @@ static void terminal_append_line_styled(Terminal *t, const char *line,
     }
 }
 
-static void terminal_append_line(Terminal *t, const char *line) {
-    terminal_append_line_styled(t, line, NULL);
-}
-
-static void terminal_finish_current(Terminal *t) {
-    t->current[t->current_len] = '\0';
-    terminal_append_line(t, t->current);
-    t->current_len = 0;
-    t->current[0] = '\0';
-}
-
-static int terminal_ansi_skip(const char *s, size_t n, size_t *i) {
-    size_t p = *i;
-    if (p >= n || s[p] != '\033') return 0;
-    if (p + 1 >= n) return 1;
-    p++;
-    if (s[p] == '[') {
-        p++;
-        while (p < n && !isalpha((unsigned char)s[p]) && s[p] != '~') p++;
-        *i = p < n ? p : n - 1;
-        return 1;
-    }
-    if (s[p] == ']') {
-        p++;
-        while (p < n && s[p] != '\a') p++;
-        *i = p < n ? p : n - 1;
-        return 1;
-    }
-    *i = p;
-    return 1;
-}
-
 static void terminal_feed(Terminal *t, const char *s, size_t n) {
-#ifdef WAVE_USE_GHOSTTY_VT
-    if (t && t->ghostty_enabled && t->ghostty_terminal) {
-        ghostty_terminal_vt_write(t->ghostty_terminal, (const uint8_t *)s, n);
-        terminal_ghostty_sync_cells(t);
-        return;
-    }
-#endif
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c == '\033' && terminal_ansi_skip(s, n, &i)) continue;
-        if (c == '\r' && i + 1 < n && s[i + 1] == '\n') {
-            continue;
-        }
-        if (c == '\r') {
-            t->current_len = 0;
-            t->current[0] = '\0';
-            continue;
-        }
-        if (c == '\n') {
-            terminal_finish_current(t);
-            continue;
-        }
-        if (c == '\b' || c == 127) {
-            if (t->current_len > 0) t->current[--t->current_len] = '\0';
-            continue;
-        }
-        if (c < 32 && c != '\t') continue;
-        if (t->current_len + 1 >= sizeof t->current) terminal_finish_current(t);
-        t->current[t->current_len++] = (char)c;
-        t->current[t->current_len] = '\0';
-    }
+    if (!t || !t->ghostty_enabled || !t->ghostty_terminal) return;
+    ghostty_terminal_vt_write(t->ghostty_terminal, (const uint8_t *)s, n);
+    terminal_ghostty_sync_cells(t);
 }
 
 static int terminal_argc(const char *const argv[], int max_args) {
@@ -307,13 +243,11 @@ int terminal_spawn(Terminal *t, const char *title, const char *cwd,
     terminal_clear_lines(t);
     snprintf(t->title, sizeof t->title, "%s", title ? title : argv[0]);
     snprintf(t->cwd, sizeof t->cwd, "%s", cwd ? cwd : ".");
-#ifdef WAVE_USE_GHOSTTY_VT
     if (t->ghostty_enabled && t->ghostty_terminal) {
         ghostty_terminal_reset(t->ghostty_terminal);
         ghostty_terminal_resize(t->ghostty_terminal, (uint16_t)t->cols,
                                 (uint16_t)t->rows, 0, 0);
     }
-#endif
 
     struct winsize ws;
     memset(&ws, 0, sizeof ws);
@@ -323,7 +257,7 @@ int terminal_spawn(Terminal *t, const char *title, const char *cwd,
     pid_t pid = forkpty(&t->fd, NULL, NULL, &ws);
     if (pid < 0) {
         t->fd = -1;
-        terminal_append_line(t, "failed to start terminal");
+        terminal_append_line_styled(t, "failed to start terminal", NULL);
         return 0;
     }
     if (pid == 0) {
@@ -378,8 +312,8 @@ void terminal_poll(Terminal *t) {
             t->pid = 0;
             t->running = 0;
             t->exit_status = status;
-            terminal_append_line(t, "");
-            terminal_append_line(t, "[process exited]");
+            terminal_append_line_styled(t, "", NULL);
+            terminal_append_line_styled(t, "[process exited]", NULL);
         }
     }
 }
@@ -526,13 +460,11 @@ void terminal_resize(Terminal *t, int rows, int cols) {
     if (t->rows == rows && t->cols == cols) return;
     t->rows = rows;
     t->cols = cols;
-#ifdef WAVE_USE_GHOSTTY_VT
     if (t->ghostty_enabled && t->ghostty_terminal) {
         ghostty_terminal_resize(t->ghostty_terminal, (uint16_t)t->cols,
                                 (uint16_t)t->rows, 0, 0);
         terminal_ghostty_sync_cells(t);
     }
-#endif
     if (t->fd < 0) return;
     struct winsize ws;
     memset(&ws, 0, sizeof ws);
@@ -543,7 +475,6 @@ void terminal_resize(Terminal *t, int rows, int cols) {
 
 void terminal_scroll(Terminal *t, int units) {
     if (!t) return;
-#ifdef WAVE_USE_GHOSTTY_VT
     if (t->ghostty_enabled && t->ghostty_terminal) {
         GhosttyTerminalScrollViewport scroll = {
             .tag = GHOSTTY_SCROLL_VIEWPORT_DELTA,
@@ -553,7 +484,6 @@ void terminal_scroll(Terminal *t, int units) {
         terminal_ghostty_sync_cells(t);
         return;
     }
-#endif
     if (units > 0) {
         t->scroll += (size_t)units;
     } else if (units < 0) {
@@ -588,7 +518,143 @@ const char *terminal_status(const Terminal *t) {
     return t->running ? "running" : "stopped";
 }
 
-#ifdef WAVE_USE_GHOSTTY_VT
+static void terminal_normalized_selection(const Terminal *t, size_t *start_row,
+                                          int *start_col, size_t *end_row,
+                                          int *end_col) {
+    size_t ar = t->selection_anchor_row;
+    size_t hr = t->selection_head_row;
+    int ac = t->selection_anchor_col;
+    int hc = t->selection_head_col;
+    if (ar > hr || (ar == hr && ac > hc)) {
+        size_t tr = ar;
+        int tc = ac;
+        ar = hr;
+        ac = hc;
+        hr = tr;
+        hc = tc;
+    }
+    if (start_row) *start_row = ar;
+    if (start_col) *start_col = ac;
+    if (end_row) *end_row = hr;
+    if (end_col) *end_col = hc;
+}
+
+static size_t terminal_byte_for_col(const Terminal *t, size_t row, int col) {
+    const char *line = terminal_line(t, row);
+    size_t len = strlen(line);
+    if (col <= 0) return 0;
+    const TerminalLineStyle *style = terminal_line_style(t, row);
+    if (style && style->ncells > 0) {
+        size_t best = len;
+        for (size_t i = 0; i < style->ncells; i++) {
+            const TerminalCellStyle *cell = &style->cells[i];
+            if ((int)cell->col_start >= col) {
+                if (cell->byte_start < best) best = cell->byte_start;
+            }
+        }
+        if (best != len) return best;
+        return len;
+    }
+    return (size_t)col < len ? (size_t)col : len;
+}
+
+void terminal_selection_clear(Terminal *t) {
+    if (!t) return;
+    t->selection_active = 0;
+    t->selection_dragging = 0;
+    t->selection_anchor_row = t->selection_head_row = 0;
+    t->selection_anchor_col = t->selection_head_col = 0;
+}
+
+void terminal_selection_begin(Terminal *t, size_t row, int col) {
+    if (!t) return;
+    if (col < 0) col = 0;
+    t->selection_active = 1;
+    t->selection_dragging = 1;
+    t->selection_anchor_row = row;
+    t->selection_head_row = row;
+    t->selection_anchor_col = col;
+    t->selection_head_col = col;
+}
+
+void terminal_selection_update(Terminal *t, size_t row, int col) {
+    if (!t || !t->selection_dragging) return;
+    if (col < 0) col = 0;
+    t->selection_head_row = row;
+    t->selection_head_col = col;
+}
+
+void terminal_selection_end(Terminal *t) {
+    if (!t) return;
+    t->selection_dragging = 0;
+    if (t->selection_anchor_row == t->selection_head_row &&
+        t->selection_anchor_col == t->selection_head_col)
+        terminal_selection_clear(t);
+}
+
+int terminal_selection_span(const Terminal *t, size_t row, int *start_col,
+                            int *end_col) {
+    if (!t || !t->selection_active) return 0;
+    size_t sr = 0, er = 0;
+    int sc = 0, ec = 0;
+    terminal_normalized_selection(t, &sr, &sc, &er, &ec);
+    if (row < sr || row > er) return 0;
+    int a = row == sr ? sc : 0;
+    int b = row == er ? ec : (int)strlen(terminal_line(t, row));
+    if (b < a) {
+        int tmp = a;
+        a = b;
+        b = tmp;
+    }
+    if (b <= a) b = a + 1;
+    if (start_col) *start_col = a;
+    if (end_col) *end_col = b;
+    return 1;
+}
+
+char *terminal_copy_selection(const Terminal *t) {
+    if (!t || !t->selection_active) return NULL;
+    size_t sr = 0, er = 0;
+    int sc = 0, ec = 0;
+    terminal_normalized_selection(t, &sr, &sc, &er, &ec);
+    if (sr == er && sc == ec) return NULL;
+    size_t cap = 1;
+    for (size_t row = sr; row <= er; row++) {
+        const char *line = terminal_line(t, row);
+        size_t a = terminal_byte_for_col(t, row, row == sr ? sc : 0);
+        size_t b = terminal_byte_for_col(t, row, row == er ? ec : (int)strlen(line));
+        if (b < a) {
+            size_t tmp = a;
+            a = b;
+            b = tmp;
+        }
+        cap += b - a + 1;
+        if (row == (size_t)-1) break;
+    }
+    char *text = malloc(cap);
+    if (!text) return NULL;
+    size_t used = 0;
+    text[0] = '\0';
+    for (size_t row = sr; row <= er; row++) {
+        const char *line = terminal_line(t, row);
+        size_t a = terminal_byte_for_col(t, row, row == sr ? sc : 0);
+        size_t b = terminal_byte_for_col(t, row, row == er ? ec : (int)strlen(line));
+        if (b < a) {
+            size_t tmp = a;
+            a = b;
+            b = tmp;
+        }
+        if (b > a) {
+            memcpy(text + used, line + a, b - a);
+            used += b - a;
+        }
+        if (row < er) text[used++] = '\n';
+        text[used] = '\0';
+        if (row == (size_t)-1) break;
+    }
+    return text;
+}
+
 static TerminalColor terminal_ghostty_rgb(GhosttyColorRgb rgb) {
     return (TerminalColor){
         (float)rgb.r / 255.0f,
@@ -865,4 +931,3 @@ static void terminal_ghostty_sync_cells(Terminal *t) {
                                    GHOSTTY_RENDER_STATE_OPTION_DIRTY,
                                    &clean_state);
 }
-#endif

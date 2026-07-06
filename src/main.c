@@ -228,6 +228,7 @@ static void config_path(char *out, size_t cap) {
 }
 
 static Terminal *cur_term(void) { return tabs_current_terminal(&g.tabs); }
+static GitView *cur_git(void) { return tabs_current_git(&g.tabs); }
 
 static const char *terminal_cwd(void) {
     if (g.ws) return ws_root(g.ws);
@@ -269,6 +270,14 @@ static Terminal *open_claude_tab(void) {
     return open_terminal_tab("claude", claude_argv);
 }
 
+static GitView *open_git_tab(void) {
+    const char *root = g.ws ? ws_root(g.ws) : terminal_cwd();
+    GitView *git = tabs_new_git(&g.tabs, "git", root);
+    g.tab_reveal_active = 1;
+    modal_enter_normal(&g.modal);
+    return git;
+}
+
 static int terminal_command(const char *text) {
     if (!text) return 0;
     if (!strcmp(text, "term") || !strcmp(text, "terminal")) {
@@ -284,6 +293,11 @@ static int terminal_command(const char *text) {
     if (!strcmp(text, "claude")) {
         open_claude_tab();
         snprintf(g.info, sizeof g.info, "claude opened");
+        return 1;
+    }
+    if (!strcmp(text, "git") || !strcmp(text, "changes")) {
+        open_git_tab();
+        snprintf(g.info, sizeof g.info, "git opened");
         return 1;
     }
     return 0;
@@ -350,6 +364,102 @@ static void editor_copy_selection(Editor *e) {
     if (!text) return;
     glfwSetClipboardString(g.win, text);
     free(text);
+}
+
+static void append_clip_text(char *dst, size_t cap, const char *text) {
+    if (!dst || cap == 0 || !text) return;
+    size_t used = strlen(dst);
+    if (used >= cap - 1) return;
+    strncat(dst, text, cap - used - 1);
+}
+
+static void terminal_copy_visible(Terminal *term) {
+    if (!term) return;
+    char *selection = terminal_copy_selection(term);
+    if (selection) {
+        glfwSetClipboardString(g.win, selection);
+        free(selection);
+        snprintf(g.info, sizeof g.info, "terminal selection copied");
+        return;
+    }
+    int rows = term->rows > 0 ? term->rows : 24;
+    size_t start = terminal_visible_start(term, rows);
+    size_t cap = 1;
+    for (size_t i = start; i < term->nlines && i < start + (size_t)rows; i++)
+        cap += strlen(terminal_line(term, i)) + 1;
+    char *text = malloc(cap);
+    if (!text) return;
+    text[0] = '\0';
+    for (size_t i = start; i < term->nlines && i < start + (size_t)rows; i++) {
+        const char *line = terminal_line(term, i);
+        append_clip_text(text, cap, line);
+        append_clip_text(text, cap, "\n");
+    }
+    glfwSetClipboardString(g.win, text);
+    free(text);
+    snprintf(g.info, sizeof g.info, "terminal copied");
+}
+
+static void git_copy_visible(GitView *git) {
+    if (!git) return;
+    char *selection = git_view_copy_diff_selection(git);
+    if (selection) {
+        glfwSetClipboardString(g.win, selection);
+        free(selection);
+        snprintf(g.info, sizeof g.info, "git selection copied");
+        return;
+    }
+    size_t cap = 8192;
+    char *text = malloc(cap);
+    if (!text) return;
+    text[0] = '\0';
+    if (git->mode == GIT_VIEW_REPO_SELECT) {
+        for (int i = 0; i < git->repo_count; i++) {
+            append_clip_text(text, cap, git->repos[i].label);
+            append_clip_text(text, cap, "\n");
+        }
+    } else {
+        const GitFileChange *file = git_view_selected_file(git);
+        if (file) {
+            append_clip_text(text, cap, file->path);
+            append_clip_text(text, cap, "\n");
+        }
+        int end = git->diff_scroll + 80;
+        if (end > git->diff_count) end = git->diff_count;
+        for (int i = git->diff_scroll; i < end; i++) {
+            append_clip_text(text, cap, git->diff[i]);
+            append_clip_text(text, cap, "\n");
+        }
+    }
+    glfwSetClipboardString(g.win, text);
+    free(text);
+    snprintf(g.info, sizeof g.info, "git copied");
+}
+
+static void copy_active_surface(Editor *e) {
+    Terminal *term = cur_term();
+    GitView *git = cur_git();
+    if (term) {
+        terminal_copy_visible(term);
+    } else if (git) {
+        git_copy_visible(git);
+    } else {
+        editor_copy_selection(e);
+    }
+}
+
+static void paste_active_surface(Editor *e, const char *clip) {
+    if (!clip) return;
+    Terminal *term = cur_term();
+    GitView *git = cur_git();
+    if (term) {
+        terminal_write(term, clip, strlen(clip));
+    } else if (git) {
+        git_view_insert_text(git, clip);
+    } else {
+        EditorPasteResult paste = editor_paste_text(e, clip, g.modal.mode == MODE_VISUAL);
+        if (editor_paste_enters_insert(paste)) modal_enter_insert(&g.modal);
+    }
 }
 
 static void center_cursor(Editor *e) {
@@ -943,6 +1053,155 @@ static int project_launcher_key(int key) {
     }
 }
 
+static int git_key(GitView *git, int key, WaveShortcut shortcut) {
+    if (!git) return 0;
+    if (git->mode == GIT_VIEW_COMMIT_INPUT) {
+        if (shortcut == SHORTCUT_PASTE) {
+            const char *clip = glfwGetClipboardString(g.win);
+            if (clip) git_view_insert_text(git, clip);
+            return 1;
+        }
+        if (key == GLFW_KEY_ESCAPE) {
+            git_view_cancel_input(git);
+            return 1;
+        }
+        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
+            git_view_commit(git);
+            return 1;
+        }
+        if (key == GLFW_KEY_BACKSPACE) {
+            git_view_backspace(git);
+            return 1;
+        }
+        return 1;
+    }
+
+    switch (key) {
+    case GLFW_KEY_UP:
+        git_view_move(git, -1);
+        return 1;
+    case GLFW_KEY_DOWN:
+        git_view_move(git, +1);
+        return 1;
+    case GLFW_KEY_PAGE_UP:
+        git_view_diff_scroll(git, -12);
+        return 1;
+    case GLFW_KEY_PAGE_DOWN:
+        git_view_diff_scroll(git, +12);
+        return 1;
+    case GLFW_KEY_ENTER:
+    case GLFW_KEY_KP_ENTER:
+        git_view_accept(git);
+        return 1;
+    case GLFW_KEY_SPACE:
+        if (git->mode == GIT_VIEW_CHANGES) git_view_stage_toggle(git);
+        return 1;
+    case GLFW_KEY_C:
+        if (git->mode == GIT_VIEW_CHANGES) git_view_begin_commit(git);
+        return 1;
+    case GLFW_KEY_R:
+        git_view_refresh(git);
+        return 1;
+    default:
+        break;
+    }
+    return 0;
+}
+
+static int git_click(GitView *git, float x, float y, int fb_w, int fb_h) {
+    if (!git || x < g.layout.side_px || y < g.layout.top_pad ||
+        g.layout.adv <= 0.0f || g.layout.line_h <= 0.0f)
+        return 0;
+    float w = (float)fb_w - g.layout.side_px;
+    float h = (float)fb_h - g.layout.top_pad - layout_status_bar_h(&g.layout);
+    if (w <= 0.0f || h <= 0.0f) return 0;
+    float local_x = x - g.layout.side_px;
+    float local_y = y - g.layout.top_pad;
+    float split_w = w * 0.34f;
+    if (split_w < g.layout.adv * 28.0f) split_w = g.layout.adv * 28.0f;
+    if (split_w > w * 0.48f) split_w = w * 0.48f;
+    if (local_x >= split_w) return 0;
+
+    if (git->mode == GIT_VIEW_REPO_SELECT) {
+        float first_y = g.layout.line_h * 4.25f - g.layout.ascent;
+        int row = (int)((local_y - first_y) / (g.layout.line_h * 1.35f));
+        if (row >= 0 && row < git->repo_count) return git_view_select_repo(git, row);
+        return 0;
+    }
+
+    float first_y = g.layout.line_h * 4.2f - g.layout.ascent;
+    int row = (int)((local_y - first_y) / (g.layout.line_h * 1.25f));
+    if (row >= 0) return git_view_select_file(git, git->scroll + row);
+    return 0;
+}
+
+static int terminal_text_hit(Terminal *term, float x, float y, int fb_w,
+                             int fb_h, size_t *row, int *col) {
+    if (!term || x < g.layout.side_px || y < g.layout.top_pad ||
+        g.layout.adv <= 0.0f || g.layout.line_h <= 0.0f)
+        return 0;
+    float panel_x = g.layout.side_px;
+    float panel_y = g.layout.top_pad;
+    float panel_w = (float)fb_w - panel_x;
+    float bar_h = g.layout.line_h + 6.0f;
+    float panel_h = (float)fb_h - panel_y - bar_h;
+    float pad = 14.0f;
+    float body_y = panel_y + g.layout.line_h + 20.0f;
+    float bottom = panel_y + panel_h - 8.0f;
+    if (x < panel_x + pad || x > panel_x + panel_w - pad ||
+        y < body_y || y > bottom)
+        return 0;
+    int rows = (int)((bottom - body_y) / g.layout.line_h);
+    if (rows < 1) return 0;
+    int visible_row = (int)((y - body_y) / g.layout.line_h);
+    if (visible_row < 0 || visible_row >= rows) return 0;
+    size_t start = terminal_visible_start(term, rows);
+    size_t total = term->nlines + (term->current_len ? 1u : 0u);
+    size_t hit_row = start + (size_t)visible_row;
+    if (hit_row >= total) return 0;
+    int hit_col = (int)((x - (panel_x + pad)) / g.layout.adv);
+    if (hit_col < 0) hit_col = 0;
+    if (row) *row = hit_row;
+    if (col) *col = hit_col;
+    return 1;
+}
+
+static int git_diff_hit(GitView *git, float x, float y, int fb_w, int fb_h,
+                        int *line, int *col) {
+    if (!git || git->mode == GIT_VIEW_REPO_SELECT ||
+        x < g.layout.side_px || y < g.layout.top_pad ||
+        g.layout.adv <= 0.0f || g.layout.line_h <= 0.0f)
+        return 0;
+    float panel_x = g.layout.side_px;
+    float panel_y = g.layout.top_pad;
+    float panel_w = (float)fb_w - panel_x;
+    float bar_h = g.layout.line_h + 6.0f;
+    float panel_h = (float)fb_h - panel_y - bar_h;
+    if (panel_w <= 0.0f || panel_h <= 0.0f) return 0;
+    float pad = g.layout.adv * 1.4f;
+    float split_w = panel_w * 0.34f;
+    if (split_w < g.layout.adv * 28.0f) split_w = g.layout.adv * 28.0f;
+    if (split_w > panel_w * 0.48f) split_w = panel_w * 0.48f;
+    float right_x = panel_x + split_w;
+    float rx = right_x + pad;
+    float ry = panel_y + g.layout.ascent + g.layout.line_h * 0.55f;
+    ry += g.layout.line_h * 1.35f;
+    if (git->info[0]) ry += g.layout.line_h * 1.25f;
+    int visible_rows = (int)((panel_y + panel_h - ry -
+                              g.layout.line_h * 0.5f) / g.layout.line_h);
+    if (visible_rows <= 0) return 0;
+    int visible_row = (int)((y - (ry - g.layout.ascent - 2.0f)) / g.layout.line_h);
+    if (visible_row < 0 || visible_row >= visible_rows) return 0;
+    int hit_line = git->diff_scroll + visible_row;
+    if (hit_line < 0 || hit_line >= git->diff_count) return 0;
+    float content_x = rx + g.layout.adv * (5.0f + 5.0f + 2.3f);
+    int hit_col = (int)((x - content_x) / g.layout.adv);
+    if (hit_col < 0) hit_col = 0;
+    if (line) *line = hit_line;
+    if (col) *col = hit_col;
+    return 1;
+}
+
 static int terminal_put_codepoint(Terminal *term, unsigned int cp, int alt) {
     if (!term) return 0;
     char buf[8];
@@ -1014,6 +1273,11 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
         !g.create_active && (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) == 0) {
         terminal_put_codepoint(term, cp, (g.mods & GLFW_MOD_ALT) != 0);
         return;
+    }
+    GitView *git = cur_git();
+    if (git && overlay_active(&g.overlay) == OVERLAY_NONE && !g.cmd.active &&
+        !g.create_active && (g.mods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) == 0) {
+        if (git_view_insert_char(git, cp)) return;
     }
     if (sidebar_create_insert_char(cp)) return;
     if (project_launcher_active()) {
@@ -1115,6 +1379,10 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
             terminal_paste_clipboard(term);
             return;
         }
+        if ((mods & GLFW_MOD_SUPER) && shortcut == SHORTCUT_COPY) {
+            terminal_copy_visible(term);
+            return;
+        }
         if (mods & GLFW_MOD_SUPER) {
             /* Command stays with Wave; Control/Alt belong to the PTY. */
         } else {
@@ -1189,9 +1457,10 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
             glfwSetClipboardString(g.win, command_text(&g.cmd));
             break;
         case INPUT_CLIPBOARD_EDITOR:
-            editor_copy_selection(e);
+            copy_active_surface(e);
             break;
         case INPUT_CLIPBOARD_NONE:
+            copy_active_surface(e);
             break;
         }
         return;
@@ -1207,13 +1476,11 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         case INPUT_CLIPBOARD_COMMAND:
             command_insert_text(&g.cmd, clip);
             break;
-        case INPUT_CLIPBOARD_EDITOR: {
-            EditorPasteResult paste = editor_paste_text(e, clip, g.modal.mode == MODE_VISUAL);
-            if (editor_paste_enters_insert(paste)) modal_enter_insert(&g.modal);
+        case INPUT_CLIPBOARD_EDITOR:
+        case INPUT_CLIPBOARD_NONE: {
+            paste_active_surface(e, clip);
             break;
         }
-        case INPUT_CLIPBOARD_NONE:
-            break;
         }
         return;
     }
@@ -1272,6 +1539,11 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         return;
     }
 
+    GitView *git = cur_git();
+    if (git && overlay_active(&g.overlay) == OVERLAY_NONE && !g.cmd.active &&
+        !g.create_active && git_key(git, key, shortcut))
+        return;
+
     if (plan.target != INPUT_KEY_TARGET_EDITOR) return;
 
     if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
@@ -1316,6 +1588,11 @@ static void on_scroll(GLFWwindow *w, double dx, double dy) {
     Terminal *term = cur_term();
     if (term) {
         terminal_scroll(term, dy > 0.0 ? 3 : -3);
+        return;
+    }
+    GitView *git = cur_git();
+    if (git) {
+        git_view_diff_scroll(git, dy > 0.0 ? -3 : 3);
         return;
     }
     LayoutScrollTarget target = layout_scroll_target(
@@ -1417,6 +1694,31 @@ static void on_cursor_pos(GLFWwindow *w, double mx, double my) {
 
     if (!layout_drag_update(&g.mouse_drag, x, y, g.fb_scale)) return;
 
+    Terminal *term = cur_term();
+    if (term && term->selection_dragging) {
+        int fb_w = 0, fb_h = 0;
+        size_t row = 0;
+        int col = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        if (terminal_text_hit(term, x, y, fb_w, fb_h, &row, &col)) {
+            terminal_selection_update(term, row, col);
+            g.last_activity = glfwGetTime();
+        }
+        return;
+    }
+
+    GitView *git = cur_git();
+    if (git && git->diff_selection_dragging) {
+        int fb_w = 0, fb_h = 0;
+        int line = 0, col = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        if (git_diff_hit(git, x, y, fb_w, fb_h, &line, &col)) {
+            git_view_diff_selection_update(git, line, col);
+            g.last_activity = glfwGetTime();
+        }
+        return;
+    }
+
     Editor *e = cur();
     if (!editor_has_buffer(e)) return;
 
@@ -1441,6 +1743,10 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
         return;
     }
     if (plan.action == INPUT_MOUSE_ACTION_RELEASE_DRAG) {
+        Terminal *term = cur_term();
+        GitView *git = cur_git();
+        if (term && term->selection_dragging) terminal_selection_end(term);
+        if (git && git->diff_selection_dragging) git_view_diff_selection_end(git);
         layout_drag_release(&g.mouse_drag);
         return;
     }
@@ -1480,6 +1786,43 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
         sidebar_context_menu(w, click);
         popover_close(&g.pop);
         return;
+    }
+    if (button == GLFW_MOUSE_BUTTON_LEFT && cur_term() &&
+        click.kind != LAYOUT_CLICK_TAB && click.kind != LAYOUT_CLICK_TITLEBAR) {
+        int fb_w = 0, fb_h = 0;
+        size_t row = 0;
+        int col = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        if (terminal_text_hit(cur_term(), x, y, fb_w, fb_h, &row, &col)) {
+            terminal_selection_begin(cur_term(), row, col);
+            layout_drag_begin(&g.mouse_drag, 0, x, y);
+            popover_close(&g.pop);
+            g.last_activity = glfwGetTime();
+            return;
+        }
+    }
+    if (button == GLFW_MOUSE_BUTTON_LEFT && cur_git() &&
+        click.kind != LAYOUT_CLICK_TAB && click.kind != LAYOUT_CLICK_TITLEBAR) {
+        int fb_w = 0, fb_h = 0;
+        int line = 0, col = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        if (git_diff_hit(cur_git(), x, y, fb_w, fb_h, &line, &col)) {
+            git_view_diff_selection_begin(cur_git(), line, col);
+            layout_drag_begin(&g.mouse_drag, 0, x, y);
+            popover_close(&g.pop);
+            g.last_activity = glfwGetTime();
+            return;
+        }
+    }
+    if (button == GLFW_MOUSE_BUTTON_LEFT && cur_git() &&
+        click.kind != LAYOUT_CLICK_TAB && click.kind != LAYOUT_CLICK_TITLEBAR) {
+        int fb_w = 0, fb_h = 0;
+        glfwGetFramebufferSize(w, &fb_w, &fb_h);
+        if (git_click(cur_git(), x, y, fb_w, fb_h)) {
+            popover_close(&g.pop);
+            g.last_activity = glfwGetTime();
+            return;
+        }
     }
     plan = input_mouse_plan(
         click, button == GLFW_MOUSE_BUTTON_LEFT, button == GLFW_MOUSE_BUTTON_RIGHT,
@@ -1587,6 +1930,7 @@ static void draw_frame(int fb_w, int fb_h) {
     Renderer *r = g.rend;
     Editor *e = cur();
     Terminal *term = cur_term();
+    GitView *git = cur_git();
     int editor_fb_w = fb_w;
 
     /* keep the native title path menu pointed at the active file (cheap pointer
@@ -1684,6 +2028,37 @@ static void draw_frame(int fb_w, int fb_h) {
                  term->title[0] ? term->title : "terminal",
                  terminal_status(term), tabs_active_index(&g.tabs) + 1,
                  tabs_count(&g.tabs));
+        draw_text_run(font, r, status, (int)strlen(status), pad,
+                      (float)fb_h - bar_h + ascent + 2.0f,
+                      (Color){0.72f, 0.78f, 0.88f});
+        if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
+            draw_palette_panel(&g.overlay, g.ws, fb_w, font, r, adv, line_h,
+                               ascent, top_pad, g.config.radius);
+        else if (frame.overlay == VIEW_OVERLAY_DRAW_SEARCH)
+            draw_search_panel(&g.overlay, fb_w, font, r, adv, line_h, ascent,
+                              g.config.radius);
+        if (g.update_title[0] && g.update_toast_until > glfwGetTime())
+            draw_update_toast(g.update_title, g.update_detail, g.update_progress,
+                              g.update_show_progress, fb_w, fb_h, font, r,
+                              adv, line_h, ascent, g.config.radius);
+        renderer_flush(r);
+        return;
+    }
+
+    if (git) {
+        float bar_h = line_h + 6.0f;
+        draw_git_panel(git, side_px, top_pad, (float)fb_w - side_px,
+                       (float)fb_h - top_pad - bar_h, font, r, adv,
+                       line_h, ascent, g.config.opacity, g.config.radius);
+        renderer_rect(r, 0, (float)fb_h - bar_h, (float)fb_w, bar_h,
+                      0.07f, 0.08f, 0.10f, g.config.opacity);
+        char status[512];
+        const char *mode = git->mode == GIT_VIEW_COMMIT_INPUT ? "commit"
+                         : git->mode == GIT_VIEW_REPO_SELECT ? "select repo"
+                         : "changes";
+        snprintf(status, sizeof status,
+                 "git  %s  Space stage/unstage  c commit  r refresh  [%d/%d]",
+                 mode, tabs_active_index(&g.tabs) + 1, tabs_count(&g.tabs));
         draw_text_run(font, r, status, (int)strlen(status), pad,
                       (float)fb_h - bar_h + ascent + 2.0f,
                       (Color){0.72f, 0.78f, 0.88f});
@@ -1891,6 +2266,8 @@ int main(int argc, char **argv) {
             snapshot_terminal_input(getenv("WAVE_TERMINAL_INPUT"));
             snapshot_settle_terminal(terminal_settle > 0 ? terminal_settle : 500);
         }
+        const char *snapshot_git = getenv("WAVE_GIT");
+        if (snapshot_git && snapshot_git[0]) open_git_tab();
 
         WaveRuntimeSnapshotScript script = wave_runtime_snapshot_script(
             getenv("WAVE_OPEN"), getenv("WAVE_TYPE"), getenv("WAVE_KEYS"),

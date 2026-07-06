@@ -239,7 +239,8 @@ int layout_in_sidebar(const LayoutState *l, float x, int workspace_open, int sid
 }
 
 int layout_in_tab_strip(const LayoutState *l, float x, float y) {
-    return l && l->top_pad > 0 && y < l->top_pad && x >= l->side_px && l->tab_w > 0;
+    return l && l->top_pad > l->header_h && y >= l->header_h &&
+           y < l->top_pad && x >= l->side_px && l->tab_w > 0;
 }
 
 int layout_in_text_area(const LayoutState *l, float x) {

@@ -29,7 +29,6 @@ static void restore_env_value(const char *name, const char *value) {
     else unsetenv(name);
 }
 
-#ifdef WAVE_USE_GHOSTTY_VT
 static int terminal_contains_red_style(const Terminal *t, const char *needle) {
     if (!t || !needle) return 0;
     for (size_t i = 0; i < t->nlines; i++) {
@@ -50,7 +49,6 @@ static int terminal_contains_red_style(const Terminal *t, const char *needle) {
     }
     return 0;
 }
-#endif
 
 int main(void) {
     char seq[32];
@@ -173,7 +171,6 @@ int main(void) {
         }
     }
 
-#ifdef WAVE_USE_GHOSTTY_VT
     terminal_init(&t);
     const char *color_argv[] = {
         "/bin/sh", "-lc", "printf '\\033[31mred\\033[0m'", NULL
@@ -181,8 +178,18 @@ int main(void) {
     CHECK(terminal_spawn(&t, "color", ".", color_argv));
     poll_terminal_until_done(&t);
     CHECK(terminal_contains_red_style(&t, "red"));
+    terminal_selection_begin(&t, 0, 1);
+    terminal_selection_update(&t, 0, 3);
+    terminal_selection_end(&t);
+    int start_col = 0, end_col = 0;
+    CHECK(terminal_selection_span(&t, 0, &start_col, &end_col));
+    CHECK_EQ(start_col, 1);
+    CHECK_EQ(end_col, 3);
+    char *selected = terminal_copy_selection(&t);
+    CHECK(selected != NULL);
+    CHECK_STR(selected, "ed");
+    free(selected);
     terminal_free(&t);
-#endif
 
     TEST_REPORT();
 }

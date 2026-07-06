@@ -63,5 +63,8 @@ void draw_recent_projects_panel(const RecentProjects *recent, int fb_w, int fb_h
 void draw_terminal_panel(const Terminal *term, int focused, float x, float y,
                          float w, float h, Font *font, Renderer *r,
                          float adv, float line_h, float ascent, float opacity);
+void draw_git_panel(const GitView *git, float x, float y, float w, float h,
+                    Font *font, Renderer *r, float adv, float line_h,
+                    float ascent, float opacity, float radius);
 
 #endif
