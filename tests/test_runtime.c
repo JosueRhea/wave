@@ -6,6 +6,38 @@
 #include <string.h>
 
 int main(void) {
+    char *plain_argv[] = {"wave", "src/main.c", NULL};
+    WaveRuntimeOpenRequest request = wave_runtime_open_request(2, plain_argv);
+    CHECK(request.valid);
+    CHECK_STR(request.path, "src/main.c");
+    CHECK(!request.has_location);
+    CHECK_EQ(request.line, 1);
+    CHECK_EQ(request.column, 1);
+
+    char *located_argv[] = {
+        "wave", "--line", "42", "--column", "8", "src/main.c", NULL
+    };
+    request = wave_runtime_open_request(6, located_argv);
+    CHECK(request.valid);
+    CHECK(request.has_location);
+    CHECK_STR(request.path, "src/main.c");
+    CHECK_EQ(request.line, 42);
+    CHECK_EQ(request.column, 8);
+
+    char *short_argv[] = {"wave", "-l", "3", "-c", "2", "README.md", NULL};
+    request = wave_runtime_open_request(6, short_argv);
+    CHECK(request.valid);
+    CHECK(request.has_location);
+    CHECK_EQ(request.line, 3);
+    CHECK_EQ(request.column, 2);
+
+    char *bad_argv[] = {"wave", "--line", "nope", "README.md", NULL};
+    CHECK(!wave_runtime_open_request(4, bad_argv).valid);
+    char *missing_path_argv[] = {"wave", "--line", "2", NULL};
+    CHECK(!wave_runtime_open_request(3, missing_path_argv).valid);
+    char *extra_path_argv[] = {"wave", "one", "two", NULL};
+    CHECK(!wave_runtime_open_request(3, extra_path_argv).valid);
+
     WaveRuntimeOptions opt = wave_runtime_options(NULL, NULL, NULL, NULL);
     CHECK(!opt.snapshot);
     CHECK(!opt.lsp_disabled);

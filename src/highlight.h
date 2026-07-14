@@ -66,4 +66,33 @@ size_t hl_diagnostics(Highlighter *h, Diagnostic *out, size_t max);
 int hl_node_at(Highlighter *h, size_t byte, char *type, size_t cap,
                size_t *start, size_t *end);
 
+/* Inspect the concrete syntax tokens surrounding a cursor. Reports whether
+ * the byte before `cursor` opens a syntactic scope and whether the byte at the
+ * cursor is its matching closer. This keeps indentation decisions grounded in
+ * the active tab's parse tree instead of treating braces in strings/comments
+ * as scopes. */
+int hl_scope_at(Highlighter *h, size_t cursor, int *opens, int *balanced);
+
+/* A coarse guess at what an identifier-shaped leaf node is, from its grammar
+ * node type alone (no semantic analysis — a "type_identifier" is a type
+ * reference, a "property_identifier"/"field_identifier" is a member name,
+ * anything else tagged "identifier" is a plain binding/reference). */
+typedef enum {
+    HL_IDENT_PLAIN,
+    HL_IDENT_TYPE,
+    HL_IDENT_PROPERTY
+} HlIdentKind;
+
+typedef struct {
+    char text[64];
+    HlIdentKind kind;
+} HlIdent;
+
+/* Collect distinct identifier-shaped leaf tokens whose text starts with
+ * `prefix` (case-insensitive; pass "" or NULL for no filter), skipping
+ * strings/comments for free since tree-sitter never tags their contents as
+ * identifier nodes. Powers local (no-LSP) completion. Capped at `max`; the
+ * walk stops as soon as `max` matches are found. */
+size_t hl_identifiers(Highlighter *h, const char *prefix, HlIdent *out, size_t max);
+
 #endif /* WAVE_HIGHLIGHT_H */

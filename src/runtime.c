@@ -55,6 +55,42 @@ WaveRuntimeOpenList wave_runtime_open_list(const char *opens) {
     return list;
 }
 
+static int positive_int(const char *text, int *out) {
+    if (!text || !text[0] || !out) return 0;
+    char *end = NULL;
+    long value = strtol(text, &end, 10);
+    if (*end != '\0' || value < 1 || value > 2147483647L) return 0;
+    *out = (int)value;
+    return 1;
+}
+
+WaveRuntimeOpenRequest wave_runtime_open_request(int argc, char **argv) {
+    WaveRuntimeOpenRequest request = {0};
+    request.line = 1;
+    request.column = 1;
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (strcmp(arg, "--line") == 0 || strcmp(arg, "-l") == 0) {
+            if (++i >= argc || !positive_int(argv[i], &request.line)) return request;
+            request.has_location = 1;
+        } else if (strcmp(arg, "--column") == 0 || strcmp(arg, "-c") == 0) {
+            if (++i >= argc || !positive_int(argv[i], &request.column)) return request;
+            request.has_location = 1;
+        } else if (arg[0] == '-') {
+            return request;
+        } else if (request.path) {
+            return request;
+        } else {
+            request.path = arg;
+        }
+    }
+
+    if (!request.path && request.has_location) return request;
+    request.valid = 1;
+    return request;
+}
+
 WaveRuntimeSnapshotScript wave_runtime_snapshot_script(
     const char *opens, const char *typed, const char *keys,
     const char *palette, const char *palette_query,

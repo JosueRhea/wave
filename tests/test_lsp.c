@@ -112,6 +112,23 @@ static size_t wait_diagnostics(Lsp *l, const char *uri, LspDiag *out, size_t max
     return nd;
 }
 
+/* Re-issue a completion request until the server returns at least one item
+ * (servers occasionally answer with an empty list while still warming up). */
+static size_t wait_completions(Lsp *l, const char *uri, int line, int col,
+                               LspCompletionItem *out, size_t max) {
+    for (int round = 0; round < 40; round++) {
+        lsp_completion(l, uri, line, col);
+        for (int i = 0; i < 60; i++) {
+            lsp_poll(l);
+            size_t n = 0;
+            if (lsp_take_completions(l, out, max, &n) && n > 0) return n;
+            usleep(POLL_SLEEP_US);
+        }
+        usleep(100000);
+    }
+    return 0;
+}
+
 /* Re-issue a definition request until it lands in a file basenamed `want_base`
  * (servers may first answer from the AST before their index is warm). Fills
  * `*out` with the last result; returns 1 if it ever reached `want_base`. */
@@ -152,6 +169,7 @@ static void test_c(void) {
     write_file(p, "#include \"util.h\"\n"
                   "int main(void) {\n"
                   "    int r = add_numbers(2, 3);\n"
+                  "    int c = add_numb;\n"
                   "    return undeclared_xyz(r);\n"
                   "}\n");
     char cc[2400];
@@ -205,6 +223,21 @@ static void test_c(void) {
     CHECK(got);
     CHECK(crossed);                                 /* reached the body in util.c */
     if (got) CHECK(strcmp(loc.path, main_path) != 0); /* genuinely cross-file */
+
+    /* completion: a partial "add_numb" offers the real add_numbers as a
+     * candidate — the fallback (tree-sitter/word-scan) sources can't do
+     * this since add_numbers is only declared, never spelled out, on this
+     * line. */
+    int comp_col = text ? col_of(text, 3, "add_numb", 8) : 0;
+    LspCompletionItem items[64];
+    size_t nc = wait_completions(l, main_uri, 3, comp_col, items, 64);
+    CHECK(nc > 0);
+    /* the label may carry the full signature ("add_numbers(int a, int b)")
+     * for display; insert_text is always the bare name actually inserted. */
+    int saw_fn = 0;
+    for (size_t i = 0; i < nc; i++)
+        if (!strcmp(items[i].insert_text, "add_numbers")) saw_fn = 1;
+    CHECK(saw_fn);
 
     lsp_stop(l);
     free(text);
@@ -272,7 +305,8 @@ static void test_ts(void) {
                   "\n"
                   "const r = addNumbers(2, 3);\n"
                   "const bad: number = \"not a number\";\n"
-                  "console.log(r, bad);\n");
+                  "const partial = addNum;\n"
+                  "console.log(r, bad, partial);\n");
     snprintf(p, sizeof p, "%s/tsconfig.json", dir);
     write_file(p, "{ \"compilerOptions\": { \"strict\": true, \"module\": \"commonjs\", "
                   "\"target\": \"es2020\" } }\n");
@@ -316,6 +350,16 @@ static void test_ts(void) {
     CHECK(got);
     CHECK(crossed);                                 /* reached the definition in util.ts */
     if (got) CHECK(strcmp(loc.path, main_path) != 0); /* genuinely cross-file */
+
+    /* completion: a partial "addNum" offers the real addNumbers. */
+    int comp_col = text ? col_of(text, 4, "addNum", 6) : 0;
+    LspCompletionItem items[64];
+    size_t nc = wait_completions(l, main_uri, 4, comp_col, items, 64);
+    CHECK(nc > 0);
+    int saw_fn = 0;
+    for (size_t i = 0; i < nc; i++)
+        if (!strcmp(items[i].insert_text, "addNumbers")) saw_fn = 1;
+    CHECK(saw_fn);
 
     lsp_stop(l);
     free(text);

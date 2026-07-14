@@ -2,6 +2,7 @@
 #define WAVE_DRAW_H
 
 #include "font.h"
+#include "complete.h"
 #include "diagnostics.h"
 #include "layout.h"
 #include "overlay.h"
@@ -37,6 +38,8 @@ void draw_header_panel(const char *root, const char *path, int fb_w,
 void draw_editor_text_panel(Editor *e, const TextFrameView *text,
                             const HighlightSpan *spans, size_t nspans,
                             const Diagnostic *diags, size_t ndiag,
+                            const EditorRange *search_matches,
+                            size_t nsearch_matches,
                             int insert_mode, int cursor_on, int fb_h,
                             Font *font, Renderer *r, float side_px,
                             float gutter, float text_x, float top_pad,
@@ -52,6 +55,11 @@ void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
                         float top_pad, float bar_h, float anchor_x,
                         float cur_top, float side_px, float fb_scale,
                         float radius);
+void draw_completion_menu(CompleteState *c, int fb_w, int fb_h, Font *font,
+                          Renderer *r, float adv, float line_h, float ascent,
+                          float top_pad, float bar_h, float anchor_x,
+                          float cur_top, float side_px, float fb_scale,
+                          float radius);
 void draw_update_toast(const char *title, const char *detail, float progress,
                        int show_progress, int fb_w, int fb_h, Font *font,
                        Renderer *r, float adv, float line_h, float ascent,

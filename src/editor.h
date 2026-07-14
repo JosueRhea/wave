@@ -124,6 +124,7 @@ int editor_paste_enters_insert(EditorPasteResult result);
 int editor_replace_visual_selection(Editor *e, const char *text, size_t len);
 int editor_apply_text_input(Editor *e, unsigned int cp);
 int editor_apply_insert_key(Editor *e, EditorKey key);
+int editor_open_line(Editor *e, int below);
 int editor_apply_motion_key(Editor *e, EditorKey key);
 int editor_apply_click_position(Editor *e, float x, float y, float text_x,
                                 float top_pad, float line_h, float adv,
@@ -161,6 +162,10 @@ int editor_find_text(Editor *e, const char *needle, size_t from, int reverse,
                      size_t *out);
 int editor_search_text(Editor *e, const char *needle, int reverse,
                        char *message, size_t message_cap);
+int editor_preview_search(Editor *e, const char *needle, size_t origin,
+                          char *message, size_t message_cap);
+size_t editor_search_matches(Editor *e, const char *needle,
+                             EditorRange *out, size_t max);
 int editor_word_under_cursor(Editor *e, char *out, size_t cap);
 
 #endif

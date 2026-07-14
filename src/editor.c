@@ -429,10 +429,140 @@ int editor_paste_enters_insert(EditorPasteResult result) {
 
 int editor_apply_text_input(Editor *e, unsigned int cp) {
     if (!e || !e->buf) return 0;
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t len = pt_length(pt);
+    unsigned char next = e->cursor < len ? byte_at(pt, e->cursor) : 0;
+    unsigned char prev = e->cursor > 0 ? byte_at(pt, e->cursor - 1) : 0;
+
+    /* Typing a closer over the auto-inserted closer moves through it. */
+    if (cp < 128 && next == (unsigned char)cp &&
+        (cp == ')' || cp == ']' || cp == '}' || cp == '"' ||
+         cp == '\'' || cp == '`')) {
+        e->cursor++;
+        e->group_open = 0;
+        return 1;
+    }
+
+    char close = 0;
+    if (cp == '(') close = ')';
+    else if (cp == '[') close = ']';
+    else if (cp == '{') close = '}';
+    else if (cp == '"' || cp == '\'' || cp == '`') {
+        int escaped = prev == '\\';
+        int apostrophe = cp == '\'' && (isalnum(prev) || prev == '_');
+        int safe_next = next == 0 || isspace(next) || next == ')' || next == ']' ||
+                        next == '}' || next == ',' || next == ';' || next == ':';
+        if (!escaped && !apostrophe && safe_next) close = (char)cp;
+    }
+    if (close) {
+        char pair[2] = {(char)cp, close};
+        ed_insert(e, pair, sizeof pair);
+        e->cursor--;
+        e->group_open = 0;
+        return 1;
+    }
+
     char buf[4];
     int n = utf8_encode(cp, buf);
     ed_insert(e, buf, (size_t)n);
     e->group_open = 1;
+    return 1;
+}
+
+static size_t editor_indent_unit(const PieceTable *pt, size_t *spaces) {
+    size_t len = pt_length(pt);
+    size_t smallest = 0;
+    for (size_t line = 0; line < len;) {
+        size_t i = line;
+        size_t nspaces = 0;
+        while (i < len && byte_at(pt, i) == ' ') { nspaces++; i++; }
+        if (i < len && byte_at(pt, i) == '\t') return 1;
+        if (nspaces && (!smallest || nspaces < smallest)) smallest = nspaces;
+        while (i < len && byte_at(pt, i) != '\n') i++;
+        line = i < len ? i + 1 : len;
+    }
+    *spaces = smallest ? smallest : 4;
+    return 0;
+}
+
+static int editor_insert_newline(Editor *e) {
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t start = line_start_of(pt, e->cursor);
+    size_t indent = start;
+    while (indent < e->cursor) {
+        unsigned char c = byte_at(pt, indent);
+        if (c != ' ' && c != '\t') break;
+        indent++;
+    }
+
+    size_t before = e->cursor;
+    while (before > start && (byte_at(pt, before - 1) == ' ' ||
+                              byte_at(pt, before - 1) == '\t'))
+        before--;
+    unsigned char opener = before > start ? byte_at(pt, before - 1) : 0;
+    unsigned char closer = e->cursor < pt_length(pt) ? byte_at(pt, e->cursor) : 0;
+    int opens_scope = opener == '{' || opener == '[' || opener == '(';
+    int closes_scope = (opener == '{' && closer == '}') ||
+                       (opener == '[' && closer == ']') ||
+                       (opener == '(' && closer == ')');
+    if (e->hl) {
+        int syntax_opens = 0, syntax_balanced = 0;
+        if (hl_scope_at(e->hl, before, &syntax_opens, &syntax_balanced)) {
+            opens_scope = syntax_opens;
+            closes_scope = syntax_balanced;
+        }
+    }
+
+    size_t unit_spaces = 4;
+    int unit_tab = editor_indent_unit(pt, &unit_spaces);
+    size_t base = indent - start;
+    size_t unit = opens_scope ? (unit_tab ? 1 : unit_spaces) : 0;
+    size_t extra_line = closes_scope ? 1 + base : 0;
+    size_t n = 1 + base + unit + extra_line;
+    char *text = malloc(n);
+    if (!text) return 0;
+    size_t at = 0;
+    text[at++] = '\n';
+    for (size_t i = start; i < indent; i++) text[at++] = (char)byte_at(pt, i);
+    if (opens_scope) {
+        if (unit_tab) text[at++] = '\t';
+        else while (unit_spaces--) text[at++] = ' ';
+    }
+    size_t inner_cursor = e->cursor + at;
+    if (closes_scope) {
+        text[at++] = '\n';
+        for (size_t i = start; i < indent; i++) text[at++] = (char)byte_at(pt, i);
+    }
+    ed_insert(e, text, at);
+    e->cursor = inner_cursor;
+    free(text);
+    return 1;
+}
+
+int editor_open_line(Editor *e, int below) {
+    if (!e || !e->buf) return 0;
+    const PieceTable *pt = buffer_pt(e->buf);
+    if (below) {
+        e->cursor = line_end_of(pt, e->cursor);
+        return editor_insert_newline(e);
+    }
+
+    size_t start = line_start_of(pt, e->cursor);
+    size_t indent = start;
+    while (indent < pt_length(pt)) {
+        unsigned char c = byte_at(pt, indent);
+        if (c != ' ' && c != '\t') break;
+        indent++;
+    }
+    size_t base = indent - start;
+    char *text = malloc(base + 1);
+    if (!text) return 0;
+    for (size_t i = 0; i < base; i++) text[i] = (char)byte_at(pt, start + i);
+    text[base] = '\n';
+    e->cursor = start;
+    ed_insert(e, text, base + 1);
+    e->cursor = start + base;
+    free(text);
     return 1;
 }
 
@@ -444,7 +574,16 @@ int editor_apply_insert_key(Editor *e, EditorKey key) {
     case EDITOR_KEY_BACKSPACE:
         if (e->cursor > 0) {
             size_t prev = prev_boundary(pt, e->cursor);
-            ed_delete_range(e, prev, e->cursor);
+            unsigned char left = byte_at(pt, prev);
+            unsigned char right = e->cursor < pt_length(pt)
+                ? byte_at(pt, e->cursor) : 0;
+            int pair = (left == '(' && right == ')') ||
+                       (left == '[' && right == ']') ||
+                       (left == '{' && right == '}') ||
+                       (left == '"' && right == '"') ||
+                       (left == '\'' && right == '\'') ||
+                       (left == '`' && right == '`');
+            ed_delete_range(e, prev, e->cursor + (pair ? 1 : 0));
         }
         e->group_open = 1;
         return 1;
@@ -454,7 +593,7 @@ int editor_apply_insert_key(Editor *e, EditorKey key) {
         e->group_open = 1;
         return 1;
     case EDITOR_KEY_ENTER:
-        ed_insert(e, "\n", 1);
+        if (!editor_insert_newline(e)) return 0;
         e->group_open = 1;
         return 1;
     case EDITOR_KEY_TAB:
@@ -637,11 +776,11 @@ void editor_center_cursor(Editor *e, float line_h, float viewport_h) {
     if (!e || !e->buf || line_h <= 0 || viewport_h <= 0) return;
     size_t row, col;
     pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
-    float y = (float)row * line_h;
-    if (y < e->scroll_y || y > e->scroll_y + viewport_h - 2 * line_h) {
-        e->scroll_y = y - viewport_h / 2.0f;
-        if (e->scroll_y < 0) e->scroll_y = 0;
-    }
+    int vrow = (int)row;
+    if (e->vstart && row < e->vstart_n) vrow = e->vstart[row];
+    float y = (float)vrow * line_h;
+    e->scroll_y = y - (viewport_h - line_h) / 2.0f;
+    if (e->scroll_y < 0) e->scroll_y = 0;
 }
 
 int editor_move_to_line_col(Editor *e, int line, int col) {
@@ -651,9 +790,13 @@ int editor_move_to_line_col(Editor *e, int line, int col) {
     size_t ln = 0;
     if (line > 1) ln = (size_t)line - 1;
     if (ln >= lines) ln = lines ? lines - 1 : 0;
-    size_t off = pt_line_start(pt, ln) + (size_t)(col > 0 ? col - 1 : 0);
-    if (off > pt_length(pt)) off = pt_length(pt);
+    size_t start = pt_line_start(pt, ln);
+    size_t end = ln + 1 < lines ? pt_line_start(pt, ln + 1) - 1 : pt_length(pt);
+    size_t off = start + (size_t)(col > 0 ? col - 1 : 0);
+    if (off > end) off = end;
     e->cursor = off;
+    e->anchor = off;
+    e->seen_cursor = (size_t)-1;
     return 1;
 }
 
@@ -943,6 +1086,47 @@ int editor_search_text(Editor *e, const char *needle, int reverse,
     if (message && message_cap)
         snprintf(message, message_cap, "/%s", needle);
     return 1;
+}
+
+int editor_preview_search(Editor *e, const char *needle, size_t origin,
+                          char *message, size_t message_cap) {
+    if (message && message_cap) message[0] = '\0';
+    if (!e || !e->buf) return 0;
+    size_t len = buffer_length(e->buf);
+    if (origin > len) origin = len;
+    e->cursor = origin;
+    if (!needle || !needle[0]) return 0;
+
+    size_t from = next_boundary(buffer_pt(e->buf), origin);
+    size_t found = 0;
+    if (!editor_find_text(e, needle, from, 0, &found)) {
+        if (message && message_cap)
+            snprintf(message, message_cap, "pattern not found: %s", needle);
+        return 0;
+    }
+    e->cursor = found;
+    if (message && message_cap) snprintf(message, message_cap, "/%s", needle);
+    return 1;
+}
+
+size_t editor_search_matches(Editor *e, const char *needle,
+                             EditorRange *out, size_t max) {
+    if (!e || !e->buf || !needle || !needle[0] || !out || max == 0) return 0;
+    size_t len = buffer_length(e->buf);
+    size_t needle_len = strlen(needle);
+    if (needle_len > len) return 0;
+    char *text = editor_text(e);
+    if (!text) return 0;
+
+    size_t count = 0, from = 0;
+    while (count < max && from + needle_len <= len) {
+        size_t found = mem_find_forward(text, len, needle, needle_len, from);
+        if (found == (size_t)-1) break;
+        out[count++] = (EditorRange){found, found + needle_len};
+        from = found + needle_len;
+    }
+    free(text);
+    return count;
 }
 
 int editor_word_under_cursor(Editor *e, char *out, size_t cap) {

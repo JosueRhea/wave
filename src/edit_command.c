@@ -174,22 +174,23 @@ EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
     case 'g': modal_set_pending(modal, 'g'); return res;
 
     case 'i': enter_insert(e, modal); break;
-    case 'a': e->cursor = next_boundary(pt, e->cursor); enter_insert(e, modal); break;
-    case 'I': e->cursor = first_nonblank(pt, e->cursor); enter_insert(e, modal); break;
-    case 'A': e->cursor = line_end_of(pt, e->cursor); enter_insert(e, modal); break;
-    case 'o': {
+    case 'a': {
         size_t le = line_end_of(pt, e->cursor);
-        e->cursor = le;
-        ed_insert(e, "\n", 1);
+        if (e->cursor < le) {
+            size_t next = next_boundary(pt, e->cursor);
+            e->cursor = next < le ? next : le;
+        }
         enter_insert(e, modal);
         break;
     }
+    case 'I': e->cursor = first_nonblank(pt, e->cursor); enter_insert(e, modal); break;
+    case 'A': e->cursor = line_end_of(pt, e->cursor); enter_insert(e, modal); break;
+    case 'o': {
+        if (editor_open_line(e, 1)) enter_insert(e, modal);
+        break;
+    }
     case 'O': {
-        size_t s = line_start_of(pt, e->cursor);
-        e->cursor = s;
-        ed_insert(e, "\n", 1);
-        e->cursor = s;
-        enter_insert(e, modal);
+        if (editor_open_line(e, 0)) enter_insert(e, modal);
         break;
     }
 

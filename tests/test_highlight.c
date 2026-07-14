@@ -91,5 +91,49 @@ int main(void) {
         buffer_free(bad);
     }
 
+    /* hl_identifiers: distinct identifier-shaped leaves, prefix-filtered,
+     * deduplicated, capped. */
+    {
+        const char *idsrc =
+            "int compute(int alpha, int beta) {\n"
+            "    int alphabet = alpha + beta;\n"
+            "    return alphabet;\n"
+            "}\n";
+        Buffer *ib = buffer_new();
+        buffer_insert(ib, 0, idsrc, strlen(idsrc));
+        Highlighter *ih = hl_new(ib, tree_sitter_c(), QUERY);
+        hl_update(ih);
+
+        HlIdent ids[32];
+        /* "alphabet" appears twice in source but only once here (deduped);
+         * "compute"/"beta" are excluded by the "al" prefix. */
+        size_t nid = hl_identifiers(ih, "al", ids, 32);
+        CHECK_EQ(nid, 2);
+        int has_alpha = 0, has_alphabet = 0;
+        for (size_t i = 0; i < nid; i++) {
+            CHECK_EQ(ids[i].kind, HL_IDENT_PLAIN);
+            if (!strcmp(ids[i].text, "alpha")) has_alpha = 1;
+            if (!strcmp(ids[i].text, "alphabet")) has_alphabet = 1;
+        }
+        CHECK(has_alpha);
+        CHECK(has_alphabet);
+
+        /* case-insensitive prefix */
+        CHECK_EQ(hl_identifiers(ih, "AL", ids, 32), 2);
+
+        /* no filter: every distinct identifier, "alphabet" still deduped */
+        nid = hl_identifiers(ih, NULL, ids, 32);
+        CHECK(nid >= 4); /* compute, alpha, beta, alphabet */
+
+        /* a prefix matching nothing yields nothing */
+        CHECK_EQ(hl_identifiers(ih, "zzz", ids, 32), 0);
+
+        /* the walk stops as soon as the cap is hit */
+        CHECK_EQ(hl_identifiers(ih, NULL, ids, 1), 1);
+
+        hl_free(ih);
+        buffer_free(ib);
+    }
+
     TEST_REPORT();
 }

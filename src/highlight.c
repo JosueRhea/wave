@@ -1,6 +1,7 @@
 /* highlight.c — see highlight.h. */
 #include "highlight.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,35 @@ int hl_node_at(Highlighter *h, size_t byte, char *type, size_t cap,
     return 1;
 }
 
+int hl_scope_at(Highlighter *h, size_t cursor, int *opens, int *balanced) {
+    if (opens) *opens = 0;
+    if (balanced) *balanced = 0;
+    if (!h || !h->tree || cursor == 0) return 0;
+    hl_update(h);
+
+    TSNode root = ts_tree_root_node(h->tree);
+    TSNode left = ts_node_descendant_for_byte_range(
+        root, (uint32_t)(cursor - 1), (uint32_t)cursor);
+    if (ts_node_is_null(left)) return 0;
+    const char *lt = ts_node_type(left);
+    char close = 0;
+    if (!strcmp(lt, "{")) close = '}';
+    else if (!strcmp(lt, "[")) close = ']';
+    else if (!strcmp(lt, "(")) close = ')';
+    else return 1;
+    if (opens) *opens = 1;
+
+    uint32_t end = ts_node_end_byte(root);
+    if (cursor >= end) return 1;
+    TSNode right = ts_node_descendant_for_byte_range(
+        root, (uint32_t)cursor, (uint32_t)(cursor + 1));
+    if (!ts_node_is_null(right)) {
+        const char *rt = ts_node_type(right);
+        if (balanced && rt && rt[0] == close && rt[1] == '\0') *balanced = 1;
+    }
+    return 1;
+}
+
 /* Iterative pre-order walk collecting ERROR/MISSING nodes. Uses a TSTreeCursor
  * so we don't recurse the C stack on deeply nested trees. */
 size_t hl_diagnostics(Highlighter *h, Diagnostic *out, size_t max) {
@@ -187,6 +217,72 @@ size_t hl_diagnostics(Highlighter *h, Diagnostic *out, size_t max) {
         }
         if (!climbed) break;
         descend = 1;
+    }
+    ts_tree_cursor_delete(&cur);
+    return produced;
+}
+
+static HlIdentKind ident_kind_for_type(const char *type) {
+    if (!strcmp(type, "type_identifier")) return HL_IDENT_TYPE;
+    if (!strcmp(type, "property_identifier") || !strcmp(type, "field_identifier") ||
+        !strcmp(type, "shorthand_property_identifier"))
+        return HL_IDENT_PROPERTY;
+    return HL_IDENT_PLAIN;
+}
+
+static int ci_has_prefix(const char *s, const char *prefix) {
+    if (!prefix || !prefix[0]) return 1;
+    for (; *prefix; s++, prefix++) {
+        if (!*s) return 0;
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*prefix)) return 0;
+    }
+    return 1;
+}
+
+static int ident_already_seen(HlIdent *out, size_t n, const char *text) {
+    for (size_t i = 0; i < n; i++)
+        if (!strcmp(out[i].text, text)) return 1;
+    return 0;
+}
+
+/* Iterative pre-order walk (same shape as hl_diagnostics) visiting every
+ * leaf; collects distinct identifier-shaped tokens matching `prefix`. */
+size_t hl_identifiers(Highlighter *h, const char *prefix, HlIdent *out, size_t max) {
+    if (!h || !h->tree || max == 0) return 0;
+    TSNode root = ts_tree_root_node(h->tree);
+    const PieceTable *pt = buffer_pt(h->buf);
+
+    size_t produced = 0;
+    TSTreeCursor cur = ts_tree_cursor_new(root);
+    for (;;) {
+        TSNode node = ts_tree_cursor_current_node(&cur);
+        if (ts_node_child_count(node) == 0) {
+            const char *type = ts_node_type(node);
+            if (type && strstr(type, "identifier")) {
+                uint32_t sb = ts_node_start_byte(node);
+                uint32_t eb = ts_node_end_byte(node);
+                size_t len = eb - sb;
+                if (len > 0 && len < sizeof out[0].text) {
+                    char buf[64];
+                    pt_read(pt, sb, len, buf);
+                    buf[len] = '\0';
+                    if (ci_has_prefix(buf, prefix) &&
+                        !ident_already_seen(out, produced, buf)) {
+                        snprintf(out[produced].text, sizeof out[produced].text, "%s", buf);
+                        out[produced].kind = ident_kind_for_type(type);
+                        produced++;
+                        if (produced >= max) break;
+                    }
+                }
+            }
+        }
+        if (ts_tree_cursor_goto_first_child(&cur)) continue;
+        if (ts_tree_cursor_goto_next_sibling(&cur)) continue;
+        int climbed = 0;
+        while (ts_tree_cursor_goto_parent(&cur)) {
+            if (ts_tree_cursor_goto_next_sibling(&cur)) { climbed = 1; break; }
+        }
+        if (!climbed) break;
     }
     ts_tree_cursor_delete(&cur);
     return produced;

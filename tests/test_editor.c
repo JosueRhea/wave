@@ -34,6 +34,7 @@ static void write_file(const char *path, const char *text) {
 int main(void) {
     Editor e;
     char word[32];
+    char *insert_key_text;
     size_t out = 999;
     int strong = 0;
 
@@ -111,7 +112,11 @@ int main(void) {
     e.cursor = strlen("0\n1\n2\n3\n4\n");
     e.scroll_y = 0.0f;
     editor_center_cursor(&e, 10.0f, 30.0f);
-    CHECK_EQ((int)e.scroll_y, 35);
+    CHECK_EQ((int)e.scroll_y, 40);
+    e.cursor = strlen("0\n1\n2\n");
+    e.scroll_y = 0.0f;
+    editor_center_cursor(&e, 10.0f, 30.0f);
+    CHECK_EQ((int)e.scroll_y, 20);
     CHECK(editor_move_to_line_col(&e, 2, 1));
     CHECK_EQ(e.cursor, 2);
     CHECK(editor_move_to_line_col(&e, 99, 99));
@@ -122,6 +127,47 @@ int main(void) {
     CHECK(editor_move_to_lsp_position(&e, 99, 99, msg, sizeof msg));
     CHECK_EQ(e.cursor, buffer_length(e.buf));
     CHECK_STR(msg, "def -> Ln 100, Col 100");
+    editor_close(&e);
+
+    fill(&e, "if (ready) {\n    run();\n}\n");
+    e.cursor = strlen("if (ready) {\n    run();");
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
+    insert_key_text = editor_text(&e);
+    CHECK_STR(insert_key_text, "if (ready) {\n    run();\n    \n}\n");
+    free(insert_key_text);
+    CHECK_EQ(e.cursor, strlen("if (ready) {\n    run();\n    "));
+    editor_close(&e);
+
+    fill(&e, "fn main() {}");
+    e.path = dupstr("scope.c");
+    editor_attach_highlighter(&e);
+    CHECK(e.hl != NULL);
+    e.cursor = strlen("fn main() {");
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
+    insert_key_text = editor_text(&e);
+    CHECK_STR(insert_key_text, "fn main() {\n    \n}");
+    free(insert_key_text);
+    CHECK_EQ(e.cursor, strlen("fn main() {\n    "));
+    editor_close(&e);
+
+    fill(&e, "// not a scope {");
+    e.path = dupstr("comment.c");
+    editor_attach_highlighter(&e);
+    CHECK(e.hl != NULL);
+    e.cursor = strlen("// not a scope {");
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
+    insert_key_text = editor_text(&e);
+    CHECK_STR(insert_key_text, "// not a scope {\n");
+    free(insert_key_text);
+    editor_close(&e);
+
+    fill(&e, "if ok:\n\tcall()\n");
+    e.cursor = strlen("if ok:\n\tcall()");
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
+    insert_key_text = editor_text(&e);
+    CHECK_STR(insert_key_text, "if ok:\n\tcall()\n\t\n");
+    free(insert_key_text);
+    CHECK_EQ(e.cursor, strlen("if ok:\n\tcall()\n\t"));
     editor_close(&e);
 
     fill(&e, "abcdef\n");
@@ -204,6 +250,27 @@ int main(void) {
     CHECK(!editor_search_text(&e, "missing", 0, msg, sizeof msg));
     CHECK_STR(msg, "pattern not found: missing");
     CHECK(!editor_find_text(&e, "", 0, 0, &out));
+    e.cursor = 0;
+    CHECK(editor_preview_search(&e, "t", 0, msg, sizeof msg));
+    CHECK_EQ(e.cursor, 4);
+    CHECK(editor_preview_search(&e, "two", 0, msg, sizeof msg));
+    CHECK_EQ(e.cursor, 4);
+    CHECK_STR(msg, "/two");
+    CHECK(!editor_preview_search(&e, "missing", 0, msg, sizeof msg));
+    CHECK_EQ(e.cursor, 0);
+    CHECK_STR(msg, "pattern not found: missing");
+    CHECK(!editor_preview_search(&e, "", 0, msg, sizeof msg));
+    CHECK_EQ(e.cursor, 0);
+    CHECK_STR(msg, "");
+    EditorRange matches[4];
+    CHECK_EQ(editor_search_matches(&e, "two", matches, 4), 2);
+    CHECK_EQ(matches[0].start, 4);
+    CHECK_EQ(matches[0].end, 7);
+    CHECK_EQ(matches[1].start, strlen("one two one\nthree "));
+    CHECK_EQ(matches[1].end, strlen("one two one\nthree two"));
+    CHECK_EQ(editor_search_matches(&e, "one", matches, 1), 1);
+    CHECK_EQ(matches[0].start, 0);
+    CHECK_EQ(editor_search_matches(&e, "missing", matches, 4), 0);
     char search_word[32];
     e.cursor = 5;
     CHECK(editor_word_under_cursor(&e, search_word, sizeof search_word));
@@ -248,6 +315,50 @@ int main(void) {
     editor_close(&e);
 
     fill(&e, "");
+    CHECK(editor_apply_text_input(&e, '('));
+    CHECK_EQ(e.cursor, 1);
+    char *pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "()");
+    free(pair_text);
+    CHECK(editor_apply_text_input(&e, ')'));
+    CHECK_EQ(e.cursor, 2);
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "()");
+    free(pair_text);
+    CHECK(editor_apply_text_input(&e, ' '));
+    CHECK(editor_apply_text_input(&e, '['));
+    CHECK(editor_apply_text_input(&e, '{'));
+    CHECK(editor_apply_text_input(&e, '"'));
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "() [{\"\"}]");
+    free(pair_text);
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_BACKSPACE));
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "() [{}]");
+    free(pair_text);
+    editor_close(&e);
+
+    fill(&e, "can");
+    e.cursor = 3;
+    CHECK(editor_apply_text_input(&e, '\''));
+    CHECK(editor_apply_text_input(&e, 't'));
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "can't");
+    free(pair_text);
+    editor_close(&e);
+
+    fill(&e, "");
+    CHECK(editor_apply_text_input(&e, '`'));
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "``");
+    free(pair_text);
+    CHECK(editor_apply_insert_key(&e, EDITOR_KEY_BACKSPACE));
+    pair_text = editor_text(&e);
+    CHECK_STR(pair_text, "");
+    free(pair_text);
+    editor_close(&e);
+
+    fill(&e, "");
     CHECK(!editor_insert_encoded_text(NULL, "ignored"));
     Editor no_buf;
     editor_init(&no_buf);
@@ -264,7 +375,7 @@ int main(void) {
     fill(&e, "ab\ncd\n");
     e.cursor = 2;
     CHECK(editor_apply_insert_key(&e, EDITOR_KEY_ENTER));
-    char *insert_key_text = editor_text(&e);
+    insert_key_text = editor_text(&e);
     CHECK_STR(insert_key_text, "ab\n\ncd\n");
     free(insert_key_text);
     CHECK_EQ(e.cursor, 3);

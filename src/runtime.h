@@ -22,6 +22,14 @@ typedef struct {
 } WaveRuntimeOpenList;
 
 typedef struct {
+    const char *path;
+    int line;
+    int column;
+    int has_location;
+    int valid;
+} WaveRuntimeOpenRequest;
+
+typedef struct {
     WaveRuntimeOpenList opens;
     const char *typed;
     const char *keys;
@@ -48,6 +56,7 @@ WaveRuntimeOptions wave_runtime_options(const char *snapshot,
                                         const char *wave_persist,
                                         const char *wave_scale);
 WaveRuntimeOpenList wave_runtime_open_list(const char *opens);
+WaveRuntimeOpenRequest wave_runtime_open_request(int argc, char **argv);
 WaveRuntimeSnapshotScript wave_runtime_snapshot_script(
     const char *opens, const char *typed, const char *keys,
     const char *palette, const char *palette_query,

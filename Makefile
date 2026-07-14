@@ -73,7 +73,7 @@ GHOSTTY_INTERNAL_FRAMEWORKS := -framework Metal -framework QuartzCore \
                                -framework Foundation -framework IOSurface \
                                -framework GameController -framework Carbon -lc++
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
-CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
+CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/complete.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
 
 # tree-sitter runtime is a single translation unit (lib.c includes the rest).
@@ -101,7 +101,7 @@ GHOSTTY_GUI_LIBS += -Wl,-force_load,$(GHOSTTY_INTERNAL_LIB)
 GUI_LIBS += $(GHOSTTY_INTERNAL_FRAMEWORKS)
 endif
 
-TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
@@ -110,7 +110,7 @@ TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
 #   make dist VERSION=0.1.7-alpha
-VERSION  ?= 0.1.14-alpha
+VERSION  ?= 0.1.15-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources

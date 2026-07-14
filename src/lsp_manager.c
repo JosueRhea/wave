@@ -131,6 +131,23 @@ int lsp_manager_request_definition(LspManager *m, Editor *e, int row, int col) {
     return 1;
 }
 
+int lsp_manager_request_completion(LspManager *m, Editor *e, int row, int col) {
+    Lsp *l = lsp_manager_for(m, e);
+    if (!l || !lsp_ready(l) || !e || !e->path) return 0;
+    lsp_manager_push_change(m, e);
+    char *uri = path_to_uri(e->path);
+    lsp_completion(l, uri, row, col);
+    free(uri);
+    return 1;
+}
+
+int lsp_manager_take_completions(LspManager *m, Editor *e, LspCompletionItem *out,
+                                 size_t max, size_t *n) {
+    Lsp *l = lsp_manager_for(m, e);
+    if (!l) return 0;
+    return lsp_take_completions(l, out, max, n);
+}
+
 int lsp_manager_request_definition_at_cursor(LspManager *m, Editor *e,
                                              char *message, size_t message_cap) {
     if (!e || !e->buf || !e->path) return 0;

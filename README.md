@@ -53,12 +53,7 @@ Prebuilt macOS builds are on the [Releases](../../releases) page —
 
 1. Download `Wave-<version>-macos.zip` and unzip it.
 2. Move `Wave.app` to `/Applications`.
-3. It's an alpha and **not notarized**, so Gatekeeper blocks it on first launch.
-   Right-click the app → **Open** → **Open**, or clear the quarantine flag:
-
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Wave.app
-   ```
+3. Launch Wave. Release builds are signed and notarized for macOS Gatekeeper.
 
 To build from source instead, see [Build & run](#build--run). Packaging targets:
 `make bundle` assembles `Wave.app`; `make dist VERSION=x.y.z` produces the
@@ -135,6 +130,7 @@ make rg         # just (re)download the bundled ripgrep
 make test       # builds + runs the core test suite
 ./build/wave .                # open the current folder (sidebar + Cmd-P); no file open until you pick one
 ./build/wave path/to/file.tsx # open a single file (its folder becomes the sidebar)
+./build/wave --line 42 --column 8 path/to/file.tsx # open at a 1-based location
 ./build/wave                  # empty scratch buffer
 ```
 

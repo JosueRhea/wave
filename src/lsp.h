@@ -29,6 +29,19 @@ typedef struct {
     char message[256];
 } LspDiag;
 
+#define LSP_MAX_COMPLETIONS 128
+
+/* One entry from a textDocument/completion reply. `kind` is the raw LSP
+ * CompletionItemKind number (0 if the server didn't send one) — callers map
+ * it onto their own vocabulary (see complete_kind_tag()/CompleteKind). */
+typedef struct {
+    char label[96];
+    char insert_text[96]; /* textEdit.newText, else insertText, else label */
+    char detail[64];
+    char sort_text[32];
+    int kind;
+} LspCompletionItem;
+
 /* Start a server. `argv` is NULL-terminated (argv[0] is the binary, looked up
  * on PATH). `root_uri` is a file:// URI for the workspace root. Returns NULL if
  * the binary can't be found or the child can't be spawned. */
@@ -44,6 +57,7 @@ void lsp_did_change(Lsp *l, const char *uri, int version, const char *text);
 /* Asynchronous requests. Results surface through lsp_take_* after lsp_poll(). */
 void lsp_definition(Lsp *l, const char *uri, int line, int col);
 void lsp_hover(Lsp *l, const char *uri, int line, int col);
+void lsp_completion(Lsp *l, const char *uri, int line, int col);
 
 /* Read whatever the server has sent and dispatch complete messages. Cheap to
  * call every frame; does nothing if no bytes are waiting. */
@@ -53,6 +67,10 @@ void lsp_poll(Lsp *l);
  * and fills its out-param if a fresh result was pending, else 0. */
 int lsp_take_definition(Lsp *l, LspLocation *out);
 int lsp_take_hover(Lsp *l, char *buf, size_t cap);
+/* Copy up to `max` items from the most recent completion reply into `out`
+ * and clear it; `*n` (optional) is set to the count copied. Returns 1 once a
+ * fresh reply was pending (even if it held zero items), else 0. */
+int lsp_take_completions(Lsp *l, LspCompletionItem *out, size_t max, size_t *n);
 
 /* Copy the diagnostics most recently published for `uri` (up to `max`); returns
  * the count. `*published` (optional) is set to 1 if the server has ever sent a

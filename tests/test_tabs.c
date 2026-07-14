@@ -265,6 +265,29 @@ int main(void) {
     CHECK(startup.editor->buf == NULL);
     tabs_free(&tabs);
 
+    /* Enter derives indentation from the active editor only; one tab's style
+     * must never leak into another open file. */
+    memset(&tabs, 0, sizeof tabs);
+    a = tabs_new(&tabs);
+    a->buf = buffer_new();
+    ed_insert(a, "  prior\nif {}", strlen("  prior\nif {}"));
+    a->cursor = strlen("  prior\nif {");
+    b = tabs_new(&tabs);
+    b->buf = buffer_new();
+    ed_insert(b, "\tprior\nif {}", strlen("\tprior\nif {}"));
+    b->cursor = strlen("\tprior\nif {");
+
+    CHECK(editor_apply_insert_key(tabs_current(&tabs), EDITOR_KEY_ENTER));
+    char *tab_text = editor_text(b);
+    CHECK_STR(tab_text, "\tprior\nif {\n\t\n}");
+    free(tab_text);
+    CHECK(tabs_set_active(&tabs, 0));
+    CHECK(editor_apply_insert_key(tabs_current(&tabs), EDITOR_KEY_ENTER));
+    tab_text = editor_text(a);
+    CHECK_STR(tab_text, "  prior\nif {\n  \n}");
+    free(tab_text);
+    tabs_free(&tabs);
+
     memset(&tabs, 0, sizeof tabs);
     startup = tabs_ensure_startup(&tabs, 0);
     CHECK(startup.editor != NULL);

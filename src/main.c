@@ -87,6 +87,7 @@ static void mac_check_for_updates(const char *current_version, int manual,
 
 #include "buffer.h"
 #include "command.h"
+#include "complete.h"
 #include "config.h"
 #include "diagnostics.h"
 #include "draw.h"
@@ -136,6 +137,8 @@ typedef struct {
     CommandLine cmd;
     CommandLine buf_search;
     char last_buf_search[256];
+    Editor *buf_search_editor;
+    size_t buf_search_origin;
 
     /* command palette (Cmd-P) and content search (Cmd-Shift-F). */
     OverlayState overlay;
@@ -149,6 +152,7 @@ typedef struct {
     char info[256];    /* transient `gd`/status message for the status bar */
 
     Popover pop;
+    CompleteState comp;
 
     LspManager lsp;
     WatchService watch;
@@ -464,7 +468,8 @@ static void paste_active_surface(Editor *e, const char *clip) {
 
 static void center_cursor(Editor *e) {
     editor_center_cursor(e, g.layout.line_h,
-                         (float)g.layout.fb_h - g.layout.top_pad);
+                         (float)g.layout.fb_h - g.layout.top_pad -
+                         layout_status_bar_h(&g.layout));
 }
 
 static void close_tab(int i) {
@@ -572,6 +577,14 @@ static int open_path_mode(const char *path, int preview) {
  * there is). */
 static int open_path(const char *path) { return open_path_mode(path, 0); }
 
+static int open_path_at(const char *path, int line, int column) {
+    if (open_path(path) != 0) return -1;
+    Editor *e = cur();
+    if (!editor_move_to_line_col(e, line, column)) return -1;
+    center_cursor(e);
+    return 0;
+}
+
 static void app_menu_open_file(void);
 static void app_menu_open_folder(void);
 static void app_menu_check_updates(void);
@@ -602,6 +615,11 @@ static void open_context_path(const char *path) {
         recent_projects_save(&g.recent);
     if (opened.kind == WS_OPEN_FILE) open_path(opened.file);
     snprintf(g.info, sizeof g.info, "%s", opened.kind == WS_OPEN_FILE ? "file opened" : "folder opened");
+}
+
+static void on_drop(GLFWwindow *window, int count, const char **paths) {
+    (void)window;
+    for (int i = 0; i < count; i++) open_context_path(paths[i]);
 }
 
 static void app_menu_open_file(void) {
@@ -866,14 +884,35 @@ static void search_accept(void) {
 }
 
 static void buffer_search_open(void) {
-    if (!editor_has_buffer(cur())) return;
+    Editor *e = cur();
+    if (!editor_has_buffer(e)) return;
     command_open(&g.buf_search);
+    g.buf_search_editor = e;
+    g.buf_search_origin = e->cursor;
     g.info[0] = '\0';
     modal_enter_normal(&g.modal);
 }
 
 static void buffer_search_close(void) {
     command_close(&g.buf_search);
+    g.buf_search_editor = NULL;
+}
+
+static void buffer_search_update(void) {
+    Editor *e = g.buf_search_editor;
+    if (!editor_has_buffer(e)) return;
+    const char *query = command_text(&g.buf_search);
+    editor_preview_search(e, query, g.buf_search_origin, g.info, sizeof g.info);
+    center_cursor(e);
+}
+
+static void buffer_search_cancel(void) {
+    if (editor_has_buffer(g.buf_search_editor)) {
+        g.buf_search_editor->cursor = g.buf_search_origin;
+        center_cursor(g.buf_search_editor);
+    }
+    g.info[0] = '\0';
+    buffer_search_close();
 }
 
 static int buffer_search_jump(const char *query, int reverse) {
@@ -887,10 +926,7 @@ static int buffer_search_jump(const char *query, int reverse) {
 
 static void buffer_search_accept(void) {
     const char *query = command_text(&g.buf_search);
-    if (query[0]) {
-        snprintf(g.last_buf_search, sizeof g.last_buf_search, "%s", query);
-        buffer_search_jump(g.last_buf_search, 0);
-    }
+    if (query[0]) snprintf(g.last_buf_search, sizeof g.last_buf_search, "%s", query);
     buffer_search_close();
 }
 
@@ -1247,6 +1283,120 @@ static int glfw_key_is_down(GLFWwindow *w, int key) {
     return state == GLFW_PRESS || state == GLFW_REPEAT;
 }
 
+/* ---- insert-mode completion ---- */
+
+static CompleteKind complete_kind_from_lsp(int lsp_kind) {
+    /* LSP CompletionItemKind numbering (textDocument/completion spec). */
+    switch (lsp_kind) {
+    case 3:  /* Function */
+    case 2:  /* Method */
+    case 4:  return COMPLETE_KIND_FUNCTION; /* Constructor */
+    case 5:  /* Field */
+    case 10: return COMPLETE_KIND_FIELD;    /* Property */
+    case 6:  return COMPLETE_KIND_VARIABLE;
+    case 7:  /* Class */
+    case 8:  /* Interface */
+    case 22: return COMPLETE_KIND_TYPE;     /* Struct */
+    case 9:  return COMPLETE_KIND_MODULE;
+    case 14: return COMPLETE_KIND_KEYWORD;
+    default: return COMPLETE_KIND_TEXT;
+    }
+}
+
+static CompleteItem complete_item_from_lsp(const LspCompletionItem *src) {
+    CompleteItem it;
+    snprintf(it.label, sizeof it.label, "%s", src->label);
+    snprintf(it.insert_text, sizeof it.insert_text, "%s", src->insert_text);
+    snprintf(it.detail, sizeof it.detail, "%s", src->detail);
+    snprintf(it.sort_text, sizeof it.sort_text, "%s", src->sort_text);
+    it.kind = complete_kind_from_lsp(src->kind);
+    return it;
+}
+
+/* Populate a fresh generation from whichever local source applies: the
+ * active tab's tree-sitter tree if it has one, else a capped scan of the
+ * buffer's own words. Used when no LSP server is available/ready for this
+ * editor — the same fallback relationship `gd`/`gh` already have. */
+static void complete_source_locally(Editor *e, unsigned int generation, const char *prefix) {
+    CompleteItem items[COMPLETE_MAX_ITEMS];
+    int n = 0;
+    if (e->hl) {
+        HlIdent idents[COMPLETE_MAX_ITEMS];
+        int ni = (int)hl_identifiers(e->hl, prefix, idents, COMPLETE_MAX_ITEMS);
+        for (int i = 0; i < ni; i++) {
+            CompleteItem *it = &items[n];
+            snprintf(it->label, sizeof it->label, "%s", idents[i].text);
+            snprintf(it->insert_text, sizeof it->insert_text, "%s", idents[i].text);
+            it->detail[0] = '\0';
+            it->sort_text[0] = '\0';
+            it->kind = idents[i].kind == HL_IDENT_TYPE ? COMPLETE_KIND_TYPE :
+                       idents[i].kind == HL_IDENT_PROPERTY ? COMPLETE_KIND_FIELD :
+                       COMPLETE_KIND_VARIABLE;
+            n++;
+        }
+    } else {
+        char *txt = editor_text(e);
+        n = complete_collect_buffer_words(txt, prefix, items, COMPLETE_MAX_ITEMS);
+        free(txt);
+    }
+    complete_set_items(&g.comp, generation, items, n);
+    if (g.comp.nfiltered == 0) complete_close(&g.comp);
+}
+
+/* Start (or restart) a completion session anchored at `word_start`: prefers
+ * an LSP server when one is running and ready, falling back to local
+ * sourcing otherwise. LSP results arrive later via the per-frame drain in
+ * the main loop. */
+static void complete_trigger(Editor *e, size_t word_start, const char *prefix) {
+    unsigned int gen = complete_begin(&g.comp, word_start, prefix);
+    Lsp *l = lsp_manager_for(&g.lsp, e);
+    if (l && lsp_ready(l)) {
+        size_t row, col;
+        pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+        lsp_manager_request_completion(&g.lsp, e, (int)row, (int)col);
+        complete_set_loading(&g.comp, gen);
+        return;
+    }
+    complete_source_locally(e, gen, prefix);
+}
+
+/* Called after every insert-mode edit that could change the identifier
+ * under the cursor: closes the menu if there's no longer a word there,
+ * re-filters locally if the word boundary is unchanged, or (re)triggers a
+ * source fetch once 2+ identifier characters have been typed. */
+static void complete_after_insert(Editor *e) {
+    if (!e || !e->buf) { complete_close(&g.comp); return; }
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t ws = complete_prefix_start(pt, e->cursor);
+    size_t plen = e->cursor - ws;
+    if (plen == 0) { complete_close(&g.comp); return; }
+
+    char prefix[COMPLETE_LABEL_CAP];
+    size_t n = plen < sizeof prefix - 1 ? plen : sizeof prefix - 1;
+    pt_read(pt, ws, n, prefix);
+    prefix[n] = '\0';
+
+    if (g.comp.active && g.comp.word_start == ws) {
+        complete_set_prefix(&g.comp, prefix);
+        if (g.comp.nfiltered == 0) complete_close(&g.comp);
+        return;
+    }
+    if (plen < 2) { complete_close(&g.comp); return; }
+    complete_trigger(e, ws, prefix);
+}
+
+static void complete_accept_current(Editor *e) {
+    CompleteEdit edit;
+    if (complete_accept(&g.comp, e->cursor, &edit)) {
+        e->group_open = 0;
+        ed_delete_range(e, edit.start, edit.end);
+        e->cursor = edit.start;
+        ed_insert(e, edit.text, strlen(edit.text));
+        e->group_open = 0;
+    }
+    complete_close(&g.comp);
+}
+
 /* ---- GLFW callbacks ---- */
 static void on_char(GLFWwindow *w, unsigned int cp) {
     g.last_activity = glfwGetTime();
@@ -1266,6 +1416,7 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
         if (cp >= 32 && cp < 127) {
             text[0] = (char)cp;
             command_insert_text(&g.buf_search, text);
+            buffer_search_update();
         }
         return;
     }
@@ -1318,7 +1469,9 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
         return;
     }
     if (plan.target == INPUT_TEXT_EDITOR_INSERT) {
-        editor_apply_text_input(cur(), cp);
+        Editor *ie = cur();
+        editor_apply_text_input(ie, cp);
+        complete_after_insert(ie);
         return;
     }
     vim_normal_char(cp); /* NORMAL or VISUAL */
@@ -1347,10 +1500,12 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         (mods & GLFW_MOD_SHIFT) != 0);
 
     if (shortcut == SHORTCUT_TAB_NEXT) {
+        if (g.buf_search.active) buffer_search_cancel();
         tab_goto(+1);
         return;
     }
     if (shortcut == SHORTCUT_TAB_PREV) {
+        if (g.buf_search.active) buffer_search_cancel();
         tab_goto(-1);
         return;
     }
@@ -1358,12 +1513,20 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     if (g.buf_search.active) {
         if (shortcut == SHORTCUT_PASTE) {
             const char *clip = glfwGetClipboardString(g.win);
-            if (clip) command_insert_text(&g.buf_search, clip);
+            if (clip) {
+                command_insert_text(&g.buf_search, clip);
+                buffer_search_update();
+            }
             return;
         }
-        CommandKeyResult search_key = command_apply_key(
-            &g.buf_search, wave_command_key_from_glfw(key));
+        CommandKey command_key = wave_command_key_from_glfw(key);
+        if (command_key == COMMAND_KEY_ESCAPE) {
+            buffer_search_cancel();
+            return;
+        }
+        CommandKeyResult search_key = command_apply_key(&g.buf_search, command_key);
         if (search_key == COMMAND_KEY_RESULT_ACCEPT) buffer_search_accept();
+        else if (search_key == COMMAND_KEY_RESULT_HANDLED) buffer_search_update();
         if (search_key != COMMAND_KEY_RESULT_NONE) return;
         return;
     }
@@ -1546,6 +1709,24 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
 
     if (plan.target != INPUT_KEY_TARGET_EDITOR) return;
 
+    if (g.modal.mode == MODE_INSERT && complete_is_active(&g.comp)) {
+        if (key == GLFW_KEY_ESCAPE) { complete_close(&g.comp); return; }
+        if (key == GLFW_KEY_UP ||
+            (key == GLFW_KEY_P && (mods & GLFW_MOD_CONTROL))) {
+            complete_move(&g.comp, -1);
+            return;
+        }
+        if (key == GLFW_KEY_DOWN ||
+            (key == GLFW_KEY_N && (mods & GLFW_MOD_CONTROL))) {
+            complete_move(&g.comp, +1);
+            return;
+        }
+        if (key == GLFW_KEY_TAB || key == GLFW_KEY_ENTER) {
+            complete_accept_current(e);
+            return;
+        }
+    }
+
     if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
                           g.modal.mode == MODE_INSERT))
         return;
@@ -1558,7 +1739,12 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
     }
 
     if (g.modal.mode == MODE_INSERT) {
-        editor_apply_insert_key(e, wave_editor_key_from_glfw(key));
+        EditorKey ekey = wave_editor_key_from_glfw(key);
+        editor_apply_insert_key(e, ekey);
+        /* backspace can shrink the prefix without leaving the word; anything
+         * else (arrows, enter, tab, delete) invalidates the menu. */
+        if (ekey == EDITOR_KEY_BACKSPACE) complete_after_insert(e);
+        else complete_close(&g.comp);
         return;
     }
 
@@ -1830,6 +2016,7 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
         editor_has_buffer(cur()) && editor_has_visual_rows(cur()));
 
     if (plan.dismiss_popover) popover_close(&g.pop); /* a click anywhere dismisses the popover */
+    if (plan.dismiss_popover) complete_close(&g.comp); /* ...and the completion menu */
     if (plan.record_activity) g.last_activity = glfwGetTime();
 
     /* Title-bar band: our GL view covers it, so reproduce the native gestures —
@@ -1886,6 +2073,7 @@ static void on_mouse(GLFWwindow *w, int button, int action, int mods) {
 
 /* ---- drawing ---- */
 #define MAXSPANS 4096
+#define MAX_SEARCH_MATCHES 4096
 
 static float hover_step(float current, int hot, double dt) {
     float target = hot ? 1.0f : 0.0f;
@@ -2128,6 +2316,11 @@ static void draw_frame(int fb_w, int fb_h) {
     static HighlightSpan spans[MAXSPANS];
     size_t nspans = editor_highlight_spans(e, text.window.byte_start,
                                            text.window.byte_end, spans, MAXSPANS);
+    static EditorRange search_matches[MAX_SEARCH_MATCHES];
+    size_t nsearch_matches = 0;
+    if (g.buf_search.active && g.buf_search_editor == e)
+        nsearch_matches = editor_search_matches(
+            e, command_text(&g.buf_search), search_matches, MAX_SEARCH_MATCHES);
 
     static Diagnostic diags[MAXDIAG];
     size_t ndiag = lsp_manager_editor_diagnostics(&g.lsp, e, diags, MAXDIAG);
@@ -2137,6 +2330,7 @@ static void draw_frame(int fb_w, int fb_h) {
     int cursor_on = view_cursor_visible(g.blink, glfwGetTime(), g.last_activity);
 
     draw_editor_text_panel(e, &text, spans, nspans, diags, ndiag,
+                           search_matches, nsearch_matches,
                            g.modal.mode == MODE_INSERT, cursor_on, fb_h,
                            font, r, side_px, gutter, text_x, top_pad,
                            line_h, adv, ascent);
@@ -2168,6 +2362,16 @@ static void draw_frame(int fb_w, int fb_h) {
                            g.layout.side_px, g.fb_scale, g.config.radius);
     }
 
+    /* the completion menu floats the same way, anchored to the cursor. */
+    if (g.modal.mode == MODE_INSERT && complete_is_active(&g.comp)) {
+        ViewPoint canchor = view_popover_anchor(text_x, top_pad, (float)fb_h, bar_h,
+                                                adv, line_h, text.cursor.vrow,
+                                                text.cursor.xcol, editor_scroll_y(e));
+        draw_completion_menu(&g.comp, fb_w, fb_h, font, r, adv, line_h, ascent,
+                             top_pad, bar_h, canchor.x, canchor.y,
+                             g.layout.side_px, g.fb_scale, g.config.radius);
+    }
+
     if (frame.overlay == VIEW_OVERLAY_DRAW_PALETTE)
         draw_palette_panel(&g.overlay, g.ws, editor_fb_w, font, r, adv, line_h,
                            ascent, top_pad, g.config.radius);
@@ -2184,7 +2388,12 @@ static void draw_frame(int fb_w, int fb_h) {
 }
 
 int main(int argc, char **argv) {
-    const char *arg = argc > 1 ? argv[1] : NULL;
+    WaveRuntimeOpenRequest request = wave_runtime_open_request(argc, argv);
+    if (!request.valid) {
+        fprintf(stderr, "usage: wave [--line N] [--column N] [file-or-folder]\n");
+        return 2;
+    }
+    const char *arg = request.path;
 
     if (!glfwInit()) { fprintf(stderr, "glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -2201,6 +2410,7 @@ int main(int argc, char **argv) {
     g.blink = runtime.blink;
 
     modal_init(&g.modal);
+    complete_init(&g.comp);
     overlay_init(&g.overlay);
     recent_projects_init(&g.recent);
     wave_config_defaults(&g.config);
@@ -2243,7 +2453,12 @@ int main(int argc, char **argv) {
             workspace_watch_start();
             if (recent_projects_add(&g.recent, ws_root(g.ws)) && g.persist)
                 recent_projects_save(&g.recent);
-            if (opened.kind == WS_OPEN_FILE) open_path(opened.file);
+            if (opened.kind == WS_OPEN_FILE) {
+                if (request.has_location)
+                    open_path_at(opened.file, request.line, request.column);
+                else
+                    open_path(opened.file);
+            }
         }
     }
     if (tabs_count(&g.tabs) == 0) {
@@ -2318,6 +2533,7 @@ int main(int argc, char **argv) {
     glfwSetScrollCallback(win, on_scroll);
     glfwSetCursorPosCallback(win, on_cursor_pos);
     glfwSetMouseButtonCallback(win, on_mouse);
+    glfwSetDropCallback(win, on_drop);
 
     while (!glfwWindowShouldClose(win)) {
         process_file_watchers();
@@ -2328,6 +2544,12 @@ int main(int argc, char **argv) {
         /* re-assert the blur each frame: macOS clears it on some window events */
         if (g.config.blur) mac_set_blur(glfwGetCocoaWindow(win), 1);
         editor_update_highlighter(e);
+
+        /* the completion menu belongs to one specific editor/word; leaving
+         * insert mode by any path (Esc, tab switch, opening a file, ...)
+         * invalidates it. */
+        if (g.modal.mode != MODE_INSERT && complete_is_active(&g.comp))
+            complete_close(&g.comp);
 
         /* drain language tooling and apply any UI-facing results */
         LspManagerUiPlan lsp_plan = lsp_manager_ui_plan(
@@ -2343,6 +2565,18 @@ int main(int argc, char **argv) {
         }
         if (lsp_plan.show_hover) {
             popover_show_hover(&g.pop, lsp_plan.hover);
+        }
+
+        /* pick up an async LSP completion reply, if one is in flight */
+        if (g.comp.active && g.comp.loading) {
+            LspCompletionItem raw[COMPLETE_MAX_ITEMS];
+            size_t nraw = 0;
+            if (lsp_manager_take_completions(&g.lsp, e, raw, COMPLETE_MAX_ITEMS, &nraw)) {
+                CompleteItem items[COMPLETE_MAX_ITEMS];
+                for (size_t i = 0; i < nraw; i++) items[i] = complete_item_from_lsp(&raw[i]);
+                complete_set_items(&g.comp, g.comp.generation, items, (int)nraw);
+                if (g.comp.nfiltered == 0) complete_close(&g.comp);
+            }
         }
 
         /* drain any pending ripgrep output for the live search overlay */

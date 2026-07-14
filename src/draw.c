@@ -962,6 +962,8 @@ void draw_header_panel(const char *root, const char *path, int fb_w,
 void draw_editor_text_panel(Editor *e, const TextFrameView *text,
                             const HighlightSpan *spans, size_t nspans,
                             const Diagnostic *diags, size_t ndiag,
+                            const EditorRange *search_matches,
+                            size_t nsearch_matches,
                             int insert_mode, int cursor_on, int fb_h,
                             Font *font, Renderer *r, float side_px,
                             float gutter, float text_x, float top_pad,
@@ -997,6 +999,18 @@ void draw_editor_text_panel(Editor *e, const TextFrameView *text,
                 float nx = text_view_gutter_x(side_px, gutter, adv, ln + 1);
                 draw_text_run(font, r, num, nl, nx, baseline,
                               (Color){0.38f, 0.42f, 0.48f});
+            }
+
+            for (size_t s = 0; s < nsearch_matches; s++) {
+                TextColumnSpan span;
+                if (!text_view_clip_selection(linebuf, (int)line.len, line.start,
+                                              rs, re, &search_matches[s], &span))
+                    continue;
+                int current = search_matches[s].start == e->cursor;
+                renderer_rect(r, text_x + adv * (float)span.start_col, top,
+                              adv * (float)(span.end_col - span.start_col),
+                              line_h, 0.82f, 0.58f, 0.12f,
+                              current ? 0.62f : 0.30f);
             }
 
             if (text->has_selection) {
@@ -1259,6 +1273,61 @@ void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
                         pop.scrollbar_track_w, pop.scrollbar_thumb_h,
                         radius * 0.5f, (Color){0.50f, 0.54f, 0.60f},
                         1.0f);
+    }
+}
+
+void draw_completion_menu(CompleteState *c, int fb_w, int fb_h, Font *font,
+                          Renderer *r, float adv, float line_h, float ascent,
+                          float top_pad, float bar_h, float anchor_x,
+                          float cur_top, float side_px, float fb_scale,
+                          float radius) {
+    CompleteLayout lay;
+    if (!complete_layout(c, fb_w, fb_h, adv, line_h, top_pad, bar_h, anchor_x,
+                         cur_top, side_px, fb_scale, &lay))
+        return;
+
+    draw_round_rect(r, lay.x - lay.border, lay.y - lay.border,
+                    lay.w + 2 * lay.border, lay.h + 2 * lay.border,
+                    radius, (Color){0.33f, 0.36f, 0.42f}, 1.0f);
+    draw_round_rect(r, lay.x, lay.y, lay.w, lay.h, radius,
+                    (Color){0.14f, 0.15f, 0.18f}, 1.0f);
+
+    for (int i = 0; i < lay.visible_rows; i++) {
+        int row = c->scroll + i;
+        if (row >= c->nfiltered) break;
+        const CompleteItem *it = &c->items[c->filtered[row]];
+        float top = lay.y + lay.pady + (float)i * line_h;
+        int selected = row == c->sel;
+        if (selected)
+            draw_round_rect(r, lay.x + 2.0f, top, lay.w - 4.0f, line_h,
+                            radius * 0.5f, (Color){0.20f, 0.26f, 0.38f}, 1.0f);
+
+        const char *tag = complete_kind_tag(it->kind);
+        draw_text_run(font, r, tag, (int)strlen(tag), lay.x + lay.padx,
+                      top + ascent, (Color){0.52f, 0.60f, 0.72f});
+
+        float label_x = lay.x + lay.padx + adv * 4.0f;
+        int budget = lay.max_label_cells - 4;
+        if (budget < 4) budget = 4;
+        int label_len = view_clamp_text_len(it->label, budget);
+        Color label_color = selected ? (Color){0.96f, 0.97f, 0.99f}
+                                     : (Color){0.85f, 0.87f, 0.92f};
+        draw_text_run(font, r, it->label, label_len, label_x, top + ascent,
+                      label_color);
+    }
+
+    if (lay.scrollable) {
+        float track_w = adv * 0.5f;
+        float track_x = lay.x + lay.w - track_w * 1.25f;
+        int maxscroll = c->nfiltered - lay.visible_rows;
+        float thumb_h = lay.h * (float)lay.visible_rows / (float)c->nfiltered;
+        if (thumb_h < line_h * 0.5f) thumb_h = line_h * 0.5f;
+        float thumb_y = lay.y + (lay.h - thumb_h) *
+                        (maxscroll > 0 ? (float)c->scroll / (float)maxscroll : 0.0f);
+        draw_round_rect(r, track_x, lay.y, track_w, lay.h, radius * 0.5f,
+                        (Color){0.24f, 0.26f, 0.30f}, 1.0f);
+        draw_round_rect(r, track_x, thumb_y, track_w, thumb_h, radius * 0.5f,
+                        (Color){0.50f, 0.54f, 0.60f}, 1.0f);
     }
 }
 

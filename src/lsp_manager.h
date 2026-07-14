@@ -63,6 +63,12 @@ LspManagerHoverInfo lsp_manager_hover_info(LspManager *m, Editor *e,
                                            char *base, size_t base_cap);
 int lsp_manager_request_hover(LspManager *m, Editor *e, int row, int col);
 int lsp_manager_request_definition(LspManager *m, Editor *e, int row, int col);
+/* Pushes any pending didChange first, so the server positions the request
+ * against the text the editor is actually showing, then requests completion. */
+int lsp_manager_request_completion(LspManager *m, Editor *e, int row, int col);
+/* Pass-through to lsp_take_completions() for whichever server backs `e`. */
+int lsp_manager_take_completions(LspManager *m, Editor *e, LspCompletionItem *out,
+                                 size_t max, size_t *n);
 int lsp_manager_request_definition_at_cursor(LspManager *m, Editor *e,
                                              char *message, size_t message_cap);
 int lsp_manager_poll(LspManager *m, LspLocation *definition,

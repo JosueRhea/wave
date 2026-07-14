@@ -32,6 +32,48 @@ int main(void) {
     CHECK_STR(text, "alpha eta\nnext\n");
     free(text);
     editor_close(&e);
+
+    modal_init(&m);
+    fill(&e, "one\ntwo\n");
+    e.cursor = strlen("one");
+    edit_command_apply(&e, &m, &y, 'a');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    CHECK_EQ(e.cursor, strlen("one"));
+    CHECK(editor_apply_text_input(&e, '!'));
+    text = editor_text(&e);
+    CHECK_STR(text, "one!\ntwo\n");
+    free(text);
+    editor_close(&e);
+
+    modal_init(&m);
+    fill(&e, "one\ntwo\n");
+    e.cursor = 0;
+    edit_command_apply(&e, &m, &y, 'A');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    CHECK_EQ(e.cursor, strlen("one"));
+    editor_close(&e);
+
+    modal_init(&m);
+    fill(&e, "if (ok) {\n  run();\n}\n");
+    e.cursor = strlen("if (ok) {\n  ru");
+    edit_command_apply(&e, &m, &y, 'o');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    text = editor_text(&e);
+    CHECK_STR(text, "if (ok) {\n  run();\n  \n}\n");
+    free(text);
+    CHECK_EQ(e.cursor, strlen("if (ok) {\n  run();\n  "));
+    editor_close(&e);
+
+    modal_init(&m);
+    fill(&e, "if (ok) {\n  run();\n}\n");
+    e.cursor = strlen("if (ok) {\n  ru");
+    edit_command_apply(&e, &m, &y, 'O');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    text = editor_text(&e);
+    CHECK_STR(text, "if (ok) {\n  \n  run();\n}\n");
+    free(text);
+    CHECK_EQ(e.cursor, strlen("if (ok) {\n  "));
+    editor_close(&e);
     yank_free(&y);
 
     modal_init(&m);

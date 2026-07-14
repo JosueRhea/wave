@@ -238,7 +238,7 @@ static const char *jstr(JVal *v) { return (v && v->kind == JSTR) ? v->str : NULL
 static int jint(JVal *v) { return (v && v->kind == JNUM) ? (int)v->num : 0; }
 
 /* ===== client state ===== */
-typedef struct { long id; int kind; } Pending; /* kind: 1=def 2=hover */
+typedef struct { long id; int kind; } Pending; /* kind: 1=def 2=hover 3=completion */
 typedef struct { char *uri, *lang, *text; } OpenReq;
 typedef struct { char uri[1024]; LspDiag *d; size_t n; } DiagSet;
 
@@ -272,6 +272,8 @@ struct Lsp {
 
     LspLocation def; int def_ready;
     char hover[1024]; int hover_ready;
+    LspCompletionItem completions[LSP_MAX_COMPLETIONS];
+    size_t ncompletions; int completions_ready;
 };
 
 /* ----- low-level io ----- */
@@ -394,6 +396,8 @@ static void send_initialize(Lsp *l, const char *root_uri) {
         "\"synchronization\":{\"dynamicRegistration\":false},"
         "\"definition\":{\"dynamicRegistration\":false},"
         "\"hover\":{\"dynamicRegistration\":false,\"contentFormat\":[\"plaintext\",\"markdown\"]},"
+        "\"completion\":{\"dynamicRegistration\":false,"
+        "\"completionItem\":{\"snippetSupport\":false}},"
         "\"publishDiagnostics\":{}}},"
         "\"workspaceFolders\":null}");
     l->init_id = lsp_send_request(l, "initialize", &p);
@@ -528,6 +532,9 @@ void lsp_definition(Lsp *l, const char *uri, int line, int col) {
 void lsp_hover(Lsp *l, const char *uri, int line, int col) {
     send_position_request(l, "textDocument/hover", uri, line, col, 2);
 }
+void lsp_completion(Lsp *l, const char *uri, int line, int col) {
+    send_position_request(l, "textDocument/completion", uri, line, col, 3);
+}
 
 /* ----- uri <-> path ----- */
 static void uri_to_path(const char *uri, char *out, size_t cap) {
@@ -577,6 +584,50 @@ static void handle_definition(Lsp *l, JVal *result) {
     if (result->kind == JARR) { if (result->count > 0) ok = parse_location(jidx(result, 0), &loc); }
     else if (result->kind == JOBJ) ok = parse_location(result, &loc);
     if (ok) { l->def = loc; l->def_ready = 1; }
+}
+
+/* CompletionList.items or a bare CompletionItem[]; both are valid replies. */
+static void handle_completion(Lsp *l, JVal *result) {
+    l->ncompletions = 0;
+    l->completions_ready = 1;
+    if (!result) return;
+    JVal *arr = (result->kind == JOBJ) ? jget(result, "items") : result;
+    if (!arr || arr->kind != JARR) return;
+
+    size_t n = 0;
+    for (int i = 0; i < arr->count && n < LSP_MAX_COMPLETIONS; i++) {
+        JVal *it = jidx(arr, i);
+        const char *label = jstr(jget(it, "label"));
+        if (!label) continue;
+        /* clangd (and others) pad the label of fallback/identifier-based
+         * completions with a leading space as a UI hint for its own client;
+         * we render the label directly, so strip it. */
+        while (*label == ' ') label++;
+        if (!*label) continue;
+        LspCompletionItem *out = &l->completions[n];
+        memset(out, 0, sizeof *out);
+        snprintf(out->label, sizeof out->label, "%s", label);
+
+        /* Prefer the textEdit's replacement text (what most servers actually
+         * mean to insert) over insertText, falling back to the label. We
+         * ignore the textEdit's *range* — the editor always replaces the
+         * identifier prefix under the cursor, which covers the common case
+         * (function/variable/property names) without snippet-range logic. */
+        const char *insert = NULL;
+        JVal *te = jget(it, "textEdit");
+        if (te) insert = jstr(jget(te, "newText"));
+        if (!insert) insert = jstr(jget(it, "insertText"));
+        if (!insert) insert = label;
+        snprintf(out->insert_text, sizeof out->insert_text, "%s", insert);
+
+        const char *detail = jstr(jget(it, "detail"));
+        if (detail) snprintf(out->detail, sizeof out->detail, "%s", detail);
+        const char *sort = jstr(jget(it, "sortText"));
+        if (sort) snprintf(out->sort_text, sizeof out->sort_text, "%s", sort);
+        out->kind = jint(jget(it, "kind"));
+        n++;
+    }
+    l->ncompletions = n;
 }
 
 static void extract_hover_text(JVal *contents, char *out, size_t cap) {
@@ -681,6 +732,7 @@ static void dispatch(Lsp *l, JVal *msg) {
         else if (kind == 2) { extract_hover_text(jget(msg, "result") ? jget(jget(msg,"result"),"contents") : NULL,
                                                   l->hover, sizeof l->hover);
                               if (l->hover[0]) l->hover_ready = 1; }
+        else if (kind == 3) handle_completion(l, result);
     }
 }
 
@@ -750,6 +802,14 @@ int lsp_take_hover(Lsp *l, char *buf, size_t cap) {
     if (!l || !l->hover_ready) return 0;
     snprintf(buf, cap, "%s", l->hover);
     l->hover_ready = 0;
+    return 1;
+}
+int lsp_take_completions(Lsp *l, LspCompletionItem *out, size_t max, size_t *n) {
+    if (!l || !l->completions_ready) return 0;
+    size_t got = l->ncompletions < max ? l->ncompletions : max;
+    for (size_t i = 0; i < got; i++) out[i] = l->completions[i];
+    if (n) *n = got;
+    l->completions_ready = 0;
     return 1;
 }
 
