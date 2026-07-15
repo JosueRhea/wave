@@ -56,6 +56,7 @@ void popover_set_loading(Popover *p, int loading);
 void popover_compose(Popover *p, const char *hover);
 void popover_show_base(Popover *p, const char *base, int loading);
 void popover_show_hover(Popover *p, const char *hover);
+void popover_show_signature(Popover *p, const char *signature);
 void popover_show_encoded_base(Popover *p, const char *encoded, int scroll);
 void popover_set_scroll(Popover *p, int scroll);
 void popover_scroll(Popover *p, int delta);

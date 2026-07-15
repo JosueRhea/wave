@@ -129,6 +129,54 @@ static size_t wait_completions(Lsp *l, const char *uri, int line, int col,
     return 0;
 }
 
+static size_t wait_triggered_completions(Lsp *l, const char *uri, int line,
+                                         int col, char trigger,
+                                         LspCompletionItem *out, size_t max) {
+    for (int round = 0; round < 20; round++) {
+        lsp_completion_triggered(l, uri, line, col, trigger);
+        for (int i = 0; i < 60; i++) {
+            lsp_poll(l);
+            size_t n = 0;
+            if (lsp_take_completions(l, out, max, &n) && n > 0) return n;
+            usleep(POLL_SLEEP_US);
+        }
+    }
+    return 0;
+}
+
+static int wait_resolved_completion(Lsp *l, const LspCompletionItem *item,
+                                    LspCompletionItem *out) {
+    lsp_completion_resolve(l, item);
+    for (int i = 0; i < POLL_TRIES; i++) {
+        lsp_poll(l);
+        if (lsp_take_resolved_completion(l, out)) return 1;
+        usleep(POLL_SLEEP_US);
+    }
+    return 0;
+}
+
+static int wait_signature(Lsp *l, const char *uri, int line, int col,
+                          char trigger, LspSignatureHelp *out) {
+    lsp_signature_help(l, uri, line, col, trigger, 0);
+    for (int i = 0; i < POLL_TRIES; i++) {
+        lsp_poll(l);
+        if (lsp_take_signature_help(l, out)) return out->label[0] != '\0';
+        usleep(POLL_SLEEP_US);
+    }
+    return 0;
+}
+
+static int wait_hover(Lsp *l, const char *uri, int line, int col,
+                      char *out, size_t cap) {
+    lsp_hover(l, uri, line, col);
+    for (int i = 0; i < POLL_TRIES; i++) {
+        lsp_poll(l);
+        if (lsp_take_hover(l, out, cap)) return out[0] != '\0';
+        usleep(POLL_SLEEP_US);
+    }
+    return 0;
+}
+
 /* Re-issue a definition request until it lands in a file basenamed `want_base`
  * (servers may first answer from the AST before their index is warm). Fills
  * `*out` with the last result; returns 1 if it ever reached `want_base`. */
@@ -298,7 +346,8 @@ static void test_ts(void) {
     snprintf(p, sizeof p, "%s/util.ts", dir);
     write_file(p, "export function addNumbers(a: number, b: number): number {\n"
                   "    return a + b;\n"
-                  "}\n");
+                  "}\n"
+                  "export const importedValue = 42;\n");
     snprintf(p, sizeof p, "%s/main.ts", dir);
     /* line 2: the call; line 3: a real type error so we can assert diagnostics. */
     write_file(p, "import { addNumbers } from \"./util\";\n"
@@ -306,17 +355,32 @@ static void test_ts(void) {
                   "const r = addNumbers(2, 3);\n"
                   "const bad: number = \"not a number\";\n"
                   "const partial = addNum;\n"
-                  "console.log(r, bad, partial);\n");
+                  "const local = { alpha: 1, betaMethod(value: string) { return value; } };\n"
+                  "local.\n"
+                  "const autoValue = importedVal;\n"
+                  "const pendingCall = addNumbers(\n"
+                  "console.log(r, bad, partial, autoValue, pendingCall);\n");
     snprintf(p, sizeof p, "%s/tsconfig.json", dir);
     write_file(p, "{ \"compilerOptions\": { \"strict\": true, \"module\": \"commonjs\", "
                   "\"target\": \"es2020\" } }\n");
+    snprintf(p, sizeof p, "%s/app.js", dir);
+    write_file(p, "const jsObject = { alpha: 1, jsMethod() { return 2; } };\n"
+                  "jsObject.\n");
+    snprintf(p, sizeof p, "%s/component.tsx", dir);
+    write_file(p, "const props = { title: \"hello\", renderTitle() { return this.title; } };\n"
+                  "const view = <div>{props.}</div>;\n");
 
     char root_uri[1100], main_path[1100], main_uri[1200], util_path[1100], util_uri[1200];
+    char js_path[1100], js_uri[1200], tsx_path[1100], tsx_uri[1200];
     snprintf(root_uri, sizeof root_uri, "file://%s", dir);
     snprintf(main_path, sizeof main_path, "%s/main.ts", dir);
     snprintf(main_uri, sizeof main_uri, "file://%s", main_path);
     snprintf(util_path, sizeof util_path, "%s/util.ts", dir);
     snprintf(util_uri, sizeof util_uri, "file://%s", util_path);
+    snprintf(js_path, sizeof js_path, "%s/app.js", dir);
+    snprintf(js_uri, sizeof js_uri, "file://%s", js_path);
+    snprintf(tsx_path, sizeof tsx_path, "%s/component.tsx", dir);
+    snprintf(tsx_uri, sizeof tsx_uri, "file://%s", tsx_path);
 
     const char *const argv[] = {rt, cli, "--stdio", NULL};
     Lsp *l = lsp_start(argv, root_uri);
@@ -327,9 +391,13 @@ static void test_ts(void) {
 
     char *text = slurp(main_path);
     char *util_text = slurp(util_path);
+    char *js_text = slurp(js_path);
+    char *tsx_text = slurp(tsx_path);
     CHECK(text != NULL);
     lsp_did_open(l, main_uri, "typescript", text ? text : "");
     if (util_text) lsp_did_open(l, util_uri, "typescript", util_text);
+    if (js_text) lsp_did_open(l, js_uri, "javascript", js_text);
+    if (tsx_text) lsp_did_open(l, tsx_uri, "typescriptreact", tsx_text);
 
     /* real diagnostics: the string-to-number assignment on line 3. */
     int published = 0;
@@ -337,9 +405,19 @@ static void test_ts(void) {
     size_t nd = wait_diagnostics(l, main_uri, diags, 64, &published);
     CHECK(published);
     CHECK(nd > 0);
+    LspProgress progress;
+    CHECK(lsp_progress(l, &progress));
+    CHECK(strstr(progress.title, "JS/TS language features") != NULL);
     int saw = 0;
     for (size_t i = 0; i < nd; i++)
         if (strstr(diags[i].message, "not assignable")) saw = 1;
+    for (int attempt = 0; attempt < POLL_TRIES && !saw; attempt++) {
+        lsp_poll(l);
+        nd = lsp_diagnostics(l, main_uri, diags, 64, &published);
+        for (size_t i = 0; i < nd; i++)
+            if (strstr(diags[i].message, "not assignable")) saw = 1;
+        if (!saw) usleep(POLL_SLEEP_US);
+    }
     CHECK(saw);
 
     /* cross-file go-to-definition: the addNumbers call resolves to util.ts. */
@@ -361,14 +439,89 @@ static void test_ts(void) {
         if (!strcmp(items[i].insert_text, "addNumbers")) saw_fn = 1;
     CHECK(saw_fn);
 
+    char hover_text[4096];
+    int hover_col = text ? col_of(text, 2, "addNumbers", 3) : 0;
+    CHECK(wait_hover(l, main_uri, 2, hover_col, hover_text, sizeof hover_text));
+    CHECK(strstr(hover_text, "addNumbers") != NULL);
+    CHECK(strstr(hover_text, "```") == NULL);
+
+    /* Trigger-character completion after `.` returns typed object members. */
+    int member_col = text ? col_of(text, 6, "local.", 6) : 0;
+    size_t member_count = wait_triggered_completions(
+        l, main_uri, 6, member_col, '.', items, 64);
+    int saw_member = 0;
+    for (size_t i = 0; i < member_count; i++)
+        if (!strcmp(items[i].label, "betaMethod")) saw_member = 1;
+    CHECK(saw_member);
+
+    int js_col = js_text ? col_of(js_text, 1, "jsObject.", 9) : 0;
+    size_t js_count = wait_triggered_completions(l, js_uri, 1, js_col, '.', items, 64);
+    int saw_js_member = 0;
+    for (size_t i = 0; i < js_count; i++)
+        if (!strcmp(items[i].label, "jsMethod")) saw_js_member = 1;
+    CHECK(saw_js_member);
+
+    int tsx_col = tsx_text ? col_of(tsx_text, 1, "props.", 6) : 0;
+    size_t tsx_count = wait_triggered_completions(
+        l, tsx_uri, 1, tsx_col, '.', items, 64);
+    int saw_tsx_member = 0;
+    for (size_t i = 0; i < tsx_count; i++)
+        if (!strcmp(items[i].label, "renderTitle")) saw_tsx_member = 1;
+    CHECK(saw_tsx_member);
+
+    /* Auto-import completions resolve into an additional import text edit. */
+    int import_col = text ? col_of(text, 7, "importedVal", 11) : 0;
+    LspCompletionItem *many = calloc(LSP_MAX_COMPLETIONS, sizeof *many);
+    CHECK(many != NULL);
+    size_t import_count = wait_completions(l, main_uri, 7, import_col,
+                                           many, LSP_MAX_COMPLETIONS);
+    LspCompletionItem *auto_item = NULL;
+    for (size_t i = 0; i < import_count; i++)
+        if (!strcmp(many[i].label, "importedValue")) { auto_item = &many[i]; break; }
+    CHECK(auto_item != NULL);
+    if (auto_item) {
+        CHECK(auto_item->resolve_id > 0);
+        LspCompletionItem resolved;
+        CHECK(wait_resolved_completion(l, auto_item, &resolved));
+        CHECK(resolved.resolved);
+        CHECK(resolved.nadditional_edits > 0);
+        if (resolved.nadditional_edits > 0)
+            CHECK(strstr(resolved.additional_edits[0].new_text, "importedValue") != NULL);
+    }
+
+    /* Signature help exposes the real function call shape after `(`. */
+    int signature_col = text ? col_of(text, 8, "addNumbers(", 11) : 0;
+    LspSignatureHelp signature;
+    CHECK(wait_signature(l, main_uri, 8, signature_col, '(', &signature));
+    CHECK(strstr(signature.label, "addNumbers") != NULL);
+    CHECK(strstr(signature.label, "number") != NULL);
+    free(many);
+
     lsp_stop(l);
     free(text);
     free(util_text);
+    free(js_text);
+    free(tsx_text);
     rmrf(dir);
     free(dir);
 }
 
 int main(void) {
+    char hover[512];
+    lsp_format_hover_text(
+        "```typescript\n"
+        "(alias) add(value: number): number\n"
+        "import add\n"
+        "```\n\n"
+        "Adds a `value`.\n",
+        hover, sizeof hover);
+    CHECK_STR(hover,
+              "(alias) add(value: number): number\n"
+              "import add\n\n"
+              "Adds a value.");
+    lsp_format_hover_text(NULL, hover, sizeof hover);
+    CHECK_STR(hover, "");
+
     test_c();
     test_ts();
     TEST_REPORT();

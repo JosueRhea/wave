@@ -46,6 +46,24 @@ int main(void) {
     CHECK(complete_is_active(&c));
     CHECK_EQ(c.word_start, 2);
     CHECK_STR(c.prefix, "fo");
+    complete_set_loading(&c, gen1);
+    CHECK(c.loading);
+    char loading_status[128];
+    CHECK(complete_status_text(&c, "javascript", loading_status,
+                               sizeof loading_status));
+    CHECK_STR(loading_status, "javascript: loading suggestions...");
+    CHECK(complete_empty_reply(&c, gen1, 2));
+    CHECK_EQ(c.empty_replies, 1);
+    CHECK(complete_status_text(&c, "javascript", loading_status,
+                               sizeof loading_status));
+    CHECK_STR(loading_status, "javascript: indexing project...");
+    CHECK(complete_empty_reply(&c, gen1, 2));
+    CHECK_EQ(c.empty_replies, 2);
+    CHECK(!complete_empty_reply(&c, gen1, 2));
+    CHECK(!c.loading);
+    complete_set_loading(&c, gen1);
+    CHECK(c.loading);
+    CHECK(!complete_empty_reply(&c, gen1 - 1, 2));
 
     CompleteItem items[3] = {
         item("foo_bar", NULL), item("foobar", NULL), item("baz", NULL),
@@ -56,6 +74,9 @@ int main(void) {
     /* the current generation is applied */
     CHECK_EQ(complete_set_items(&c, gen1, items, 3), 1);
     CHECK_EQ(c.nitems, 3);
+    CHECK_EQ(c.empty_replies, 0);
+    CHECK(!complete_status_text(&c, "javascript", loading_status,
+                                sizeof loading_status));
 
     /* ----- filter tiers: prefix match beats subsequence match ----- */
     CHECK_EQ(c.nfiltered, 2); /* foo_bar, foobar match "fo"; baz doesn't */
@@ -151,8 +172,33 @@ int main(void) {
     CHECK_STR(complete_kind_tag(COMPLETE_KIND_FUNCTION), "fn");
     CHECK_STR(complete_kind_tag(COMPLETE_KIND_VARIABLE), "var");
     CHECK_STR(complete_kind_tag(COMPLETE_KIND_TEXT), "txt");
+    CHECK_EQ(complete_scope_from_lsp_kind(2, 1), COMPLETE_SCOPE_MEMBER);
+    CHECK_EQ(complete_scope_from_lsp_kind(5, 1), COMPLETE_SCOPE_MEMBER);
+    CHECK_EQ(complete_scope_from_lsp_kind(10, 1), COMPLETE_SCOPE_MEMBER);
+    CHECK_EQ(complete_scope_from_lsp_kind(6, 1), COMPLETE_SCOPE_OTHER);
+    CHECK_EQ(complete_scope_from_lsp_kind(2, 0), COMPLETE_SCOPE_UNKNOWN);
 
-    /* ----- layout: nothing to draw when inactive or empty ----- */
+    /* Receiver members are grouped before unrelated identifiers, with methods
+     * before fields and the server sort key preserved inside each group. */
+    CompleteItem grouped[5] = {
+        item("zMethod", "2"), item("aMethod", "1"), item("field", "0"),
+        item("globalFn", "0"), item("globalValue", "0"),
+    };
+    grouped[0].kind = grouped[1].kind = COMPLETE_KIND_FUNCTION;
+    grouped[2].kind = COMPLETE_KIND_FIELD;
+    grouped[3].kind = COMPLETE_KIND_FUNCTION;
+    grouped[4].kind = COMPLETE_KIND_VARIABLE;
+    grouped[0].scope = grouped[1].scope = grouped[2].scope = COMPLETE_SCOPE_MEMBER;
+    grouped[3].scope = grouped[4].scope = COMPLETE_SCOPE_OTHER;
+    complete_begin(&c, 0, "");
+    complete_set_items(&c, c.generation, grouped, 5);
+    CHECK_STR(c.items[c.filtered[0]].label, "aMethod");
+    CHECK_STR(c.items[c.filtered[1]].label, "zMethod");
+    CHECK_STR(c.items[c.filtered[2]].label, "field");
+    CHECK_STR(c.items[c.filtered[3]].label, "globalFn");
+    CHECK_STR(c.items[c.filtered[4]].label, "globalValue");
+
+    /* ----- layout: inactive states stay hidden; loading gets a feedback row ----- */
     CompleteLayout lay;
     CompleteState empty;
     complete_init(&empty);
@@ -160,6 +206,10 @@ int main(void) {
                              100.0f, 100.0f, 0.0f, 1.0f, &lay), 0);
 
     complete_begin(&empty, 0, "f");
+    complete_set_loading(&empty, empty.generation);
+    CHECK_EQ(complete_layout(&empty, 1000, 800, 8.0f, 16.0f, 4.0f, 20.0f,
+                             100.0f, 100.0f, 0.0f, 1.0f, &lay), 1);
+    CHECK_EQ(lay.visible_rows, 1);
     CompleteItem one[1] = { item("foobar_long_identifier_name", NULL) };
     complete_set_items(&empty, empty.generation, one, 1);
     CHECK_EQ(complete_layout(&empty, 1000, 800, 8.0f, 16.0f, 4.0f, 20.0f,

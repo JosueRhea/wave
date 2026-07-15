@@ -1276,6 +1276,32 @@ void draw_popover_panel(Popover *state, int fb_w, int fb_h, Font *font,
     }
 }
 
+static void draw_completion_item_icon(const CompleteItem *it, float x,
+                                      float top, float adv, float line_h,
+                                      float ascent, Font *font, Renderer *r,
+                                      float radius) {
+    if (it->scope == COMPLETE_SCOPE_MEMBER) {
+        float size = line_h * 0.68f;
+        float iy = top + (line_h - size) * 0.5f;
+        Color badge = it->kind == COMPLETE_KIND_FUNCTION
+                          ? (Color){0.54f, 0.34f, 0.84f}
+                          : (Color){0.26f, 0.58f, 0.78f};
+        draw_round_rect(r, x, iy, size, size, radius * 0.45f, badge, 0.95f);
+        const char *mark = it->kind == COMPLETE_KIND_FUNCTION ? "m" : "p";
+        draw_text_run(font, r, mark, 1, x + (size - adv) * 0.5f,
+                      top + ascent, (Color){0.97f, 0.97f, 1.0f});
+        return;
+    }
+
+    const char *tag = it->scope == COMPLETE_SCOPE_OTHER
+                          ? "abc"
+                          : complete_kind_tag(it->kind);
+    Color color = it->scope == COMPLETE_SCOPE_OTHER
+                      ? (Color){0.48f, 0.50f, 0.56f}
+                      : (Color){0.52f, 0.60f, 0.72f};
+    draw_text_run(font, r, tag, (int)strlen(tag), x, top + ascent, color);
+}
+
 void draw_completion_menu(CompleteState *c, int fb_w, int fb_h, Font *font,
                           Renderer *r, float adv, float line_h, float ascent,
                           float top_pad, float bar_h, float anchor_x,
@@ -1292,19 +1318,33 @@ void draw_completion_menu(CompleteState *c, int fb_w, int fb_h, Font *font,
     draw_round_rect(r, lay.x, lay.y, lay.w, lay.h, radius,
                     (Color){0.14f, 0.15f, 0.18f}, 1.0f);
 
+    if (c->loading && c->nfiltered == 0) {
+        const char *message = c->empty_replies > 0 ? "Indexing project..."
+                                                   : "Loading suggestions...";
+        draw_text_run(font, r, message, (int)strlen(message),
+                      lay.x + lay.padx, lay.y + lay.pady + ascent,
+                      (Color){0.72f, 0.74f, 0.82f});
+        return;
+    }
+
     for (int i = 0; i < lay.visible_rows; i++) {
         int row = c->scroll + i;
         if (row >= c->nfiltered) break;
         const CompleteItem *it = &c->items[c->filtered[row]];
         float top = lay.y + lay.pady + (float)i * line_h;
         int selected = row == c->sel;
+        if (row > 0 && it->scope == COMPLETE_SCOPE_OTHER) {
+            const CompleteItem *previous = &c->items[c->filtered[row - 1]];
+            if (previous->scope != COMPLETE_SCOPE_OTHER)
+                renderer_rect(r, lay.x + lay.padx, top, lay.w - lay.padx * 2.0f,
+                              1.0f, 0.28f, 0.29f, 0.34f, 0.8f);
+        }
         if (selected)
             draw_round_rect(r, lay.x + 2.0f, top, lay.w - 4.0f, line_h,
                             radius * 0.5f, (Color){0.20f, 0.26f, 0.38f}, 1.0f);
 
-        const char *tag = complete_kind_tag(it->kind);
-        draw_text_run(font, r, tag, (int)strlen(tag), lay.x + lay.padx,
-                      top + ascent, (Color){0.52f, 0.60f, 0.72f});
+        draw_completion_item_icon(it, lay.x + lay.padx, top, adv, line_h,
+                                  ascent, font, r, radius);
 
         float label_x = lay.x + lay.padx + adv * 4.0f;
         int budget = lay.max_label_cells - 4;
@@ -1314,6 +1354,16 @@ void draw_completion_menu(CompleteState *c, int fb_w, int fb_h, Font *font,
                                      : (Color){0.85f, 0.87f, 0.92f};
         draw_text_run(font, r, it->label, label_len, label_x, top + ascent,
                       label_color);
+        if (it->detail[0] && label_len == (int)strlen(it->label)) {
+            float detail_x = label_x + adv * (float)(label_len + 2);
+            int used = 4 + label_len + 2;
+            int detail_budget = lay.max_label_cells - used;
+            if (detail_budget > 3) {
+                int detail_len = view_clamp_text_len(it->detail, detail_budget);
+                draw_text_run(font, r, it->detail, detail_len, detail_x,
+                              top + ascent, (Color){0.52f, 0.56f, 0.64f});
+            }
+        }
     }
 
     if (lay.scrollable) {

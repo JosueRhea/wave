@@ -101,6 +101,7 @@ static void mac_check_for_updates(const char *current_version, int manual,
 #include "highlight.h"
 #include "input.h"
 #include "input_glfw.h"
+#include "langs.h"
 #include "layout.h"
 #include "lsp.h"
 #include "lsp_manager.h"
@@ -157,6 +158,15 @@ typedef struct {
 
     Popover pop;
     CompleteState comp;
+    LspCompletionItem completion_lsp[COMPLETE_MAX_ITEMS];
+    size_t completion_lsp_count;
+    unsigned int completion_lsp_generation;
+    int completion_resolve_index;
+    int completion_accept_pending;
+    double completion_retry_at;
+    char completion_trigger_character;
+    int completion_member_context;
+    int signature_active;
 
     LspManager lsp;
     WatchService watch;
@@ -1307,14 +1317,26 @@ static CompleteKind complete_kind_from_lsp(int lsp_kind) {
     }
 }
 
-static CompleteItem complete_item_from_lsp(const LspCompletionItem *src) {
-    CompleteItem it;
+static CompleteItem complete_item_from_lsp(const LspCompletionItem *src,
+                                           int member_context) {
+    CompleteItem it = {0};
     snprintf(it.label, sizeof it.label, "%s", src->label);
     snprintf(it.insert_text, sizeof it.insert_text, "%s", src->insert_text);
     snprintf(it.detail, sizeof it.detail, "%s", src->detail);
     snprintf(it.sort_text, sizeof it.sort_text, "%s", src->sort_text);
     it.kind = complete_kind_from_lsp(src->kind);
+    it.scope = complete_scope_from_lsp_kind(src->kind, member_context);
     return it;
+}
+
+static void complete_clear_lsp_source(void) {
+    g.completion_lsp_count = 0;
+    g.completion_lsp_generation = 0;
+    g.completion_resolve_index = -1;
+    g.completion_accept_pending = 0;
+    g.completion_retry_at = 0.0;
+    g.completion_trigger_character = 0;
+    g.completion_member_context = 0;
 }
 
 /* Populate a fresh generation from whichever local source applies: the
@@ -1322,6 +1344,7 @@ static CompleteItem complete_item_from_lsp(const LspCompletionItem *src) {
  * buffer's own words. Used when no LSP server is available/ready for this
  * editor — the same fallback relationship `gd`/`gh` already have. */
 static void complete_source_locally(Editor *e, unsigned int generation, const char *prefix) {
+    complete_clear_lsp_source();
     CompleteItem items[COMPLETE_MAX_ITEMS];
     int n = 0;
     if (e->hl) {
@@ -1336,6 +1359,7 @@ static void complete_source_locally(Editor *e, unsigned int generation, const ch
             it->kind = idents[i].kind == HL_IDENT_TYPE ? COMPLETE_KIND_TYPE :
                        idents[i].kind == HL_IDENT_PROPERTY ? COMPLETE_KIND_FIELD :
                        COMPLETE_KIND_VARIABLE;
+            it->scope = COMPLETE_SCOPE_UNKNOWN;
             n++;
         }
     } else {
@@ -1351,13 +1375,27 @@ static void complete_source_locally(Editor *e, unsigned int generation, const ch
  * an LSP server when one is running and ready, falling back to local
  * sourcing otherwise. LSP results arrive later via the per-frame drain in
  * the main loop. */
-static void complete_trigger(Editor *e, size_t word_start, const char *prefix) {
+static void complete_trigger(Editor *e, size_t word_start, const char *prefix,
+                             char trigger_character) {
+    int member_context = trigger_character == '.';
+    if (!member_context && e && e->buf && word_start > 0) {
+        char previous = 0;
+        pt_read(buffer_pt(e->buf), word_start - 1, 1, &previous);
+        member_context = previous == '.';
+    }
+    complete_clear_lsp_source();
     unsigned int gen = complete_begin(&g.comp, word_start, prefix);
     Lsp *l = lsp_manager_for(&g.lsp, e);
     if (l && lsp_ready(l)) {
+        g.completion_trigger_character = trigger_character;
+        g.completion_member_context = member_context;
         size_t row, col;
         pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
-        lsp_manager_request_completion(&g.lsp, e, (int)row, (int)col);
+        if (trigger_character)
+            lsp_manager_request_triggered_completion(&g.lsp, e, (int)row,
+                                                     (int)col, trigger_character);
+        else
+            lsp_manager_request_completion(&g.lsp, e, (int)row, (int)col);
         complete_set_loading(&g.comp, gen);
         return;
     }
@@ -1367,12 +1405,16 @@ static void complete_trigger(Editor *e, size_t word_start, const char *prefix) {
 /* Called after every insert-mode edit that could change the identifier
  * under the cursor: closes the menu if there's no longer a word there,
  * re-filters locally if the word boundary is unchanged, or (re)triggers a
- * source fetch once 2+ identifier characters have been typed. */
-static void complete_after_insert(Editor *e) {
+ * source fetch once an identifier character has been typed. */
+static void complete_after_insert(Editor *e, unsigned int trigger_character) {
     if (!e || !e->buf) { complete_close(&g.comp); return; }
     const PieceTable *pt = buffer_pt(e->buf);
     size_t ws = complete_prefix_start(pt, e->cursor);
     size_t plen = e->cursor - ws;
+    if (trigger_character == '.') {
+        complete_trigger(e, e->cursor, "", '.');
+        return;
+    }
     if (plen == 0) { complete_close(&g.comp); return; }
 
     char prefix[COMPLETE_LABEL_CAP];
@@ -1381,24 +1423,63 @@ static void complete_after_insert(Editor *e) {
     prefix[n] = '\0';
 
     if (g.comp.active && g.comp.word_start == ws) {
+        if (trigger_character != '.') g.completion_trigger_character = 0;
         complete_set_prefix(&g.comp, prefix);
-        if (g.comp.nfiltered == 0) complete_close(&g.comp);
+        if (g.comp.nfiltered == 0 && !g.comp.loading)
+            complete_trigger(e, ws, prefix, 0);
         return;
     }
-    if (plen < 2) { complete_close(&g.comp); return; }
-    complete_trigger(e, ws, prefix);
+    complete_trigger(e, ws, prefix, 0);
+}
+
+static void complete_apply_current(Editor *e) {
+    CompleteEdit edit;
+    if (complete_accept(&g.comp, e->cursor, &edit)) {
+        int raw_index = g.comp.filtered[g.comp.sel];
+        const LspCompletionItem *lsp_item = NULL;
+        if (g.completion_lsp_generation == g.comp.generation &&
+            raw_index >= 0 && (size_t)raw_index < g.completion_lsp_count)
+            lsp_item = &g.completion_lsp[raw_index];
+        lsp_manager_apply_completion(e, edit.start, edit.end, edit.text, lsp_item);
+    }
+    complete_close(&g.comp);
+    complete_clear_lsp_source();
 }
 
 static void complete_accept_current(Editor *e) {
-    CompleteEdit edit;
-    if (complete_accept(&g.comp, e->cursor, &edit)) {
-        e->group_open = 0;
-        ed_delete_range(e, edit.start, edit.end);
-        e->cursor = edit.start;
-        ed_insert(e, edit.text, strlen(edit.text));
-        e->group_open = 0;
+    if (!g.comp.active || g.comp.nfiltered == 0) return;
+    int raw_index = g.comp.filtered[g.comp.sel];
+    if (g.completion_lsp_generation == g.comp.generation &&
+        raw_index >= 0 && (size_t)raw_index < g.completion_lsp_count) {
+        LspCompletionItem *item = &g.completion_lsp[raw_index];
+        /* TypeScript marks cross-module suggestions with a source detail.
+         * Resolve those before accepting so their auto-import edit is kept;
+         * ordinary locals/members should accept immediately with no extra
+         * language-server round trip. */
+        if (item->resolve_id > 0 && item->detail[0] && !item->resolved) {
+            if (lsp_manager_resolve_completion(&g.lsp, e, item)) {
+                g.completion_resolve_index = raw_index;
+                g.completion_accept_pending = 1;
+                g.comp.loading = 1;
+                return;
+            }
+        }
     }
-    complete_close(&g.comp);
+    complete_apply_current(e);
+}
+
+static void signature_after_insert(Editor *e, unsigned int cp) {
+    if (!e || !e->buf || !e->path) return;
+    if (cp == ')') {
+        g.signature_active = 0;
+        popover_close(&g.pop);
+        return;
+    }
+    if (cp != '(' && cp != ',' && cp != '<') return;
+    size_t row, col;
+    pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+    g.signature_active = lsp_manager_request_signature_help(
+        &g.lsp, e, (int)row, (int)col, (char)cp, cp == ',');
 }
 
 /* ---- GLFW callbacks ---- */
@@ -1475,7 +1556,8 @@ static void on_char(GLFWwindow *w, unsigned int cp) {
     if (plan.target == INPUT_TEXT_EDITOR_INSERT) {
         Editor *ie = cur();
         editor_apply_text_input(ie, cp);
-        complete_after_insert(ie);
+        complete_after_insert(ie, cp);
+        signature_after_insert(ie, cp);
         return;
     }
     vim_normal_char(cp); /* NORMAL or VISUAL */
@@ -1713,6 +1795,19 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
 
     if (plan.target != INPUT_KEY_TARGET_EDITOR) return;
 
+    if (g.modal.mode == MODE_INSERT && key == GLFW_KEY_SPACE &&
+        (mods & GLFW_MOD_CONTROL) && !(mods & GLFW_MOD_SUPER)) {
+        const PieceTable *pt = buffer_pt(e->buf);
+        size_t ws = complete_prefix_start(pt, e->cursor);
+        size_t plen = e->cursor - ws;
+        char prefix[COMPLETE_LABEL_CAP];
+        size_t n = plen < sizeof prefix - 1 ? plen : sizeof prefix - 1;
+        pt_read(pt, ws, n, prefix);
+        prefix[n] = '\0';
+        complete_trigger(e, ws, prefix, 0);
+        return;
+    }
+
     if (g.modal.mode == MODE_INSERT && complete_is_active(&g.comp)) {
         if (key == GLFW_KEY_ESCAPE) { complete_close(&g.comp); return; }
         if (key == GLFW_KEY_UP ||
@@ -1731,9 +1826,13 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         }
     }
 
-    if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
-                          g.modal.mode == MODE_INSERT))
+    if (g.modal.mode == MODE_INSERT && key == GLFW_KEY_ESCAPE && g.pop.active) {
+        g.signature_active = 0;
+        popover_close(&g.pop);
+    } else if (popover_apply_key(&g.pop, wave_popover_key_from_glfw(key),
+                                 g.modal.mode == MODE_INSERT)) {
         return;
+    }
 
     if (key == GLFW_KEY_ESCAPE) {
         modal_enter_normal(&g.modal);
@@ -1747,8 +1846,12 @@ static void on_key(GLFWwindow *w, int key, int sc, int action, int mods) {
         editor_apply_insert_key(e, ekey);
         /* backspace can shrink the prefix without leaving the word; anything
          * else (arrows, enter, tab, delete) invalidates the menu. */
-        if (ekey == EDITOR_KEY_BACKSPACE) complete_after_insert(e);
+        if (ekey == EDITOR_KEY_BACKSPACE) complete_after_insert(e, 0);
         else complete_close(&g.comp);
+        if (ekey != EDITOR_KEY_BACKSPACE && ekey != EDITOR_KEY_NONE) {
+            g.signature_active = 0;
+            popover_close(&g.pop);
+        }
         return;
     }
 
@@ -2107,9 +2210,29 @@ static void draw_status_line(Renderer *r, Font *font, Editor *e, float fb_w,
                                        .g = 0.74f,
                                        .b = 0.80f};
     } else {
+        char completion_info[128];
+        const Language *language = lang_detect(e ? e->path : NULL);
+        const char *info = g.info;
+        LspProgress progress;
+        if (lsp_manager_progress(&g.lsp, e, &progress) && progress.active) {
+            snprintf(completion_info, sizeof completion_info, "%s%s%s",
+                     progress.title[0] ? progress.title : "Language server",
+                     progress.message[0] ? "  " : "", progress.message);
+            info = completion_info;
+        } else if (g.completion_accept_pending) {
+            snprintf(completion_info, sizeof completion_info,
+                     "%s: resolving auto-import...",
+                     language ? language->name : "language server");
+            info = completion_info;
+        } else if (complete_status_text(&g.comp,
+                                        language ? language->name : NULL,
+                                        completion_info,
+                                        sizeof completion_info)) {
+            info = completion_info;
+        }
         status_line = view_editor_status_line(
             status, sizeof status, e, g.cmd.active ? command_text(&g.cmd) : NULL,
-            g.info, mode_name(g.modal.mode), diagnostics,
+            info, mode_name(g.modal.mode), diagnostics,
             tabs_active_index(&g.tabs), tabs_count(&g.tabs));
     }
     draw_text_run(font, r, status, (int)strlen(status), pad,
@@ -2571,16 +2694,74 @@ int main(int argc, char **argv) {
         if (lsp_plan.show_hover) {
             popover_show_hover(&g.pop, lsp_plan.hover);
         }
+        if (lsp_plan.show_signature && g.signature_active) {
+            popover_show_signature(&g.pop, lsp_plan.signature);
+            if (!lsp_plan.signature[0]) g.signature_active = 0;
+        }
+
+        LspCompletionItem resolved;
+        if (lsp_manager_take_resolved_completion(&g.lsp, e, &resolved)) {
+            int idx = g.completion_resolve_index;
+            if (g.comp.active &&
+                g.completion_lsp_generation == g.comp.generation &&
+                idx >= 0 && (size_t)idx < g.completion_lsp_count) {
+                if (resolved.resolve_id == 0)
+                    resolved.resolve_id = g.completion_lsp[idx].resolve_id;
+                g.completion_lsp[idx] = resolved;
+                g.comp.items[idx] = complete_item_from_lsp(
+                    &resolved, g.completion_member_context);
+                g.comp.loading = 0;
+                g.completion_resolve_index = -1;
+                if (g.completion_accept_pending) {
+                    g.completion_accept_pending = 0;
+                    complete_apply_current(e);
+                }
+            }
+        }
+
+        if (g.comp.active && g.comp.loading && g.completion_retry_at > 0.0 &&
+            glfwGetTime() >= g.completion_retry_at) {
+            size_t row, col;
+            pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+            if (g.completion_trigger_character)
+                lsp_manager_request_triggered_completion(
+                    &g.lsp, e, (int)row, (int)col,
+                    g.completion_trigger_character);
+            else
+                lsp_manager_request_completion(&g.lsp, e, (int)row, (int)col);
+            g.completion_retry_at = 0.0;
+        }
 
         /* pick up an async LSP completion reply, if one is in flight */
         if (g.comp.active && g.comp.loading) {
-            LspCompletionItem raw[COMPLETE_MAX_ITEMS];
             size_t nraw = 0;
-            if (lsp_manager_take_completions(&g.lsp, e, raw, COMPLETE_MAX_ITEMS, &nraw)) {
-                CompleteItem items[COMPLETE_MAX_ITEMS];
-                for (size_t i = 0; i < nraw; i++) items[i] = complete_item_from_lsp(&raw[i]);
-                complete_set_items(&g.comp, g.comp.generation, items, (int)nraw);
-                if (g.comp.nfiltered == 0) complete_close(&g.comp);
+            if (lsp_manager_take_completions(&g.lsp, e, g.completion_lsp,
+                                             COMPLETE_MAX_ITEMS, &nraw)) {
+                if (nraw == 0) {
+                    if (complete_empty_reply(&g.comp, g.comp.generation, 12))
+                        g.completion_retry_at = glfwGetTime() + 0.10;
+                    else {
+                        complete_close(&g.comp);
+                        complete_clear_lsp_source();
+                    }
+                } else {
+                    CompleteItem *items = malloc(nraw * sizeof *items);
+                    if (!items) {
+                        complete_close(&g.comp);
+                        complete_clear_lsp_source();
+                    } else {
+                        for (size_t i = 0; i < nraw; i++)
+                            items[i] = complete_item_from_lsp(
+                                &g.completion_lsp[i], g.completion_member_context);
+                        g.completion_lsp_count = nraw;
+                        g.completion_lsp_generation = g.comp.generation;
+                        complete_set_items(&g.comp, g.comp.generation, items,
+                                           (int)nraw);
+                        g.completion_retry_at = 0.0;
+                        if (g.comp.nfiltered == 0) complete_close(&g.comp);
+                        free(items);
+                    }
+                }
             }
         }
 

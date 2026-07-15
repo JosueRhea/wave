@@ -73,7 +73,26 @@ void popover_show_base(Popover *p, const char *base, int loading) {
 void popover_show_hover(Popover *p, const char *hover) {
     if (!p || !p->active) return;
     popover_set_loading(p, 0);
-    popover_compose(p, hover && hover[0] ? hover : NULL);
+    if (!hover || !hover[0]) {
+        popover_compose(p, NULL);
+        return;
+    }
+    char fallback[sizeof p->base];
+    snprintf(fallback, sizeof fallback, "%s", p->base);
+    int generic_node = !strncmp(fallback, "node: ", 6);
+    popover_set_base(p, hover);
+    popover_compose(p, generic_node ? NULL : fallback);
+}
+
+void popover_show_signature(Popover *p, const char *signature) {
+    if (!p) return;
+    if (!signature || !signature[0]) {
+        popover_close(p);
+        return;
+    }
+    popover_set_base(p, signature);
+    popover_set_loading(p, 0);
+    popover_compose(p, NULL);
 }
 
 void popover_show_encoded_base(Popover *p, const char *encoded, int scroll) {

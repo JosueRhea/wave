@@ -141,11 +141,116 @@ int lsp_manager_request_completion(LspManager *m, Editor *e, int row, int col) {
     return 1;
 }
 
+int lsp_manager_request_triggered_completion(LspManager *m, Editor *e, int row,
+                                             int col, char trigger_character) {
+    Lsp *l = lsp_manager_for(m, e);
+    if (!l || !lsp_ready(l) || !e || !e->path) return 0;
+    lsp_manager_push_change(m, e);
+    char *uri = path_to_uri(e->path);
+    lsp_completion_triggered(l, uri, row, col, trigger_character);
+    free(uri);
+    return 1;
+}
+
+int lsp_manager_resolve_completion(LspManager *m, Editor *e,
+                                   const LspCompletionItem *item) {
+    Lsp *l = lsp_manager_for(m, e);
+    if (!l || !lsp_ready(l) || !item || item->resolve_id <= 0) return 0;
+    lsp_completion_resolve(l, item);
+    return 1;
+}
+
 int lsp_manager_take_completions(LspManager *m, Editor *e, LspCompletionItem *out,
                                  size_t max, size_t *n) {
     Lsp *l = lsp_manager_for(m, e);
     if (!l) return 0;
     return lsp_take_completions(l, out, max, n);
+}
+
+int lsp_manager_take_resolved_completion(LspManager *m, Editor *e,
+                                         LspCompletionItem *out) {
+    Lsp *l = lsp_manager_for(m, e);
+    return l ? lsp_take_resolved_completion(l, out) : 0;
+}
+
+int lsp_manager_progress(LspManager *m, Editor *e, LspProgress *out) {
+    Lsp *l = lsp_manager_for(m, e);
+    return l ? lsp_progress(l, out) : 0;
+}
+
+int lsp_manager_request_signature_help(LspManager *m, Editor *e, int row, int col,
+                                       char trigger_character, int retrigger) {
+    Lsp *l = lsp_manager_for(m, e);
+    if (!l || !lsp_ready(l) || !e || !e->path) return 0;
+    lsp_manager_push_change(m, e);
+    char *uri = path_to_uri(e->path);
+    lsp_signature_help(l, uri, row, col, trigger_character, retrigger);
+    free(uri);
+    return 1;
+}
+
+static size_t lsp_edit_offset(const PieceTable *pt, int line, int col) {
+    size_t lines = pt_line_count(pt);
+    size_t row = line < 0 ? 0 : (size_t)line;
+    if (row >= lines) return pt_length(pt);
+    size_t start = pt_line_start(pt, row);
+    size_t end = row + 1 < lines ? pt_line_start(pt, row + 1) : pt_length(pt);
+    size_t off = start + (size_t)(col > 0 ? col : 0);
+    return off < end ? off : end;
+}
+
+int lsp_manager_apply_completion(Editor *e, size_t primary_start,
+                                 size_t primary_end, const char *primary_text,
+                                 const LspCompletionItem *item) {
+    if (!e || !e->buf || !primary_text || primary_end < primary_start) return 0;
+    typedef struct { size_t start, end; const char *text; int primary; } PendingEdit;
+    PendingEdit edits[1 + LSP_MAX_ADDITIONAL_EDITS];
+    int n = 1;
+    edits[0] = (PendingEdit){primary_start, primary_end, primary_text, 1};
+
+    const PieceTable *pt = buffer_pt(e->buf);
+    int nadditional = item ? item->nadditional_edits : 0;
+    if (nadditional > LSP_MAX_ADDITIONAL_EDITS)
+        nadditional = LSP_MAX_ADDITIONAL_EDITS;
+    for (int i = 0; i < nadditional; i++) {
+        const LspTextEdit *src = &item->additional_edits[i];
+        edits[n].start = lsp_edit_offset(pt, src->start_line, src->start_col);
+        edits[n].end = lsp_edit_offset(pt, src->end_line, src->end_col);
+        edits[n].text = src->new_text;
+        edits[n].primary = 0;
+        n++;
+    }
+
+    size_t final_cursor = primary_start + strlen(primary_text);
+    for (int i = 1; i < n; i++) {
+        if (edits[i].end <= primary_start) {
+            long delta = (long)strlen(edits[i].text) -
+                         (long)(edits[i].end - edits[i].start);
+            long moved = (long)final_cursor + delta;
+            final_cursor = (size_t)(moved < 0 ? 0 : moved);
+        }
+    }
+    for (int i = 1; i < n; i++) {
+        PendingEdit edit = edits[i];
+        int j = i - 1;
+        while (j >= 0 && edits[j].start < edit.start) {
+            edits[j + 1] = edits[j];
+            j--;
+        }
+        edits[j + 1] = edit;
+    }
+
+    e->group_open = 0;
+    for (int i = 0; i < n; i++) {
+        if (edits[i].end > edits[i].start)
+            ed_delete_range(e, edits[i].start, edits[i].end);
+        if (edits[i].text[0])
+            ed_insert_at(e, edits[i].start, edits[i].text, strlen(edits[i].text));
+    }
+    e->cursor = final_cursor;
+    e->anchor = final_cursor;
+    e->group_open = 0;
+    return 1;
 }
 
 int lsp_manager_request_definition_at_cursor(LspManager *m, Editor *e,
@@ -188,6 +293,15 @@ LspManagerUpdate lsp_manager_update_ui(LspManager *m, Editor *active) {
                                     update.hover, sizeof update.hover);
     update.has_definition = (events & LSP_MANAGER_EVENT_DEFINITION) != 0;
     update.has_hover = (events & LSP_MANAGER_EVENT_HOVER) != 0;
+    if (m) {
+        for (int i = 0; i < m->nservers; i++) {
+            Lsp *l = m->servers[i].l;
+            if (l && lsp_take_signature_help(l, &update.signature)) {
+                update.has_signature = 1;
+                break;
+            }
+        }
+    }
     return update;
 }
 
@@ -197,9 +311,21 @@ LspManagerUiPlan lsp_manager_ui_plan(LspManagerUpdate update) {
         plan.open_definition = 1;
         plan.definition = update.definition;
     }
-    if (update.has_hover && update.hover[0]) {
+    if (update.has_hover) {
         plan.show_hover = 1;
         snprintf(plan.hover, sizeof plan.hover, "%s", update.hover);
+    }
+    if (update.has_signature) {
+        plan.show_signature = 1;
+        if (update.signature.label[0]) {
+            if (update.signature.signature_count > 1)
+                snprintf(plan.signature, sizeof plan.signature, "%s  [%d/%d]",
+                         update.signature.label, update.signature.active_signature + 1,
+                         update.signature.signature_count);
+            else
+                snprintf(plan.signature, sizeof plan.signature, "%s",
+                         update.signature.label);
+        }
     }
     return plan;
 }

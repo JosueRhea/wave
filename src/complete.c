@@ -3,6 +3,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned char pbyte(const PieceTable *pt, size_t i) {
@@ -23,6 +24,7 @@ void complete_close(CompleteState *c) {
     if (!c) return;
     c->active = 0;
     c->loading = 0;
+    c->empty_replies = 0;
     c->nitems = 0;
     c->nfiltered = 0;
     c->sel = 0;
@@ -45,6 +47,7 @@ unsigned int complete_begin(CompleteState *c, size_t word_start, const char *pre
     c->generation++;
     c->active = 1;
     c->loading = 0;
+    c->empty_replies = 0;
     c->word_start = word_start;
     snprintf(c->prefix, sizeof c->prefix, "%s", prefix ? prefix : "");
     c->nitems = 0;
@@ -57,6 +60,31 @@ unsigned int complete_begin(CompleteState *c, size_t word_start, const char *pre
 void complete_set_loading(CompleteState *c, unsigned int generation) {
     if (!c || !c->active || generation != c->generation) return;
     c->loading = 1;
+}
+
+int complete_empty_reply(CompleteState *c, unsigned int generation,
+                         int max_retries) {
+    if (!c || !c->active || generation != c->generation) return 0;
+    if (max_retries < 0) max_retries = 0;
+    if (c->empty_replies >= max_retries) {
+        c->loading = 0;
+        return 0;
+    }
+    c->empty_replies++;
+    c->loading = 1;
+    return 1;
+}
+
+int complete_status_text(const CompleteState *c, const char *language,
+                         char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    if (!c || !c->active || !c->loading) return 0;
+    const char *source = language && language[0] ? language : "language server";
+    snprintf(out, cap, "%s: %s", source,
+             c->empty_replies > 0 ? "indexing project..."
+                                  : "loading suggestions...");
+    return 1;
 }
 
 /* ----- filter + sort ----- */
@@ -90,32 +118,55 @@ static int item_key_cmp(const CompleteItem *a, const CompleteItem *b) {
     return strcmp(ka, kb);
 }
 
+typedef struct { int idx, tier; } FilterEntry;
+static const CompleteItem *filter_sort_items;
+
+static int scope_rank(CompleteScope scope) {
+    switch (scope) {
+    case COMPLETE_SCOPE_MEMBER: return 0;
+    case COMPLETE_SCOPE_UNKNOWN: return 1;
+    case COMPLETE_SCOPE_OTHER: return 2;
+    }
+    return 1;
+}
+
+static int kind_rank(CompleteKind kind) {
+    switch (kind) {
+    case COMPLETE_KIND_FUNCTION: return 0;
+    case COMPLETE_KIND_FIELD: return 1;
+    case COMPLETE_KIND_VARIABLE: return 2;
+    case COMPLETE_KIND_TYPE: return 3;
+    case COMPLETE_KIND_MODULE: return 4;
+    case COMPLETE_KIND_KEYWORD: return 5;
+    case COMPLETE_KIND_TEXT:
+    default: return 6;
+    }
+}
+
+static int filter_entry_cmp(const void *ap, const void *bp) {
+    const FilterEntry *a = ap, *b = bp;
+    const CompleteItem *ia = &filter_sort_items[a->idx];
+    const CompleteItem *ib = &filter_sort_items[b->idx];
+    int by_scope = scope_rank(ia->scope) - scope_rank(ib->scope);
+    if (by_scope) return by_scope;
+    int by_kind = kind_rank(ia->kind) - kind_rank(ib->kind);
+    if (by_kind) return by_kind;
+    if (a->tier != b->tier) return a->tier - b->tier;
+    int by_key = item_key_cmp(ia, ib);
+    return by_key ? by_key : a->idx - b->idx;
+}
+
 static void refilter(CompleteState *c) {
-    int idx[COMPLETE_MAX_ITEMS];
-    int tiers[COMPLETE_MAX_ITEMS];
+    FilterEntry entries[COMPLETE_MAX_ITEMS];
     int n = 0;
     for (int i = 0; i < c->nitems; i++) {
         int t = tier_of(&c->items[i], c->prefix);
         if (t < 0) continue;
-        idx[n] = i;
-        tiers[n] = t;
-        n++;
+        entries[n++] = (FilterEntry){i, t};
     }
-    /* stable insertion sort by (tier, sort key) — n is capped at
-     * COMPLETE_MAX_ITEMS, so O(n^2) is cheap and needs no extra buffer. */
-    for (int i = 1; i < n; i++) {
-        int ti = tiers[i], vi = idx[i];
-        int j = i - 1;
-        while (j >= 0 && (tiers[j] > ti ||
-               (tiers[j] == ti && item_key_cmp(&c->items[idx[j]], &c->items[vi]) > 0))) {
-            tiers[j + 1] = tiers[j];
-            idx[j + 1] = idx[j];
-            j--;
-        }
-        tiers[j + 1] = ti;
-        idx[j + 1] = vi;
-    }
-    memcpy(c->filtered, idx, (size_t)n * sizeof *idx);
+    filter_sort_items = c->items;
+    qsort(entries, (size_t)n, sizeof *entries, filter_entry_cmp);
+    for (int i = 0; i < n; i++) c->filtered[i] = entries[i].idx;
     c->nfiltered = n;
     if (c->sel >= n) c->sel = n > 0 ? n - 1 : 0;
     if (c->sel < 0) c->sel = 0;
@@ -130,6 +181,7 @@ int complete_set_items(CompleteState *c, unsigned int generation,
     if (n > 0) memcpy(c->items, items, (size_t)n * sizeof *items);
     c->nitems = n;
     c->loading = 0;
+    c->empty_replies = 0;
     c->sel = 0;
     c->scroll = 0;
     refilter(c);
@@ -183,6 +235,20 @@ const char *complete_kind_tag(CompleteKind kind) {
     }
 }
 
+CompleteScope complete_scope_from_lsp_kind(int lsp_kind, int member_context) {
+    if (!member_context) return COMPLETE_SCOPE_UNKNOWN;
+    switch (lsp_kind) {
+    case 2:  /* Method */
+    case 5:  /* Field */
+    case 10: /* Property */
+    case 20: /* EnumMember */
+    case 23: /* Event */
+        return COMPLETE_SCOPE_MEMBER;
+    default:
+        return COMPLETE_SCOPE_OTHER;
+    }
+}
+
 /* ----- plain-text fallback source ----- */
 
 static int word_already_collected(const CompleteItem *out, int n, const char *word) {
@@ -212,6 +278,7 @@ int complete_collect_buffer_words(const char *text, const char *prefix,
                 out[n].detail[0] = '\0';
                 out[n].sort_text[0] = '\0';
                 out[n].kind = COMPLETE_KIND_TEXT;
+                out[n].scope = COMPLETE_SCOPE_UNKNOWN;
                 n++;
             }
         }
@@ -224,16 +291,18 @@ int complete_collect_buffer_words(const char *text, const char *prefix,
 int complete_layout(CompleteState *c, int fb_w, int fb_h, float adv, float line_h,
                     float top_pad, float bar_h, float anchor_x, float cur_top,
                     float left_limit, float fb_scale, CompleteLayout *out) {
-    if (!c || !out || !c->active || c->nfiltered == 0) return 0;
+    if (!c || !out || !c->active || (c->nfiltered == 0 && !c->loading)) return 0;
     memset(out, 0, sizeof *out);
 
-    int longest = 0;
+    int longest = c->nfiltered == 0 ? 24 : 0;
     for (int i = 0; i < c->nfiltered; i++) {
-        int l = (int)strlen(c->items[c->filtered[i]].label) + 4; /* + kind tag/margin */
+        const CompleteItem *it = &c->items[c->filtered[i]];
+        int l = (int)strlen(it->label) + 4; /* + kind tag/margin */
+        if (it->detail[0]) l += 2 + (int)strlen(it->detail);
         if (l > longest) longest = l;
     }
     if (longest < 8) longest = 8;
-    if (longest > COMPLETE_LABEL_CAP) longest = COMPLETE_LABEL_CAP;
+    if (longest > 96) longest = 96;
 
     out->padx = adv * 0.7f;
     out->pady = line_h * 0.25f;
@@ -247,7 +316,7 @@ int complete_layout(CompleteState *c, int fb_w, int fb_h, float adv, float line_
     int fit = fit_below > fit_above ? fit_below : fit_above;
     if (fit < 1) fit = 1;
 
-    int vis = c->nfiltered;
+    int vis = c->nfiltered > 0 ? c->nfiltered : 1;
     if (vis > COMPLETE_MAX_VISIBLE_ROWS) vis = COMPLETE_MAX_VISIBLE_ROWS;
     if (vis > fit) vis = fit;
     complete_set_view(c, vis);

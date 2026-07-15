@@ -18,9 +18,10 @@
 #include <stddef.h>
 #include "piece_table.h"
 
-#define COMPLETE_MAX_ITEMS 128
+#define COMPLETE_MAX_ITEMS 2048
 #define COMPLETE_LABEL_CAP 96
-#define COMPLETE_DETAIL_CAP 64
+#define COMPLETE_INSERT_CAP 256
+#define COMPLETE_DETAIL_CAP 256
 #define COMPLETE_SORT_CAP 32
 #define COMPLETE_MAX_VISIBLE_ROWS 10
 
@@ -36,18 +37,26 @@ typedef enum {
     COMPLETE_KIND_MODULE
 } CompleteKind;
 
+typedef enum {
+    COMPLETE_SCOPE_UNKNOWN,
+    COMPLETE_SCOPE_MEMBER,
+    COMPLETE_SCOPE_OTHER
+} CompleteScope;
+
 typedef struct {
     char label[COMPLETE_LABEL_CAP];        /* shown in the menu */
-    char insert_text[COMPLETE_LABEL_CAP];  /* inserted on accept; label if empty */
+    char insert_text[COMPLETE_INSERT_CAP]; /* inserted on accept; label if empty */
     char detail[COMPLETE_DETAIL_CAP];      /* short type/signature hint, may be empty */
     char sort_text[COMPLETE_SORT_CAP];     /* server sort key, may be empty (falls back to label) */
     CompleteKind kind;
+    CompleteScope scope; /* receiver member vs unrelated suggestion */
 } CompleteItem;
 
 typedef struct {
     int active;
     unsigned int generation;
     int loading; /* an async (LSP) request for the current generation is in flight */
+    int empty_replies; /* bounded warm-up retries for lazy language servers */
 
     size_t word_start;             /* byte offset the replaced range starts at */
     char prefix[COMPLETE_LABEL_CAP]; /* identifier text typed so far, word_start..cursor */
@@ -65,7 +74,7 @@ typedef struct {
 typedef struct {
     size_t start;
     size_t end;
-    char text[COMPLETE_LABEL_CAP];
+    char text[COMPLETE_INSERT_CAP];
 } CompleteEdit;
 
 void complete_init(CompleteState *c);
@@ -84,6 +93,16 @@ unsigned int complete_begin(CompleteState *c, size_t word_start, const char *pre
 /* Mark `generation` as waiting on an async source (drives the "Loading…"
  * affordance); a no-op if `generation` is already stale. */
 void complete_set_loading(CompleteState *c, unsigned int generation);
+
+/* Record an empty async reply. Returns 1 while the caller should retry the
+ * current request, or 0 once `max_retries` has been exhausted. */
+int complete_empty_reply(CompleteState *c, unsigned int generation,
+                         int max_retries);
+
+/* Describe an active asynchronous completion request for status-bar UI.
+ * Returns 0 when there is no loading state to show. */
+int complete_status_text(const CompleteState *c, const char *language,
+                         char *out, size_t cap);
 
 /* Replace the item pool for `generation` and re-filter. Ignored (returns 0)
  * if `generation` is stale or the menu isn't active. */
@@ -104,6 +123,8 @@ void complete_set_view(CompleteState *c, int visible_rows);
 int complete_accept(const CompleteState *c, size_t cursor, CompleteEdit *out);
 
 const char *complete_kind_tag(CompleteKind kind);
+/* Classify an LSP CompletionItemKind in a receiver-member request. */
+CompleteScope complete_scope_from_lsp_kind(int lsp_kind, int member_context);
 
 /* Last-resort source for buffers with no tree-sitter grammar: a capped,
  * deduplicated, prefix-filtered scan of identifier-shaped words in `text`

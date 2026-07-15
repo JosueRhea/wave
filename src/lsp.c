@@ -238,7 +238,7 @@ static const char *jstr(JVal *v) { return (v && v->kind == JSTR) ? v->str : NULL
 static int jint(JVal *v) { return (v && v->kind == JNUM) ? (int)v->num : 0; }
 
 /* ===== client state ===== */
-typedef struct { long id; int kind; } Pending; /* kind: 1=def 2=hover 3=completion */
+typedef struct { long id; int kind; } Pending; /* 1=def 2=hover 3=completion 4=resolve 5=signature */
 typedef struct { char *uri, *lang, *text; } OpenReq;
 typedef struct { char uri[1024]; LspDiag *d; size_t n; } DiagSet;
 
@@ -271,9 +271,12 @@ struct Lsp {
     size_t ndiags;
 
     LspLocation def; int def_ready;
-    char hover[1024]; int hover_ready;
+    char hover[4096]; int hover_ready;
     LspCompletionItem completions[LSP_MAX_COMPLETIONS];
     size_t ncompletions; int completions_ready;
+    LspCompletionItem resolved_completion; int resolved_completion_ready;
+    LspSignatureHelp signature; int signature_ready;
+    LspProgress progress; int progress_seen;
 };
 
 /* ----- low-level io ----- */
@@ -392,12 +395,16 @@ static void send_initialize(Lsp *l, const char *root_uri) {
     sb_str(&p, ",\"rootUri\":");
     if (root_uri) sb_json_str(&p, root_uri); else sb_str(&p, "null");
     sb_str(&p,
-        ",\"capabilities\":{\"textDocument\":{"
+        ",\"capabilities\":{\"window\":{\"workDoneProgress\":true},\"textDocument\":{"
         "\"synchronization\":{\"dynamicRegistration\":false},"
         "\"definition\":{\"dynamicRegistration\":false},"
         "\"hover\":{\"dynamicRegistration\":false,\"contentFormat\":[\"plaintext\",\"markdown\"]},"
         "\"completion\":{\"dynamicRegistration\":false,"
-        "\"completionItem\":{\"snippetSupport\":false}},"
+        "\"completionItem\":{\"snippetSupport\":false,\"resolveSupport\":{"
+        "\"properties\":[\"detail\",\"documentation\",\"additionalTextEdits\"]}}},"
+        "\"signatureHelp\":{\"dynamicRegistration\":false,"
+        "\"signatureInformation\":{\"documentationFormat\":[\"plaintext\",\"markdown\"],"
+        "\"parameterInformation\":{\"labelOffsetSupport\":true}}},"
         "\"publishDiagnostics\":{}}},"
         "\"workspaceFolders\":null}");
     l->init_id = lsp_send_request(l, "initialize", &p);
@@ -440,6 +447,7 @@ Lsp *lsp_start(const char *const argv[], const char *root_uri) {
     l->out_fd = outpipe[0];
     l->alive = 1;
     l->next_id = 1;
+    l->progress.percentage = -1;
     fcntl(l->out_fd, F_SETFL, O_NONBLOCK);
     fcntl(l->in_fd, F_SETFL, O_NONBLOCK); /* writes queue, never block the UI */
 
@@ -536,6 +544,71 @@ void lsp_completion(Lsp *l, const char *uri, int line, int col) {
     send_position_request(l, "textDocument/completion", uri, line, col, 3);
 }
 
+void lsp_completion_triggered(Lsp *l, const char *uri, int line, int col,
+                              char trigger_character) {
+    if (!l || !l->ready) return;
+    Sbuf p = {0};
+    sb_str(&p, "{\"textDocument\":{\"uri\":");
+    sb_json_str(&p, uri);
+    char pos[128];
+    snprintf(pos, sizeof pos,
+             "},\"position\":{\"line\":%d,\"character\":%d},"
+             "\"context\":{\"triggerKind\":2,\"triggerCharacter\":", line, col);
+    sb_str(&p, pos);
+    char trigger[2] = {trigger_character, '\0'};
+    sb_json_str(&p, trigger);
+    sb_str(&p, "}}");
+    long id = lsp_send_request(l, "textDocument/completion", &p);
+    pend_add(l, id, 3);
+    free(p.p);
+}
+
+void lsp_completion_resolve(Lsp *l, const LspCompletionItem *item) {
+    if (!l || !l->ready || !item || item->resolve_id <= 0) return;
+    Sbuf p = {0};
+    sb_str(&p, "{\"label\":");
+    sb_json_str(&p, item->label);
+    char nums[96];
+    snprintf(nums, sizeof nums, ",\"kind\":%d", item->kind);
+    sb_str(&p, nums);
+    if (item->sort_text[0]) {
+        sb_str(&p, ",\"sortText\":");
+        sb_json_str(&p, item->sort_text);
+    }
+    if (item->insert_text[0]) {
+        sb_str(&p, ",\"insertText\":");
+        sb_json_str(&p, item->insert_text);
+    }
+    snprintf(nums, sizeof nums, ",\"data\":{\"cacheId\":%d}}", item->resolve_id);
+    sb_str(&p, nums);
+    long id = lsp_send_request(l, "completionItem/resolve", &p);
+    pend_add(l, id, 4);
+    free(p.p);
+}
+
+void lsp_signature_help(Lsp *l, const char *uri, int line, int col,
+                        char trigger_character, int retrigger) {
+    if (!l || !l->ready) return;
+    Sbuf p = {0};
+    sb_str(&p, "{\"textDocument\":{\"uri\":");
+    sb_json_str(&p, uri);
+    char pos[160];
+    snprintf(pos, sizeof pos,
+             "},\"position\":{\"line\":%d,\"character\":%d},"
+             "\"context\":{\"triggerKind\":%d,\"isRetrigger\":%s",
+             line, col, trigger_character ? 2 : 1, retrigger ? "true" : "false");
+    sb_str(&p, pos);
+    if (trigger_character) {
+        char trigger[2] = {trigger_character, '\0'};
+        sb_str(&p, ",\"triggerCharacter\":");
+        sb_json_str(&p, trigger);
+    }
+    sb_str(&p, "}}");
+    long id = lsp_send_request(l, "textDocument/signatureHelp", &p);
+    pend_add(l, id, 5);
+    free(p.p);
+}
+
 /* ----- uri <-> path ----- */
 static void uri_to_path(const char *uri, char *out, size_t cap) {
     const char *p = uri;
@@ -586,6 +659,64 @@ static void handle_definition(Lsp *l, JVal *result) {
     if (ok) { l->def = loc; l->def_ready = 1; }
 }
 
+static int parse_text_edit(JVal *value, LspTextEdit *out) {
+    if (!value || value->kind != JOBJ || !out) return 0;
+    JVal *range = jget(value, "range");
+    if (!range) range = jget(value, "replace"); /* InsertReplaceEdit */
+    JVal *start = jget(range, "start");
+    JVal *end = jget(range, "end");
+    const char *text = jstr(jget(value, "newText"));
+    if (!start || !end || !text) return 0;
+    memset(out, 0, sizeof *out);
+    out->start_line = jint(jget(start, "line"));
+    out->start_col = jint(jget(start, "character"));
+    out->end_line = jint(jget(end, "line"));
+    out->end_col = jint(jget(end, "character"));
+    snprintf(out->new_text, sizeof out->new_text, "%s", text);
+    return 1;
+}
+
+static int parse_completion_item(JVal *it, LspCompletionItem *out) {
+    const char *label = jstr(jget(it, "label"));
+    if (!label || !out) return 0;
+    /* clangd (and others) pad the label of fallback/identifier-based
+     * completions with a leading space as a UI hint for its own client;
+     * we render the label directly, so strip it. */
+    while (*label == ' ') label++;
+    if (!*label) return 0;
+    memset(out, 0, sizeof *out);
+    snprintf(out->label, sizeof out->label, "%s", label);
+
+    /* Prefer the textEdit's replacement text (what most servers actually
+     * mean to insert) over insertText, falling back to the label. The UI uses
+     * the live identifier range so delayed replies cannot replace stale text. */
+    const char *insert = NULL;
+    JVal *te = jget(it, "textEdit");
+    if (te) insert = jstr(jget(te, "newText"));
+    if (!insert) insert = jstr(jget(it, "insertText"));
+    if (!insert) insert = label;
+    snprintf(out->insert_text, sizeof out->insert_text, "%s", insert);
+
+    const char *detail = jstr(jget(it, "detail"));
+    if (detail) snprintf(out->detail, sizeof out->detail, "%s", detail);
+    const char *sort = jstr(jget(it, "sortText"));
+    if (sort) snprintf(out->sort_text, sizeof out->sort_text, "%s", sort);
+    out->kind = jint(jget(it, "kind"));
+    JVal *data = jget(it, "data");
+    out->resolve_id = jint(jget(data, "cacheId"));
+
+    JVal *edits = jget(it, "additionalTextEdits");
+    if (edits && edits->kind == JARR) {
+        for (int i = 0; i < edits->count &&
+             out->nadditional_edits < LSP_MAX_ADDITIONAL_EDITS; i++) {
+            if (parse_text_edit(jidx(edits, i),
+                                &out->additional_edits[out->nadditional_edits]))
+                out->nadditional_edits++;
+        }
+    }
+    return 1;
+}
+
 /* CompletionList.items or a bare CompletionItem[]; both are valid replies. */
 static void handle_completion(Lsp *l, JVal *result) {
     l->ncompletions = 0;
@@ -595,64 +726,87 @@ static void handle_completion(Lsp *l, JVal *result) {
     if (!arr || arr->kind != JARR) return;
 
     size_t n = 0;
-    for (int i = 0; i < arr->count && n < LSP_MAX_COMPLETIONS; i++) {
-        JVal *it = jidx(arr, i);
-        const char *label = jstr(jget(it, "label"));
-        if (!label) continue;
-        /* clangd (and others) pad the label of fallback/identifier-based
-         * completions with a leading space as a UI hint for its own client;
-         * we render the label directly, so strip it. */
-        while (*label == ' ') label++;
-        if (!*label) continue;
-        LspCompletionItem *out = &l->completions[n];
-        memset(out, 0, sizeof *out);
-        snprintf(out->label, sizeof out->label, "%s", label);
-
-        /* Prefer the textEdit's replacement text (what most servers actually
-         * mean to insert) over insertText, falling back to the label. We
-         * ignore the textEdit's *range* — the editor always replaces the
-         * identifier prefix under the cursor, which covers the common case
-         * (function/variable/property names) without snippet-range logic. */
-        const char *insert = NULL;
-        JVal *te = jget(it, "textEdit");
-        if (te) insert = jstr(jget(te, "newText"));
-        if (!insert) insert = jstr(jget(it, "insertText"));
-        if (!insert) insert = label;
-        snprintf(out->insert_text, sizeof out->insert_text, "%s", insert);
-
-        const char *detail = jstr(jget(it, "detail"));
-        if (detail) snprintf(out->detail, sizeof out->detail, "%s", detail);
-        const char *sort = jstr(jget(it, "sortText"));
-        if (sort) snprintf(out->sort_text, sizeof out->sort_text, "%s", sort);
-        out->kind = jint(jget(it, "kind"));
-        n++;
-    }
+    for (int i = 0; i < arr->count && n < LSP_MAX_COMPLETIONS; i++)
+        if (parse_completion_item(jidx(arr, i), &l->completions[n])) n++;
     l->ncompletions = n;
 }
 
+static void handle_resolved_completion(Lsp *l, JVal *result) {
+    l->resolved_completion_ready = 0;
+    if (!parse_completion_item(result, &l->resolved_completion)) return;
+    l->resolved_completion.resolved = 1;
+    l->resolved_completion_ready = 1;
+}
+
+static void handle_signature_help(Lsp *l, JVal *result) {
+    memset(&l->signature, 0, sizeof l->signature);
+    l->signature_ready = 1; /* a null/empty reply closes an old signature UI */
+    if (!result || result->kind != JOBJ) return;
+    JVal *signatures = jget(result, "signatures");
+    if (!signatures || signatures->kind != JARR || signatures->count == 0) return;
+    int active = jint(jget(result, "activeSignature"));
+    if (active < 0 || active >= signatures->count) active = 0;
+    JVal *signature = jidx(signatures, active);
+    const char *label = jstr(jget(signature, "label"));
+    if (!label) return;
+    snprintf(l->signature.label, sizeof l->signature.label, "%s", label);
+    l->signature.active_signature = active;
+    l->signature.signature_count = signatures->count;
+    JVal *active_parameter = jget(result, "activeParameter");
+    if (!active_parameter) active_parameter = jget(signature, "activeParameter");
+    l->signature.active_parameter = jint(active_parameter);
+}
+
+void lsp_format_hover_text(const char *markdown, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!markdown) return;
+
+    size_t o = 0;
+    const char *s = markdown;
+    while (*s && o + 1 < cap) {
+        const char *line = s;
+        const char *end = strchr(s, '\n');
+        if (!end) end = s + strlen(s);
+        const char *trim = line;
+        while (trim < end && (*trim == ' ' || *trim == '\t' || *trim == '\r')) trim++;
+        int fence = end - trim >= 3 && !strncmp(trim, "```", 3);
+        if (!fence) {
+            while (o > 0 && out[o - 1] == ' ') o--;
+            for (const char *p = line; p < end && o + 1 < cap; p++) {
+                char c = *p;
+                if (c == '\r' || c == '`') continue;
+                if (c == '\t') c = ' ';
+                if (c == ' ' && o > 0 && out[o - 1] == ' ') continue;
+                out[o++] = c;
+            }
+            if (*end == '\n' && o + 1 < cap) {
+                int trailing_newlines = 0;
+                while ((size_t)trailing_newlines < o &&
+                       out[o - 1 - (size_t)trailing_newlines] == '\n')
+                    trailing_newlines++;
+                if (trailing_newlines < 2) out[o++] = '\n';
+            }
+        }
+        s = *end == '\n' ? end + 1 : end;
+    }
+    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '\n')) o--;
+    out[o] = '\0';
+}
+
 static void extract_hover_text(JVal *contents, char *out, size_t cap) {
+    if (!out || cap == 0) return;
     out[0] = '\0';
     if (!contents) return;
     const char *s = NULL;
     if (contents->kind == JSTR) s = jstr(contents);
-    else if (contents->kind == JOBJ) {
-        JVal *val = jget(contents, "value");
-        s = jstr(val);
-    } else if (contents->kind == JARR && contents->count > 0) {
+    else if (contents->kind == JOBJ) s = jstr(jget(contents, "value"));
+    else if (contents->kind == JARR && contents->count > 0) {
         JVal *first = jidx(contents, 0);
         if (first->kind == JSTR) s = jstr(first);
         else s = jstr(jget(first, "value"));
     }
-    if (!s) return;
-    /* flatten to a single status-bar line */
-    size_t o = 0;
-    for (; *s && o + 1 < cap; s++) {
-        char c = (*s == '\n' || *s == '\r' || *s == '\t') ? ' ' : *s;
-        if (c == ' ' && o > 0 && out[o-1] == ' ') continue; /* squeeze spaces */
-        out[o++] = c;
-    }
-    while (o > 0 && out[o-1] == ' ') o--;
-    out[o] = '\0';
+    lsp_format_hover_text(s, out, cap);
 }
 
 static void store_diagnostics(Lsp *l, const char *uri, JVal *arr) {
@@ -699,6 +853,42 @@ static void dispatch(Lsp *l, JVal *msg) {
             JVal *params = jget(msg, "params");
             const char *uri = jstr(jget(params, "uri"));
             if (uri) store_diagnostics(l, uri, jget(params, "diagnostics"));
+        } else if (m && !strcmp(m, "$/progress")) {
+            JVal *params = jget(msg, "params");
+            JVal *value = jget(params, "value");
+            const char *kind = jstr(jget(value, "kind"));
+            if (kind && !strcmp(kind, "begin")) {
+                memset(&l->progress, 0, sizeof l->progress);
+                l->progress.active = 1;
+                l->progress.percentage = -1;
+                const char *title = jstr(jget(value, "title"));
+                const char *message = jstr(jget(value, "message"));
+                snprintf(l->progress.title, sizeof l->progress.title, "%s",
+                         title ? title : "Language server");
+                snprintf(l->progress.message, sizeof l->progress.message, "%s",
+                         message ? message : "");
+                JVal *percentage = jget(value, "percentage");
+                if (percentage && percentage->kind == JNUM)
+                    l->progress.percentage = jint(percentage);
+                l->progress_seen = 1;
+            } else if (kind && !strcmp(kind, "report")) {
+                const char *message = jstr(jget(value, "message"));
+                if (message)
+                    snprintf(l->progress.message, sizeof l->progress.message,
+                             "%s", message);
+                JVal *percentage = jget(value, "percentage");
+                if (percentage && percentage->kind == JNUM)
+                    l->progress.percentage = jint(percentage);
+                l->progress_seen = 1;
+            } else if (kind && !strcmp(kind, "end")) {
+                const char *message = jstr(jget(value, "message"));
+                if (message)
+                    snprintf(l->progress.message, sizeof l->progress.message,
+                             "%s", message);
+                l->progress.active = 0;
+                l->progress.percentage = 100;
+                l->progress_seen = 1;
+            }
         }
         /* server-initiated requests (with an id) get a benign empty reply */
         if (id && id->kind == JNUM) {
@@ -731,8 +921,10 @@ static void dispatch(Lsp *l, JVal *msg) {
         if (kind == 1) handle_definition(l, result);
         else if (kind == 2) { extract_hover_text(jget(msg, "result") ? jget(jget(msg,"result"),"contents") : NULL,
                                                   l->hover, sizeof l->hover);
-                              if (l->hover[0]) l->hover_ready = 1; }
+                              l->hover_ready = 1; }
         else if (kind == 3) handle_completion(l, result);
+        else if (kind == 4) handle_resolved_completion(l, result);
+        else if (kind == 5) handle_signature_help(l, result);
     }
 }
 
@@ -810,6 +1002,26 @@ int lsp_take_completions(Lsp *l, LspCompletionItem *out, size_t max, size_t *n) 
     for (size_t i = 0; i < got; i++) out[i] = l->completions[i];
     if (n) *n = got;
     l->completions_ready = 0;
+    return 1;
+}
+
+int lsp_take_resolved_completion(Lsp *l, LspCompletionItem *out) {
+    if (!l || !out || !l->resolved_completion_ready) return 0;
+    *out = l->resolved_completion;
+    l->resolved_completion_ready = 0;
+    return 1;
+}
+
+int lsp_take_signature_help(Lsp *l, LspSignatureHelp *out) {
+    if (!l || !out || !l->signature_ready) return 0;
+    *out = l->signature;
+    l->signature_ready = 0;
+    return 1;
+}
+
+int lsp_progress(const Lsp *l, LspProgress *out) {
+    if (!l || !out || !l->progress_seen) return 0;
+    *out = l->progress;
     return 1;
 }
 

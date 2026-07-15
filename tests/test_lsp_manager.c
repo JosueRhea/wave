@@ -58,6 +58,7 @@ int main(void) {
     LspManagerUpdate update = lsp_manager_update_ui(&m, &e);
     CHECK(!update.has_definition);
     CHECK(!update.has_hover);
+    CHECK(!update.has_signature);
     CHECK_STR(update.hover, "");
     editor_close(&e);
 
@@ -68,6 +69,7 @@ int main(void) {
     LspManagerUiPlan plan = lsp_manager_ui_plan(update);
     CHECK(!plan.open_definition);
     CHECK(!plan.show_hover);
+    CHECK(!plan.show_signature);
 
     update.has_definition = 1;
     snprintf(update.definition.path, sizeof update.definition.path, "%s", "/tmp/target.c");
@@ -75,6 +77,11 @@ int main(void) {
     update.definition.col = 3;
     update.has_hover = 1;
     snprintf(update.hover, sizeof update.hover, "%s", "hover text");
+    update.has_signature = 1;
+    snprintf(update.signature.label, sizeof update.signature.label, "%s",
+             "addNumbers(a: number, b: number): number");
+    update.signature.signature_count = 2;
+    update.signature.active_signature = 1;
     plan = lsp_manager_ui_plan(update);
     CHECK(plan.open_definition);
     CHECK_STR(plan.definition.path, "/tmp/target.c");
@@ -82,12 +89,44 @@ int main(void) {
     CHECK_EQ(plan.definition.col, 3);
     CHECK(plan.show_hover);
     CHECK_STR(plan.hover, "hover text");
+    CHECK(plan.show_signature);
+    CHECK(strstr(plan.signature, "addNumbers") != NULL);
+    CHECK(strstr(plan.signature, "[2/2]") != NULL);
 
     update.definition.path[0] = '\0';
     update.hover[0] = '\0';
+    update.has_signature = 0;
     plan = lsp_manager_ui_plan(update);
     CHECK(!plan.open_definition);
+    CHECK(plan.show_hover); /* empty LSP reply still clears the loading state */
+    CHECK_STR(plan.hover, "");
+    CHECK(!plan.show_signature);
+
+    update.has_hover = 0;
+    plan = lsp_manager_ui_plan(update);
     CHECK(!plan.show_hover);
+
+    Editor completion_editor;
+    fill(&completion_editor, "const x = importedVal;\n");
+    size_t primary_start = strlen("const x = ");
+    size_t primary_end = primary_start + strlen("importedVal");
+    LspCompletionItem completion = {0};
+    completion.nadditional_edits = 1;
+    snprintf(completion.additional_edits[0].new_text,
+             sizeof completion.additional_edits[0].new_text,
+             "%s", "import { importedValue } from \"./util\";\n");
+    CHECK(lsp_manager_apply_completion(&completion_editor, primary_start,
+                                       primary_end, "importedValue", &completion));
+    char *completed_text = editor_text(&completion_editor);
+    CHECK_STR(completed_text,
+              "import { importedValue } from \"./util\";\n"
+              "const x = importedValue;\n");
+    CHECK_EQ(completion_editor.cursor,
+             strlen("import { importedValue } from \"./util\";\n") +
+             primary_start + strlen("importedValue"));
+    CHECK_EQ(completion_editor.anchor, completion_editor.cursor);
+    free(completed_text);
+    editor_close(&completion_editor);
 
     lsp_manager_shutdown(&m);
 

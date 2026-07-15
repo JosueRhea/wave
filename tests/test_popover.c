@@ -39,7 +39,8 @@ int main(void) {
     popover_show_hover(&p, "hover");
     CHECK(p.active);
     CHECK(!p.loading);
-    CHECK_STR(p.text, "base\n\nhover");
+    CHECK_STR(p.text, "hover\n\nbase");
+    CHECK_STR(p.base, "hover");
     popover_set_scroll(&p, 3);
     CHECK_EQ(p.scroll, 3);
     popover_set_scroll(&p, 0);
@@ -47,6 +48,16 @@ int main(void) {
     popover_close(&p);
     popover_show_hover(&p, "ignored");
     CHECK(!p.active);
+
+    popover_show_base(&p, "node: identifier  [8 bytes]", 1);
+    popover_show_hover(&p, "fn add(value: number): number\n\nAdds a value.");
+    CHECK_STR(p.text, "fn add(value: number): number\n\nAdds a value.");
+    CHECK(!strstr(p.text, "node: identifier"));
+
+    popover_show_base(&p, "node: identifier  [8 bytes]", 1);
+    popover_show_hover(&p, "");
+    CHECK(!p.loading);
+    CHECK_STR(p.text, "node: identifier  [8 bytes]");
 
     popover_show_encoded_base(&p, "snap\\nshot|text", 5);
     CHECK(p.active);
