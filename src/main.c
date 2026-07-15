@@ -38,9 +38,11 @@ int mac_confirm_delete(void *nswindow, const char *path);
 int mac_clipboard_has_image(void);
 typedef void (*MacUpdateCallback)(int state, const char *version,
                                   const char *detail, double progress);
+void mac_prepare_document_open_handler(void);
 void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
                           void (*check_updates)(void), void (*next_tab)(void),
-                          void (*prev_tab)(void));
+                          void (*prev_tab)(void),
+                          void (*open_path)(const char *path));
 void mac_check_for_updates(const char *current_version, int manual,
                            MacUpdateCallback callback);
 #else
@@ -65,11 +67,13 @@ static int mac_confirm_delete(void *nswindow, const char *path) {
 static int mac_clipboard_has_image(void) { return 0; }
 typedef void (*MacUpdateCallback)(int state, const char *version,
                                   const char *detail, double progress);
+static void mac_prepare_document_open_handler(void) {}
 static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
                                  void (*check_updates)(void),
-                                 void (*next_tab)(void), void (*prev_tab)(void)) {
+                                 void (*next_tab)(void), void (*prev_tab)(void),
+                                 void (*open_path)(const char *path)) {
     (void)open_file; (void)open_folder; (void)check_updates;
-    (void)next_tab; (void)prev_tab;
+    (void)next_tab; (void)prev_tab; (void)open_path;
 }
 static void mac_check_for_updates(const char *current_version, int manual,
                                   MacUpdateCallback callback) {
@@ -2395,6 +2399,7 @@ int main(int argc, char **argv) {
     }
     const char *arg = request.path;
 
+    mac_prepare_document_open_handler();
     if (!glfwInit()) { fprintf(stderr, "glfwInit failed\n"); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -2430,7 +2435,7 @@ int main(int argc, char **argv) {
     g.win = win;
     mac_install_app_menu(app_menu_open_file, app_menu_open_folder,
                          app_menu_check_updates, app_menu_next_tab,
-                         app_menu_prev_tab);
+                         app_menu_prev_tab, open_context_path);
     glfwMakeContextCurrent(win);
     glfwSwapInterval(1);
 

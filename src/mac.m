@@ -35,6 +35,7 @@ static void (*g_open_folder_cb)(void);
 static void (*g_check_updates_cb)(void);
 static void (*g_next_tab_cb)(void);
 static void (*g_prev_tab_cb)(void);
+static void (*g_open_path_cb)(const char *path);
 static id g_tab_key_monitor;
 
 typedef void (*MacUpdateCallback)(int state, const char *version,
@@ -61,6 +62,8 @@ enum {
 @property(nonatomic, copy) NSString *version;
 @property(nonatomic) MacUpdateCallback callback;
 @end
+
+static NSMutableArray<NSString *> *g_pending_open_paths;
 
 static NSString *current_bundle_version(const char *fallback) {
     NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
@@ -151,6 +154,44 @@ static BOOL mac_apply_update_from_dmg(NSString *dmgPath, NSString *version,
     if (g_prev_tab_cb) g_prev_tab_cb();
 }
 @end
+
+static void queue_or_open_path(NSString *path) {
+    if (path.length == 0) return;
+    if (g_open_path_cb)
+        g_open_path_cb(path.fileSystemRepresentation);
+    else
+        [g_pending_open_paths addObject:path];
+}
+
+static void wave_application_open_files(id delegate, SEL command,
+                                        NSApplication *application,
+                                        NSArray<NSString *> *filenames) {
+    (void)delegate;
+    (void)command;
+    for (NSString *path in filenames) queue_or_open_path(path);
+    [application replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+}
+
+static BOOL wave_application_open_file(id delegate, SEL command,
+                                       NSApplication *application,
+                                       NSString *filename) {
+    (void)delegate;
+    (void)command;
+    (void)application;
+    queue_or_open_path(filename);
+    return filename.length > 0;
+}
+
+void mac_prepare_document_open_handler(void) {
+    if (g_pending_open_paths) return;
+    g_pending_open_paths = [NSMutableArray array];
+    Class cls = NSClassFromString(@"GLFWApplicationDelegate");
+    if (!cls) return;
+    class_addMethod(cls, @selector(application:openFiles:),
+                    (IMP)wave_application_open_files, "v@:@@");
+    class_addMethod(cls, @selector(application:openFile:),
+                    (IMP)wave_application_open_file, "B@:@@");
+}
 
 @implementation WaveDownloadDelegate
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask
@@ -333,12 +374,17 @@ static void install_tab_key_monitor(void) {
 
 void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
                           void (*check_updates)(void), void (*next_tab)(void),
-                          void (*prev_tab)(void)) {
+                          void (*prev_tab)(void),
+                          void (*open_path)(const char *path)) {
     g_open_file_cb = open_file;
     g_open_folder_cb = open_folder;
     g_check_updates_cb = check_updates;
     g_next_tab_cb = next_tab;
     g_prev_tab_cb = prev_tab;
+    g_open_path_cb = open_path;
+    for (NSString *path in g_pending_open_paths)
+        g_open_path_cb(path.fileSystemRepresentation);
+    [g_pending_open_paths removeAllObjects];
     NSMenu *app = ensure_app_menu();
     upsert_menu_item(app, @"Check for Updates...", @selector(checkUpdates:), @"",
                      0);

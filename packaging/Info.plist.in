@@ -20,7 +20,7 @@
       <key>CFBundleTypeName</key>    <string>Text Document</string>
       <key>CFBundleTypeRole</key>    <string>Editor</string>
       <key>LSItemContentTypes</key>
-      <array><string>public.text</string><string>public.source-code</string></array>
+      <array><string>public.plain-text</string><string>public.text</string><string>public.source-code</string></array>
     </dict>
   </array>
 </dict>
