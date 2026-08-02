@@ -1,0 +1,1327 @@
+//! Safe wrapper over Wave's C core (`libwave.a` via `shim/wave_ffi.c`).
+//!
+//! The seam is deliberately narrow: commands in, state out. Nothing here knows
+//! the layout of `Editor`, `TabSet`, `Workspace` or the piece table.
+//!
+//! This module exposes the whole seam, including a few accessors the current
+//! front-end does not read yet (`goto_line`, `native_titlebar`, …). They are
+//! part of the C API surface being bound, so they are kept rather than trimmed
+//! to whatever today's UI happens to call.
+#![allow(dead_code)]
+
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
+use std::path::Path;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaveSpanRaw {
+    start_col: usize,
+    end_col: usize,
+    name: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaveEntryRaw {
+    rel: *const c_char,
+    name: *const c_char,
+    depth: c_int,
+    is_dir: c_int,
+    collapsed: c_int,
+}
+
+unsafe extern "C" {
+    fn wave_new() -> *mut c_void;
+    fn wave_free(s: *mut c_void);
+    fn wave_open_path(s: *mut c_void, path: *const c_char) -> c_int;
+
+    fn wave_has_workspace(s: *const c_void) -> c_int;
+    fn wave_ws_root(s: *const c_void) -> *const c_char;
+    fn wave_ws_count(s: *const c_void) -> usize;
+    fn wave_ws_entry(s: *const c_void, vi: usize, out: *mut WaveEntryRaw) -> c_int;
+    fn wave_ws_activate(s: *mut c_void, row: c_int, double_click: c_int) -> c_int;
+
+    fn wave_palette_open(s: *mut c_void) -> c_int;
+    fn wave_palette_close(s: *mut c_void);
+    fn wave_palette_active(s: *const c_void) -> c_int;
+    fn wave_palette_query(s: *const c_void) -> *const c_char;
+    fn wave_palette_count(s: *const c_void) -> usize;
+    fn wave_palette_selected(s: *const c_void) -> c_int;
+    fn wave_palette_entry(s: *const c_void, i: usize, out: *mut WaveEntryRaw) -> c_int;
+    fn wave_palette_input(s: *mut c_void, text: *const c_char);
+    fn wave_palette_backspace(s: *mut c_void);
+    fn wave_palette_move(s: *mut c_void, delta: c_int);
+    fn wave_palette_accept(s: *mut c_void) -> c_int;
+
+    fn wave_tab_count(s: *const c_void) -> c_int;
+    fn wave_tab_active(s: *const c_void) -> c_int;
+    fn wave_tab_label(s: *const c_void, i: c_int, out: *mut c_char, cap: usize) -> usize;
+    fn wave_tab_modified(s: *const c_void, i: c_int) -> c_int;
+    fn wave_tab_set_active(s: *mut c_void, i: c_int);
+    fn wave_tab_close(s: *mut c_void, i: c_int);
+    fn wave_tab_goto(s: *mut c_void, delta: c_int);
+
+    fn wave_has_buffer(s: *const c_void) -> c_int;
+    fn wave_path(s: *const c_void) -> *const c_char;
+    fn wave_line_count(s: *const c_void) -> usize;
+    fn wave_line_text(s: *const c_void, line: usize, out: *mut c_char, cap: usize) -> usize;
+    fn wave_line_spans(s: *mut c_void, line: usize, out: *mut WaveSpanRaw, max: usize) -> usize;
+    fn wave_line_diagnostics(
+        s: *mut c_void,
+        line: usize,
+        out: *mut WaveSpanRaw,
+        max: usize,
+    ) -> usize;
+    fn wave_line_selection(s: *mut c_void, line: usize, a: *mut usize, b: *mut usize) -> c_int;
+    fn wave_click_at(s: *mut c_void, line: c_int, col: c_int);
+    fn wave_drag_to(s: *mut c_void, line: c_int, col: c_int);
+    fn wave_has_selection(s: *const c_void) -> c_int;
+    fn wave_selection_text(s: *mut c_void) -> *mut c_char;
+    fn wave_string_free(p: *mut c_char);
+    fn wave_theme_rgb(name: *const c_char) -> c_uint;
+    fn wave_cursor(s: *const c_void, row: *mut usize, col: *mut usize);
+    fn wave_mode(s: *const c_void) -> c_int;
+    fn wave_mode_name(s: *const c_void) -> *const c_char;
+    fn wave_modified(s: *const c_void) -> c_int;
+
+    fn wave_cursor_diagnostic(s: *mut c_void, out: *mut c_char, cap: usize) -> usize;
+    fn wave_lsp_active(s: *const c_void) -> c_int;
+    fn wave_lsp_poll(s: *mut c_void) -> c_int;
+    fn wave_hover(s: *const c_void) -> *const c_char;
+    fn wave_hover_clear(s: *mut c_void);
+
+    fn wave_text_input(s: *mut c_void, cp: c_uint) -> c_uint;
+    fn wave_special_key(s: *mut c_void, key: c_int) -> c_int;
+    fn wave_escape(s: *mut c_void);
+    fn wave_undo(s: *mut c_void) -> c_int;
+    fn wave_redo(s: *mut c_void) -> c_int;
+    fn wave_save(s: *mut c_void) -> c_int;
+    fn wave_goto_line(s: *mut c_void, line: c_int, column: c_int);
+
+    // terminal
+    fn wave_tab_kind(s: *const c_void, i: c_int) -> c_int;
+    fn wave_term_open(s: *mut c_void, label: *const c_char, cmd: *const c_char) -> c_int;
+    fn wave_term_active(s: *const c_void) -> c_int;
+    fn wave_term_poll(s: *mut c_void) -> c_int;
+    fn wave_term_resize(s: *mut c_void, rows: c_int, cols: c_int);
+    fn wave_term_visible_start(s: *const c_void, rows: c_int) -> usize;
+    fn wave_term_total_lines(s: *const c_void) -> usize;
+    fn wave_term_col_to_byte(s: *const c_void, index: usize, col: usize) -> usize;
+    fn wave_term_line(s: *const c_void, index: usize, out: *mut c_char, cap: usize) -> usize;
+    fn wave_term_line_styles(
+        s: *const c_void,
+        index: usize,
+        out: *mut WaveCellStyleRaw,
+        max: usize,
+    ) -> usize;
+    fn wave_term_cursor(s: *const c_void, row: *mut c_int, col: *mut c_int, vis: *mut c_int);
+    fn wave_term_rows(s: *const c_void) -> c_int;
+    fn wave_term_running(s: *const c_void) -> c_int;
+    fn wave_term_status(s: *const c_void) -> *const c_char;
+    fn wave_term_write(s: *mut c_void, text: *const c_char);
+    fn wave_term_key(s: *mut c_void, key: c_int, shift: c_int, alt: c_int, ctrl: c_int);
+    fn wave_term_scroll(s: *mut c_void, units: c_int);
+
+    // git
+    fn wave_git_open(s: *mut c_void) -> c_int;
+    fn wave_git_active(s: *const c_void) -> c_int;
+    fn wave_git_mode(s: *const c_void) -> c_int;
+    fn wave_git_repo_count(s: *const c_void) -> c_int;
+    fn wave_git_repo_label(s: *const c_void, i: c_int) -> *const c_char;
+    fn wave_git_selected_repo(s: *const c_void) -> c_int;
+    fn wave_git_file_count(s: *const c_void) -> c_int;
+    fn wave_git_file(
+        s: *const c_void,
+        i: c_int,
+        code: *mut *const c_char,
+        path: *mut *const c_char,
+    ) -> c_int;
+    fn wave_git_selected_file(s: *const c_void) -> c_int;
+    fn wave_git_diff_count(s: *const c_void) -> c_int;
+    fn wave_git_diff_line(s: *const c_void, i: c_int) -> *const c_char;
+    fn wave_git_message(s: *const c_void) -> *const c_char;
+    fn wave_git_info(s: *const c_void) -> *const c_char;
+    fn wave_git_move(s: *mut c_void, delta: c_int);
+    fn wave_git_accept(s: *mut c_void) -> c_int;
+    fn wave_git_stage_toggle(s: *mut c_void) -> c_int;
+    fn wave_git_begin_commit(s: *mut c_void) -> c_int;
+    fn wave_git_commit(s: *mut c_void) -> c_int;
+    fn wave_git_cancel_input(s: *mut c_void);
+    fn wave_git_insert_text(s: *mut c_void, text: *const c_char) -> c_int;
+    fn wave_git_backspace(s: *mut c_void) -> c_int;
+    fn wave_git_refresh(s: *mut c_void) -> c_int;
+    fn wave_git_diff_scroll(s: *mut c_void, delta: c_int);
+
+    // completion
+    fn wave_complete_active(s: *const c_void) -> c_int;
+    fn wave_complete_loading(s: *const c_void) -> c_int;
+    fn wave_complete_count(s: *const c_void) -> c_int;
+    fn wave_complete_selected(s: *const c_void) -> c_int;
+    fn wave_complete_item(
+        s: *const c_void,
+        i: c_int,
+        label: *mut *const c_char,
+        detail: *mut *const c_char,
+        kind: *mut *const c_char,
+    ) -> c_int;
+    fn wave_complete_move(s: *mut c_void, delta: c_int);
+    fn wave_complete_close(s: *mut c_void);
+    fn wave_complete_accept(s: *mut c_void) -> c_int;
+
+    // project search
+    fn wave_search_open(s: *mut c_void) -> c_int;
+    fn wave_search_active(s: *const c_void) -> c_int;
+    fn wave_search_query(s: *const c_void) -> *const c_char;
+    fn wave_search_input(s: *mut c_void, text: *const c_char);
+    fn wave_search_backspace(s: *mut c_void);
+    fn wave_search_move(s: *mut c_void, delta: c_int);
+    fn wave_search_poll(s: *mut c_void) -> c_int;
+    fn wave_search_running(s: *const c_void) -> c_int;
+    fn wave_search_count(s: *const c_void) -> usize;
+    fn wave_search_selected(s: *const c_void) -> c_int;
+    fn wave_search_hit(
+        s: *const c_void,
+        i: usize,
+        path: *mut *const c_char,
+        line: *mut c_int,
+        col: *mut c_int,
+        text: *mut *const c_char,
+    ) -> c_int;
+    fn wave_search_accept(s: *mut c_void) -> c_int;
+
+    // command line
+    fn wave_cmd_active(s: *const c_void) -> c_int;
+    fn wave_cmd_text(s: *const c_void) -> *const c_char;
+    fn wave_cmd_open(s: *mut c_void);
+    fn wave_cmd_close(s: *mut c_void);
+    fn wave_cmd_input(s: *mut c_void, text: *const c_char);
+    fn wave_cmd_backspace(s: *mut c_void);
+    fn wave_cmd_accept(s: *mut c_void) -> c_int;
+    fn wave_info(s: *const c_void) -> *const c_char;
+    fn wave_info_clear(s: *mut c_void);
+    fn wave_cfg_opacity_pct(s: *const c_void) -> c_int;
+    fn wave_cfg_native_titlebar(s: *const c_void) -> c_int;
+    fn wave_cfg_blur(s: *const c_void) -> c_int;
+    fn wave_cfg_radius(s: *const c_void) -> f32;
+    fn wave_cfg_base_pt(s: *const c_void) -> f32;
+    fn wave_cfg_show_sidebar(s: *const c_void) -> c_int;
+    fn wave_cfg_wrap(s: *const c_void) -> c_int;
+    fn wave_cfg_toggle_sidebar(s: *mut c_void) -> c_int;
+    fn wave_cfg_toggle_wrap(s: *mut c_void) -> c_int;
+    fn wave_cfg_zoom(s: *mut c_void, dir: c_int) -> c_int;
+    fn wave_cfg_save(s: *mut c_void) -> c_int;
+
+    // buffer search
+    fn wave_bufsearch_active(s: *const c_void) -> c_int;
+    fn wave_bufsearch_text(s: *const c_void) -> *const c_char;
+    fn wave_bufsearch_input(s: *mut c_void, text: *const c_char);
+    fn wave_bufsearch_backspace(s: *mut c_void);
+    fn wave_bufsearch_cancel(s: *mut c_void);
+    fn wave_bufsearch_accept(s: *mut c_void);
+    fn wave_line_matches(s: *mut c_void, line: usize, out: *mut WaveSpanRaw, max: usize) -> usize;
+    fn wave_yank_text(s: *const c_void) -> *const c_char;
+
+    // sidebar file operations
+    fn wave_ws_create(
+        s: *mut c_void,
+        dir_rel: *const c_char,
+        name: *const c_char,
+        is_dir: c_int,
+        message: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn wave_ws_delete(
+        s: *mut c_void,
+        rel: *const c_char,
+        message: *mut c_char,
+        cap: usize,
+    ) -> c_int;
+    fn wave_ws_parent_dir(s: *const c_void, vi: usize, out: *mut c_char, cap: usize) -> c_int;
+
+    // recent projects
+    fn wave_recent_count(s: *const c_void) -> usize;
+    fn wave_recent_path(s: *const c_void, i: usize) -> *const c_char;
+    fn wave_recent_selected(s: *const c_void) -> c_int;
+    fn wave_recent_move(s: *mut c_void, delta: c_int);
+    fn wave_recent_input(s: *mut c_void, text: *const c_char);
+    fn wave_recent_backspace(s: *mut c_void);
+    fn wave_recent_query(s: *const c_void) -> *const c_char;
+    fn wave_recent_accept(s: *mut c_void) -> c_int;
+
+    // file watching
+    fn wave_watch_poll(s: *mut c_void, now: f64, message: *mut c_char, cap: usize) -> c_int;
+    fn wave_watch_workspace_start(s: *mut c_void);
+
+    // popover
+    fn wave_popover_active(s: *const c_void) -> c_int;
+    fn wave_popover_loading(s: *const c_void) -> c_int;
+    fn wave_popover_text(s: *const c_void) -> *const c_char;
+    fn wave_popover_close(s: *mut c_void);
+    fn wave_popover_scroll_by(s: *mut c_void, delta: c_int);
+    fn wave_popover_set_view(s: *mut c_void, total_rows: c_int, vis_rows: c_int);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WaveCellStyleRaw {
+    start_byte: usize,
+    end_byte: usize,
+    fg: c_uint,
+    bg: c_uint,
+}
+
+/// Sentinel for "use the default foreground/background".
+pub const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+
+/// GLFW key codes, which is the vocabulary `terminal_key_sequence` speaks.
+/// These are deliberately *not* [`Key`]/`EditorKey` values — the terminal and
+/// the editor take different key encodings.
+pub mod term_key {
+    pub const ESCAPE: i32 = 256;
+    pub const ENTER: i32 = 257;
+    pub const TAB: i32 = 258;
+    pub const BACKSPACE: i32 = 259;
+    pub const INSERT: i32 = 260;
+    pub const DELETE: i32 = 261;
+    pub const RIGHT: i32 = 262;
+    pub const LEFT: i32 = 263;
+    pub const DOWN: i32 = 264;
+    pub const UP: i32 = 265;
+    pub const PAGE_UP: i32 = 266;
+    pub const PAGE_DOWN: i32 = 267;
+    pub const HOME: i32 = 268;
+    pub const END: i32 = 269;
+}
+
+/// Mirrors `TabItemKind` in `src/tabs.h`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TabKind {
+    Editor,
+    Terminal,
+    Git,
+}
+
+/// Mirrors `GitViewMode` in `src/git_view.h`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GitMode {
+    RepoSelect,
+    Changes,
+    CommitInput,
+}
+
+/// Mirrors `CommandCloseAction` in `src/command.h`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CloseAction {
+    None,
+    Tab,
+    Window,
+}
+
+/// Terminal cell styling, in **byte** offsets into the line's UTF-8 text.
+pub struct CellStyle {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub fg: u32,
+    pub bg: u32,
+}
+
+pub struct CompletionItem {
+    pub label: String,
+    pub detail: String,
+    pub kind: String,
+}
+
+pub struct SearchHit {
+    pub path: String,
+    pub line: i32,
+    pub col: i32,
+    pub text: String,
+}
+
+pub struct GitFile {
+    pub code: String,
+    pub path: String,
+}
+
+/// Mirrors `EditorKey` in `src/editor.h`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum Key {
+    Backspace = 1,
+    Delete = 2,
+    Enter = 3,
+    Tab = 4,
+    Left = 5,
+    Right = 6,
+    Up = 7,
+    Down = 8,
+}
+
+/// Mirrors `Mode` in `src/mode.h`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Normal,
+    Insert,
+    Visual,
+}
+
+/// Mirrors the `EditCommandFlags` bits the front-end acts on.
+pub mod flags {
+    pub const YANKED: u32 = 1 << 0;
+    pub const TAB_NEXT: u32 = 1 << 3;
+    pub const TAB_PREV: u32 = 1 << 4;
+}
+
+pub struct Span {
+    pub start_col: usize,
+    pub end_col: usize,
+    pub name: &'static str,
+}
+
+pub struct Entry {
+    pub rel: String,
+    pub name: String,
+    pub depth: i32,
+    pub is_dir: bool,
+    pub collapsed: bool,
+}
+
+pub struct Tab {
+    pub label: String,
+    pub modified: bool,
+}
+
+pub struct Session {
+    raw: *mut c_void,
+}
+
+fn cstr(p: *const c_char) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+impl Session {
+    pub fn new() -> Self {
+        let raw = unsafe { wave_new() };
+        assert!(!raw.is_null(), "wave_new() returned NULL");
+        Session { raw }
+    }
+
+    /// Open a file or a folder, as `main.c` does.
+    pub fn open(&mut self, path: &Path) -> Result<(), String> {
+        let c = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| format!("path contains a NUL byte: {}", path.display()))?;
+        if unsafe { wave_open_path(self.raw, c.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(format!("could not open {}", path.display()))
+        }
+    }
+
+    // ---- workspace ----
+
+    pub fn has_workspace(&self) -> bool {
+        unsafe { wave_has_workspace(self.raw) != 0 }
+    }
+
+    pub fn ws_root(&self) -> String {
+        cstr(unsafe { wave_ws_root(self.raw) })
+    }
+
+    pub fn ws_count(&self) -> usize {
+        unsafe { wave_ws_count(self.raw) }
+    }
+
+    pub fn ws_entry(&self, vi: usize) -> Option<Entry> {
+        let mut raw = WaveEntryRaw {
+            rel: std::ptr::null(),
+            name: std::ptr::null(),
+            depth: 0,
+            is_dir: 0,
+            collapsed: 0,
+        };
+        if unsafe { wave_ws_entry(self.raw, vi, &mut raw) } == 0 {
+            return None;
+        }
+        Some(Entry {
+            rel: cstr(raw.rel),
+            name: cstr(raw.name),
+            depth: raw.depth,
+            is_dir: raw.is_dir != 0,
+            collapsed: raw.collapsed != 0,
+        })
+    }
+
+    /// Returns true if a file was opened into a tab.
+    pub fn ws_activate(&mut self, row: usize, double_click: bool) -> bool {
+        unsafe { wave_ws_activate(self.raw, row as c_int, double_click as c_int) != 0 }
+    }
+
+    // ---- Cmd-P palette ----
+
+    pub fn palette_open(&mut self) -> bool {
+        unsafe { wave_palette_open(self.raw) != 0 }
+    }
+
+    pub fn palette_close(&mut self) {
+        unsafe { wave_palette_close(self.raw) }
+    }
+
+    pub fn palette_active(&self) -> bool {
+        unsafe { wave_palette_active(self.raw) != 0 }
+    }
+
+    pub fn palette_query(&self) -> String {
+        cstr(unsafe { wave_palette_query(self.raw) })
+    }
+
+    pub fn palette_count(&self) -> usize {
+        unsafe { wave_palette_count(self.raw) }
+    }
+
+    pub fn palette_selected(&self) -> usize {
+        unsafe { wave_palette_selected(self.raw).max(0) as usize }
+    }
+
+    pub fn palette_entry(&self, i: usize) -> Option<Entry> {
+        let mut raw = WaveEntryRaw {
+            rel: std::ptr::null(),
+            name: std::ptr::null(),
+            depth: 0,
+            is_dir: 0,
+            collapsed: 0,
+        };
+        if unsafe { wave_palette_entry(self.raw, i, &mut raw) } == 0 {
+            return None;
+        }
+        Some(Entry {
+            rel: cstr(raw.rel),
+            name: cstr(raw.name),
+            depth: raw.depth,
+            is_dir: raw.is_dir != 0,
+            collapsed: raw.collapsed != 0,
+        })
+    }
+
+    pub fn palette_input(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_palette_input(self.raw, c.as_ptr()) }
+    }
+
+    pub fn palette_backspace(&mut self) {
+        unsafe { wave_palette_backspace(self.raw) }
+    }
+
+    pub fn palette_move(&mut self, delta: i32) {
+        unsafe { wave_palette_move(self.raw, delta as c_int) }
+    }
+
+    pub fn palette_accept(&mut self) -> bool {
+        unsafe { wave_palette_accept(self.raw) != 0 }
+    }
+
+    // ---- tabs ----
+
+    pub fn tab_count(&self) -> usize {
+        unsafe { wave_tab_count(self.raw).max(0) as usize }
+    }
+
+    pub fn tab_active(&self) -> usize {
+        unsafe { wave_tab_active(self.raw).max(0) as usize }
+    }
+
+    pub fn tab(&self, i: usize) -> Tab {
+        let mut buf = vec![0u8; 128];
+        let n =
+            unsafe { wave_tab_label(self.raw, i as c_int, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+        buf.truncate(n);
+        Tab {
+            label: String::from_utf8_lossy(&buf).into_owned(),
+            modified: unsafe { wave_tab_modified(self.raw, i as c_int) != 0 },
+        }
+    }
+
+    pub fn tab_set_active(&mut self, i: usize) {
+        unsafe { wave_tab_set_active(self.raw, i as c_int) }
+    }
+
+    pub fn tab_close(&mut self, i: usize) {
+        unsafe { wave_tab_close(self.raw, i as c_int) }
+    }
+
+    pub fn tab_goto(&mut self, delta: i32) {
+        unsafe { wave_tab_goto(self.raw, delta as c_int) }
+    }
+
+    // ---- current editor ----
+
+    pub fn has_buffer(&self) -> bool {
+        unsafe { wave_has_buffer(self.raw) != 0 }
+    }
+
+    pub fn path(&self) -> String {
+        cstr(unsafe { wave_path(self.raw) })
+    }
+
+    pub fn line_count(&self) -> usize {
+        unsafe { wave_line_count(self.raw) }
+    }
+
+    pub fn line_text(&self, line: usize) -> String {
+        // Long lines are truncated rather than grown; the front-end only ever
+        // asks for lines it is about to draw.
+        let mut buf = vec![0u8; 4096];
+        let n =
+            unsafe { wave_line_text(self.raw, line, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn collect_spans(
+        &mut self,
+        line: usize,
+        f: unsafe extern "C" fn(*mut c_void, usize, *mut WaveSpanRaw, usize) -> usize,
+    ) -> Vec<Span> {
+        let mut raw = vec![
+            WaveSpanRaw {
+                start_col: 0,
+                end_col: 0,
+                name: std::ptr::null(),
+            };
+            128
+        ];
+        let n = unsafe { f(self.raw, line, raw.as_mut_ptr(), raw.len()) };
+        raw.truncate(n);
+        raw.into_iter()
+            .filter_map(|s| {
+                // Capture names and diagnostic messages are static tables owned
+                // by the compiled TSQuery / the C core, so 'static is honest.
+                let name = if s.name.is_null() {
+                    ""
+                } else {
+                    unsafe { CStr::from_ptr(s.name) }.to_str().ok()?
+                };
+                Some(Span {
+                    start_col: s.start_col,
+                    end_col: s.end_col,
+                    name,
+                })
+            })
+            .collect()
+    }
+
+    pub fn line_spans(&mut self, line: usize) -> Vec<Span> {
+        self.collect_spans(line, wave_line_spans)
+    }
+
+    pub fn line_diagnostics(&mut self, line: usize) -> Vec<Span> {
+        self.collect_spans(line, wave_line_diagnostics)
+    }
+
+    pub fn line_selection(&mut self, line: usize) -> Option<(usize, usize)> {
+        let (mut a, mut b) = (0usize, 0usize);
+        if unsafe { wave_line_selection(self.raw, line, &mut a, &mut b) } != 0 {
+            Some((a, b))
+        } else {
+            None
+        }
+    }
+
+    /// Place the cursor at a buffer position, collapsing any selection.
+    pub fn click_at(&mut self, line: usize, col: usize) {
+        unsafe { wave_click_at(self.raw, line as c_int, col as c_int) }
+    }
+
+    /// Extend a selection to a buffer position, holding the anchor.
+    pub fn drag_to(&mut self, line: usize, col: usize) {
+        unsafe { wave_drag_to(self.raw, line as c_int, col as c_int) }
+    }
+
+    pub fn has_selection(&self) -> bool {
+        unsafe { wave_has_selection(self.raw) != 0 }
+    }
+
+    pub fn selection_text(&mut self) -> Option<String> {
+        let p = unsafe { wave_selection_text(self.raw) };
+        if p.is_null() {
+            return None;
+        }
+        let text = cstr(p);
+        unsafe { wave_string_free(p) };
+        Some(text)
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        let (mut row, mut col) = (0usize, 0usize);
+        unsafe { wave_cursor(self.raw, &mut row, &mut col) };
+        (row, col)
+    }
+
+    pub fn mode(&self) -> Mode {
+        match unsafe { wave_mode(self.raw) } {
+            1 => Mode::Insert,
+            2 => Mode::Visual,
+            _ => Mode::Normal,
+        }
+    }
+
+    pub fn mode_name(&self) -> String {
+        cstr(unsafe { wave_mode_name(self.raw) })
+    }
+
+    pub fn modified(&self) -> bool {
+        unsafe { wave_modified(self.raw) != 0 }
+    }
+
+    // ---- language server ----
+
+    /// Full text of the diagnostic under the cursor, if any.
+    pub fn cursor_diagnostic(&mut self) -> String {
+        let mut buf = vec![0u8; 512];
+        let n = unsafe {
+            wave_cursor_diagnostic(self.raw, buf.as_mut_ptr() as *mut c_char, buf.len())
+        };
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    pub fn lsp_active(&self) -> bool {
+        unsafe { wave_lsp_active(self.raw) != 0 }
+    }
+
+    /// Drain async server replies. True if the UI should repaint.
+    pub fn lsp_poll(&mut self) -> bool {
+        unsafe { wave_lsp_poll(self.raw) != 0 }
+    }
+
+    pub fn hover(&self) -> String {
+        cstr(unsafe { wave_hover(self.raw) })
+    }
+
+    pub fn hover_clear(&mut self) {
+        unsafe { wave_hover_clear(self.raw) }
+    }
+
+    pub fn text_input(&mut self, cp: char) -> u32 {
+        unsafe { wave_text_input(self.raw, cp as c_uint) }
+    }
+
+    pub fn special_key(&mut self, key: Key) -> bool {
+        unsafe { wave_special_key(self.raw, key as c_int) != 0 }
+    }
+
+    pub fn escape(&mut self) {
+        unsafe { wave_escape(self.raw) }
+    }
+
+    pub fn undo(&mut self) -> bool {
+        unsafe { wave_undo(self.raw) != 0 }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        unsafe { wave_redo(self.raw) != 0 }
+    }
+
+    pub fn save(&mut self) -> bool {
+        unsafe { wave_save(self.raw) == 0 }
+    }
+
+    pub fn goto_line(&mut self, line: usize, column: usize) {
+        unsafe { wave_goto_line(self.raw, line as c_int, column as c_int) }
+    }
+}
+
+impl Session {
+    // ---- terminal ----
+
+    pub fn tab_kind(&self, i: usize) -> TabKind {
+        match unsafe { wave_tab_kind(self.raw, i as c_int) } {
+            1 => TabKind::Terminal,
+            2 => TabKind::Git,
+            _ => TabKind::Editor,
+        }
+    }
+
+    pub fn term_open(&mut self, label: &str, cmd: &str) -> bool {
+        let (Ok(l), Ok(c)) = (CString::new(label), CString::new(cmd)) else {
+            return false;
+        };
+        unsafe { wave_term_open(self.raw, l.as_ptr(), c.as_ptr()) != 0 }
+    }
+
+    pub fn term_active(&self) -> bool {
+        unsafe { wave_term_active(self.raw) != 0 }
+    }
+
+    pub fn term_poll(&mut self) -> bool {
+        unsafe { wave_term_poll(self.raw) != 0 }
+    }
+
+    pub fn term_resize(&mut self, rows: usize, cols: usize) {
+        unsafe { wave_term_resize(self.raw, rows as c_int, cols as c_int) }
+    }
+
+    pub fn term_visible_start(&self, rows: usize) -> usize {
+        unsafe { wave_term_visible_start(self.raw, rows as c_int) }
+    }
+
+    pub fn term_line(&self, index: usize) -> String {
+        let mut buf = vec![0u8; 4096];
+        let n =
+            unsafe { wave_term_line(self.raw, index, buf.as_mut_ptr() as *mut c_char, buf.len()) };
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    pub fn term_line_styles(&self, index: usize) -> Vec<CellStyle> {
+        let mut raw = vec![
+            WaveCellStyleRaw {
+                start_byte: 0,
+                end_byte: 0,
+                fg: COLOR_DEFAULT,
+                bg: COLOR_DEFAULT,
+            };
+            256
+        ];
+        let n = unsafe { wave_term_line_styles(self.raw, index, raw.as_mut_ptr(), raw.len()) };
+        raw.truncate(n);
+        raw.into_iter()
+            .map(|c| CellStyle {
+                start_byte: c.start_byte,
+                end_byte: c.end_byte,
+                fg: c.fg,
+                bg: c.bg,
+            })
+            .collect()
+    }
+
+    /// Byte offset of a display column on a terminal line.
+    pub fn term_col_to_byte(&self, index: usize, col: usize) -> usize {
+        unsafe { wave_term_col_to_byte(self.raw, index, col) }
+    }
+
+    pub fn term_cursor(&self) -> (usize, usize, bool) {
+        let (mut r, mut c, mut v) = (0, 0, 0);
+        unsafe { wave_term_cursor(self.raw, &mut r, &mut c, &mut v) };
+        (r.max(0) as usize, c.max(0) as usize, v != 0)
+    }
+
+    pub fn term_rows(&self) -> usize {
+        unsafe { wave_term_rows(self.raw).max(0) as usize }
+    }
+
+    pub fn term_running(&self) -> bool {
+        unsafe { wave_term_running(self.raw) != 0 }
+    }
+
+    pub fn term_status(&self) -> String {
+        cstr(unsafe { wave_term_status(self.raw) })
+    }
+
+    pub fn term_write(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_term_write(self.raw, c.as_ptr()) }
+    }
+
+    pub fn term_total_lines(&self) -> usize {
+        unsafe { wave_term_total_lines(self.raw) }
+    }
+
+    /// `key` must be a [`TermKey`] code or an ASCII `'A'..='Z'` for a control
+    /// chord — `terminal_key_sequence` switches on GLFW key codes.
+    pub fn term_key(&mut self, key: i32, shift: bool, alt: bool, ctrl: bool) {
+        unsafe {
+            wave_term_key(
+                self.raw,
+                key as c_int,
+                shift as c_int,
+                alt as c_int,
+                ctrl as c_int,
+            )
+        }
+    }
+
+    pub fn term_scroll(&mut self, units: i32) {
+        unsafe { wave_term_scroll(self.raw, units as c_int) }
+    }
+
+    // ---- git ----
+
+    pub fn git_open(&mut self) -> bool {
+        unsafe { wave_git_open(self.raw) != 0 }
+    }
+
+    pub fn git_active(&self) -> bool {
+        unsafe { wave_git_active(self.raw) != 0 }
+    }
+
+    pub fn git_mode(&self) -> GitMode {
+        match unsafe { wave_git_mode(self.raw) } {
+            1 => GitMode::Changes,
+            2 => GitMode::CommitInput,
+            _ => GitMode::RepoSelect,
+        }
+    }
+
+    pub fn git_repos(&self) -> Vec<String> {
+        let n = unsafe { wave_git_repo_count(self.raw) }.max(0);
+        (0..n)
+            .map(|i| cstr(unsafe { wave_git_repo_label(self.raw, i) }))
+            .collect()
+    }
+
+    pub fn git_selected_repo(&self) -> usize {
+        unsafe { wave_git_selected_repo(self.raw).max(0) as usize }
+    }
+
+    pub fn git_files(&self) -> Vec<GitFile> {
+        let n = unsafe { wave_git_file_count(self.raw) }.max(0);
+        (0..n)
+            .filter_map(|i| {
+                let mut code = std::ptr::null();
+                let mut path = std::ptr::null();
+                if unsafe { wave_git_file(self.raw, i, &mut code, &mut path) } == 0 {
+                    return None;
+                }
+                Some(GitFile {
+                    code: cstr(code),
+                    path: cstr(path),
+                })
+            })
+            .collect()
+    }
+
+    pub fn git_selected_file(&self) -> usize {
+        unsafe { wave_git_selected_file(self.raw).max(0) as usize }
+    }
+
+    pub fn git_diff(&self) -> Vec<String> {
+        let n = unsafe { wave_git_diff_count(self.raw) }.max(0);
+        (0..n)
+            .map(|i| cstr(unsafe { wave_git_diff_line(self.raw, i) }))
+            .collect()
+    }
+
+    pub fn git_message(&self) -> String {
+        cstr(unsafe { wave_git_message(self.raw) })
+    }
+
+    pub fn git_info(&self) -> String {
+        cstr(unsafe { wave_git_info(self.raw) })
+    }
+
+    pub fn git_move(&mut self, delta: i32) {
+        unsafe { wave_git_move(self.raw, delta as c_int) }
+    }
+
+    pub fn git_accept(&mut self) -> bool {
+        unsafe { wave_git_accept(self.raw) != 0 }
+    }
+
+    pub fn git_stage_toggle(&mut self) -> bool {
+        unsafe { wave_git_stage_toggle(self.raw) != 0 }
+    }
+
+    pub fn git_begin_commit(&mut self) -> bool {
+        unsafe { wave_git_begin_commit(self.raw) != 0 }
+    }
+
+    pub fn git_commit(&mut self) -> bool {
+        unsafe { wave_git_commit(self.raw) != 0 }
+    }
+
+    pub fn git_cancel_input(&mut self) {
+        unsafe { wave_git_cancel_input(self.raw) }
+    }
+
+    pub fn git_insert_text(&mut self, text: &str) -> bool {
+        let Ok(c) = CString::new(text) else {
+            return false;
+        };
+        unsafe { wave_git_insert_text(self.raw, c.as_ptr()) != 0 }
+    }
+
+    pub fn git_backspace(&mut self) -> bool {
+        unsafe { wave_git_backspace(self.raw) != 0 }
+    }
+
+    pub fn git_refresh(&mut self) -> bool {
+        unsafe { wave_git_refresh(self.raw) != 0 }
+    }
+
+    pub fn git_diff_scroll(&mut self, delta: i32) {
+        unsafe { wave_git_diff_scroll(self.raw, delta as c_int) }
+    }
+
+    // ---- completion ----
+
+    pub fn complete_active(&self) -> bool {
+        unsafe { wave_complete_active(self.raw) != 0 }
+    }
+
+    pub fn complete_loading(&self) -> bool {
+        unsafe { wave_complete_loading(self.raw) != 0 }
+    }
+
+    pub fn complete_count(&self) -> usize {
+        unsafe { wave_complete_count(self.raw).max(0) as usize }
+    }
+
+    pub fn complete_selected(&self) -> usize {
+        unsafe { wave_complete_selected(self.raw).max(0) as usize }
+    }
+
+    pub fn complete_item(&self, i: usize) -> Option<CompletionItem> {
+        let mut label = std::ptr::null();
+        let mut detail = std::ptr::null();
+        let mut kind = std::ptr::null();
+        if unsafe { wave_complete_item(self.raw, i as c_int, &mut label, &mut detail, &mut kind) }
+            == 0
+        {
+            return None;
+        }
+        Some(CompletionItem {
+            label: cstr(label),
+            detail: cstr(detail),
+            kind: cstr(kind),
+        })
+    }
+
+    pub fn complete_move(&mut self, delta: i32) {
+        unsafe { wave_complete_move(self.raw, delta as c_int) }
+    }
+
+    pub fn complete_close(&mut self) {
+        unsafe { wave_complete_close(self.raw) }
+    }
+
+    pub fn complete_accept(&mut self) -> bool {
+        unsafe { wave_complete_accept(self.raw) != 0 }
+    }
+
+    // ---- project search ----
+
+    pub fn search_open(&mut self) -> bool {
+        unsafe { wave_search_open(self.raw) != 0 }
+    }
+
+    pub fn search_active(&self) -> bool {
+        unsafe { wave_search_active(self.raw) != 0 }
+    }
+
+    pub fn search_query(&self) -> String {
+        cstr(unsafe { wave_search_query(self.raw) })
+    }
+
+    pub fn search_input(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_search_input(self.raw, c.as_ptr()) }
+    }
+
+    pub fn search_backspace(&mut self) {
+        unsafe { wave_search_backspace(self.raw) }
+    }
+
+    pub fn search_move(&mut self, delta: i32) {
+        unsafe { wave_search_move(self.raw, delta as c_int) }
+    }
+
+    pub fn search_poll(&mut self) -> bool {
+        unsafe { wave_search_poll(self.raw) != 0 }
+    }
+
+    pub fn search_running(&self) -> bool {
+        unsafe { wave_search_running(self.raw) != 0 }
+    }
+
+    pub fn search_count(&self) -> usize {
+        unsafe { wave_search_count(self.raw) }
+    }
+
+    pub fn search_selected(&self) -> usize {
+        unsafe { wave_search_selected(self.raw).max(0) as usize }
+    }
+
+    pub fn search_hit(&self, i: usize) -> Option<SearchHit> {
+        let mut path = std::ptr::null();
+        let mut text = std::ptr::null();
+        let (mut line, mut col) = (0, 0);
+        if unsafe { wave_search_hit(self.raw, i, &mut path, &mut line, &mut col, &mut text) } == 0 {
+            return None;
+        }
+        Some(SearchHit {
+            path: cstr(path),
+            line,
+            col,
+            text: cstr(text),
+        })
+    }
+
+    pub fn search_accept(&mut self) -> bool {
+        unsafe { wave_search_accept(self.raw) != 0 }
+    }
+
+    // ---- command line ----
+
+    pub fn cmd_active(&self) -> bool {
+        unsafe { wave_cmd_active(self.raw) != 0 }
+    }
+
+    pub fn cmd_text(&self) -> String {
+        cstr(unsafe { wave_cmd_text(self.raw) })
+    }
+
+    pub fn cmd_open(&mut self) {
+        unsafe { wave_cmd_open(self.raw) }
+    }
+
+    pub fn cmd_close(&mut self) {
+        unsafe { wave_cmd_close(self.raw) }
+    }
+
+    pub fn cmd_input(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_cmd_input(self.raw, c.as_ptr()) }
+    }
+
+    pub fn cmd_backspace(&mut self) {
+        unsafe { wave_cmd_backspace(self.raw) }
+    }
+
+    pub fn cmd_accept(&mut self) -> CloseAction {
+        match unsafe { wave_cmd_accept(self.raw) } {
+            1 => CloseAction::Tab,
+            2 => CloseAction::Window,
+            _ => CloseAction::None,
+        }
+    }
+
+    pub fn info(&self) -> String {
+        cstr(unsafe { wave_info(self.raw) })
+    }
+
+    pub fn info_clear(&mut self) {
+        unsafe { wave_info_clear(self.raw) }
+    }
+
+    pub fn opacity_pct(&self) -> u32 {
+        unsafe { wave_cfg_opacity_pct(self.raw).clamp(0, 100) as u32 }
+    }
+
+    pub fn native_titlebar(&self) -> bool {
+        unsafe { wave_cfg_native_titlebar(self.raw) != 0 }
+    }
+
+    pub fn blur(&self) -> bool {
+        unsafe { wave_cfg_blur(self.raw) != 0 }
+    }
+
+    pub fn radius(&self) -> f32 {
+        unsafe { wave_cfg_radius(self.raw) }
+    }
+
+    /// Base font size in points, driven by `:set` and the zoom shortcuts.
+    pub fn base_pt(&self) -> f32 {
+        unsafe { wave_cfg_base_pt(self.raw) }
+    }
+
+    pub fn show_sidebar(&self) -> bool {
+        unsafe { wave_cfg_show_sidebar(self.raw) != 0 }
+    }
+
+    pub fn wrap(&self) -> bool {
+        unsafe { wave_cfg_wrap(self.raw) != 0 }
+    }
+
+    pub fn toggle_sidebar(&mut self) -> bool {
+        unsafe { wave_cfg_toggle_sidebar(self.raw) != 0 }
+    }
+
+    pub fn toggle_wrap(&mut self) -> bool {
+        unsafe { wave_cfg_toggle_wrap(self.raw) != 0 }
+    }
+
+    /// `dir`: +1 larger, -1 smaller, 0 reset.
+    pub fn zoom(&mut self, dir: i32) -> bool {
+        unsafe { wave_cfg_zoom(self.raw, dir as c_int) != 0 }
+    }
+
+    pub fn save_config(&mut self) -> bool {
+        unsafe { wave_cfg_save(self.raw) != 0 }
+    }
+
+    // ---- buffer search ----
+
+    pub fn bufsearch_active(&self) -> bool {
+        unsafe { wave_bufsearch_active(self.raw) != 0 }
+    }
+
+    pub fn bufsearch_text(&self) -> String {
+        cstr(unsafe { wave_bufsearch_text(self.raw) })
+    }
+
+    pub fn bufsearch_input(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_bufsearch_input(self.raw, c.as_ptr()) }
+    }
+
+    pub fn bufsearch_backspace(&mut self) {
+        unsafe { wave_bufsearch_backspace(self.raw) }
+    }
+
+    pub fn bufsearch_cancel(&mut self) {
+        unsafe { wave_bufsearch_cancel(self.raw) }
+    }
+
+    pub fn bufsearch_accept(&mut self) {
+        unsafe { wave_bufsearch_accept(self.raw) }
+    }
+
+    pub fn line_matches(&mut self, line: usize) -> Vec<Span> {
+        self.collect_spans(line, wave_line_matches)
+    }
+
+    pub fn yank_text(&self) -> String {
+        cstr(unsafe { wave_yank_text(self.raw) })
+    }
+
+    // ---- sidebar file operations ----
+
+    pub fn ws_create(&mut self, dir_rel: &str, name: &str, is_dir: bool) -> (bool, String) {
+        let (Ok(d), Ok(n)) = (CString::new(dir_rel), CString::new(name)) else {
+            return (false, "invalid name".into());
+        };
+        let mut msg = vec![0u8; 256];
+        let ok = unsafe {
+            wave_ws_create(
+                self.raw,
+                d.as_ptr(),
+                n.as_ptr(),
+                is_dir as c_int,
+                msg.as_mut_ptr() as *mut c_char,
+                msg.len(),
+            )
+        };
+        (ok != 0, cstr(msg.as_ptr() as *const c_char))
+    }
+
+    pub fn ws_delete(&mut self, rel: &str) -> (bool, String) {
+        let Ok(r) = CString::new(rel) else {
+            return (false, "invalid path".into());
+        };
+        let mut msg = vec![0u8; 256];
+        let ok = unsafe {
+            wave_ws_delete(
+                self.raw,
+                r.as_ptr(),
+                msg.as_mut_ptr() as *mut c_char,
+                msg.len(),
+            )
+        };
+        (ok != 0, cstr(msg.as_ptr() as *const c_char))
+    }
+
+    pub fn ws_parent_dir(&self, vi: usize) -> String {
+        let mut buf = vec![0u8; 4096];
+        if unsafe { wave_ws_parent_dir(self.raw, vi, buf.as_mut_ptr() as *mut c_char, buf.len()) }
+            == 0
+        {
+            return String::new();
+        }
+        cstr(buf.as_ptr() as *const c_char)
+    }
+
+    // ---- recent projects ----
+
+    pub fn recent_count(&self) -> usize {
+        unsafe { wave_recent_count(self.raw) }
+    }
+
+    pub fn recent_path(&self, i: usize) -> String {
+        cstr(unsafe { wave_recent_path(self.raw, i) })
+    }
+
+    pub fn recent_selected(&self) -> usize {
+        unsafe { wave_recent_selected(self.raw).max(0) as usize }
+    }
+
+    pub fn recent_move(&mut self, delta: i32) {
+        unsafe { wave_recent_move(self.raw, delta as c_int) }
+    }
+
+    pub fn recent_input(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_recent_input(self.raw, c.as_ptr()) }
+    }
+
+    pub fn recent_backspace(&mut self) {
+        unsafe { wave_recent_backspace(self.raw) }
+    }
+
+    pub fn recent_query(&self) -> String {
+        cstr(unsafe { wave_recent_query(self.raw) })
+    }
+
+    pub fn recent_accept(&mut self) -> bool {
+        unsafe { wave_recent_accept(self.raw) != 0 }
+    }
+
+    // ---- file watching ----
+
+    pub fn watch_poll(&mut self, now: f64) -> Option<String> {
+        let mut msg = vec![0u8; 256];
+        let changed = unsafe {
+            wave_watch_poll(self.raw, now, msg.as_mut_ptr() as *mut c_char, msg.len())
+        };
+        if changed == 0 {
+            return None;
+        }
+        Some(cstr(msg.as_ptr() as *const c_char))
+    }
+
+    pub fn watch_workspace_start(&mut self) {
+        unsafe { wave_watch_workspace_start(self.raw) }
+    }
+
+    // ---- popover ----
+
+    pub fn popover_active(&self) -> bool {
+        unsafe { wave_popover_active(self.raw) != 0 }
+    }
+
+    pub fn popover_loading(&self) -> bool {
+        unsafe { wave_popover_loading(self.raw) != 0 }
+    }
+
+    pub fn popover_text(&self) -> String {
+        cstr(unsafe { wave_popover_text(self.raw) })
+    }
+
+    pub fn popover_close(&mut self) {
+        unsafe { wave_popover_close(self.raw) }
+    }
+
+    pub fn popover_scroll_by(&mut self, delta: i32) {
+        unsafe { wave_popover_scroll_by(self.raw, delta as c_int) }
+    }
+
+    pub fn popover_set_view(&mut self, total_rows: usize, vis_rows: usize) {
+        unsafe { wave_popover_set_view(self.raw, total_rows as c_int, vis_rows as c_int) }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        unsafe { wave_free(self.raw) }
+    }
+}
+
+/// Wave's own highlight palette, packed `0xRRGGBB`.
+pub fn theme_rgb(name: &str) -> u32 {
+    let Ok(c) = CString::new(name) else {
+        return 0xd9dbe0;
+    };
+    unsafe { wave_theme_rgb(c.as_ptr()) }
+}

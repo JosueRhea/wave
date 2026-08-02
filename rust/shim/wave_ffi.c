@@ -1,0 +1,1725 @@
+/* wave_ffi.c — a narrow C ABI over Wave's headless core, for the GPUI front-end.
+ *
+ * libwave.a (CORE_SRC + tree-sitter) has no GL/GLFW/Cocoa in it — the same
+ * thing the 28 test binaries link against. This shim exposes the shape the Rust
+ * UI needs — commands in, state out — so the front-end never has to know the
+ * layout of Editor, TabSet, Workspace or the piece table, and we need no
+ * bindgen.
+ *
+ * Key dispatch mirrors main.c: printable input goes to editor_apply_text_input
+ * in INSERT and edit_command_apply otherwise; special keys go to
+ * editor_apply_insert_key in INSERT and editor_apply_motion_key otherwise. */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "buffer.h"
+#include "diagnostics.h"
+#include "edit_command.h"
+#include "editor.h"
+#include "highlight.h"
+#include "command.h"
+#include "complete.h"
+#include "config.h"
+#include "git_view.h"
+#include "lsp_manager.h"
+#include "mode.h"
+#include "overlay.h"
+#include "piece_table.h"
+#include "popover.h"
+#include "recent.h"
+#include "tabs.h"
+#include "terminal.h"
+#include "theme.h"
+#include "watch.h"
+#include "workspace.h"
+#include "yank.h"
+
+#define WAVE_MAX_DIAGS 256
+
+typedef struct WaveSession {
+    TabSet tabs;
+    Workspace *ws;
+    ModalState modal;
+    YankRegister yank;
+    OverlayState overlay;
+    CommandLine cmd;
+    CompleteState comp;
+    Popover pop;
+    WaveConfig config;
+    WatchService watch;
+    RecentProjects recent;
+
+    /* `/` buffer search reuses the command-line widget, as main.c does. */
+    CommandLine buf_search;
+    Editor *buf_search_editor;
+    size_t buf_search_origin;
+    char last_buf_search[256];
+
+    LspManager lsp;
+    /* Merged tree-sitter + server diagnostics for the active editor, refreshed
+     * on poll and after edits so per-line lookups stay cheap. */
+    Diagnostic diags[WAVE_MAX_DIAGS];
+    size_t ndiags;
+    char hover[LSP_MANAGER_HOVER_CAP];
+    int has_hover;
+    char info[256];
+    /* A mouse drag selects without entering vim's VISUAL mode. */
+    int mouse_selecting;
+} WaveSession;
+
+/* The LSP completion pool, kept file-static exactly as main.c keeps it on its
+ * `g` global: LspCompletionItem is large and there is one session per process. */
+static LspCompletionItem g_comp_lsp[LSP_MAX_COMPLETIONS];
+static size_t g_comp_lsp_count;
+static unsigned int g_comp_lsp_generation;
+static char g_comp_trigger;
+static int g_comp_member_context;
+
+/* Defined with their subsystems below; used from the input path. */
+typedef struct WaveSession WaveSession;
+static void comp_after_insert(WaveSession *s, Editor *e,
+                              unsigned int trigger_character);
+static int comp_drain_lsp(WaveSession *s, Editor *e);
+static void bufsearch_open(WaveSession *s);
+static void bufsearch_repeat(WaveSession *s, int reverse);
+static void bufsearch_word(WaveSession *s);
+static int line_bounds(const Editor *e, size_t line, size_t *a, size_t *b);
+
+typedef struct {
+    size_t start_col;
+    size_t end_col;
+    const char *name; /* static capture-name table; not owned */
+} WaveSpan;
+
+typedef struct {
+    const char *rel;
+    const char *name;
+    int depth;
+    int is_dir;
+    int collapsed;
+} WaveEntry;
+
+/* ---- session ---- */
+
+WaveSession *wave_new(void) {
+    WaveSession *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    modal_init(&s->modal);
+    overlay_init(&s->overlay);
+    complete_init(&s->comp);
+    popover_init(&s->pop);
+    wave_config_defaults(&s->config);
+    wave_config_load(&s->config);
+    watch_service_init(&s->watch);
+    recent_projects_init(&s->recent);
+    recent_projects_load(&s->recent);
+    lsp_manager_init(&s->lsp, 0);
+    return s;
+}
+
+void wave_free(WaveSession *s) {
+    if (!s) return;
+    lsp_manager_shutdown(&s->lsp);
+    watch_service_shutdown(&s->watch);
+    for (int i = tabs_count(&s->tabs) - 1; i >= 0; i--) tabs_close(&s->tabs, i);
+    overlay_free(&s->overlay);
+    if (s->ws) ws_free(s->ws);
+    yank_free(&s->yank);
+    free(s);
+}
+
+static Editor *cur(WaveSession *s) {
+    return s ? tabs_current(&s->tabs) : NULL;
+}
+
+/* Merged tree-sitter + server diagnostics for the active editor. Cached so the
+ * per-line lookups the UI does while painting stay cheap. */
+static void refresh_diags(WaveSession *s) {
+    Editor *e = cur(s);
+    s->ndiags = e ? lsp_manager_editor_diagnostics(&s->lsp, e, s->diags,
+                                                   WAVE_MAX_DIAGS)
+                  : 0;
+    if (s->ndiags > WAVE_MAX_DIAGS) s->ndiags = WAVE_MAX_DIAGS;
+}
+
+/* Every path that opens a file goes through here, so the server always learns
+ * about the buffer (main.c does the same via its open_path_mode helper). */
+static int open_in_tab(WaveSession *s, const char *path, int preview) {
+    TabOpenResult r = tabs_open_file(&s->tabs, path, preview, &s->watch);
+    if (!r.ok) return 0;
+    Editor *e = tabs_current(&s->tabs);
+    if (e) lsp_manager_open_editor(&s->lsp, e);
+    refresh_diags(s);
+    return 1;
+}
+
+/* Open a file or a folder, exactly as main.c does: a folder becomes the
+ * workspace; a file opens in a tab and its parent directory becomes the
+ * workspace, so the sidebar is populated either way. */
+int wave_open_path(WaveSession *s, const char *path) {
+    if (!s || !path) return -1;
+    WsOpenContext ctx = ws_open_context(path);
+    if (ctx.kind == WS_OPEN_NONE) return -1;
+
+    if (ctx.workspace) {
+        if (s->ws) ws_free(s->ws);
+        s->ws = ctx.workspace;
+        lsp_manager_set_root_path(&s->lsp, ws_root(s->ws));
+    }
+    if (ctx.kind == WS_OPEN_FILE) return open_in_tab(s, ctx.file, 0) ? 0 : -1;
+    return 0;
+}
+
+/* ---- workspace / sidebar ---- */
+
+int wave_has_workspace(const WaveSession *s) { return s && s->ws ? 1 : 0; }
+
+const char *wave_ws_root(const WaveSession *s) {
+    return (s && s->ws) ? ws_root(s->ws) : "";
+}
+
+size_t wave_ws_count(const WaveSession *s) {
+    return (s && s->ws) ? ws_visible_count(s->ws) : 0;
+}
+
+int wave_ws_entry(const WaveSession *s, size_t vi, WaveEntry *out) {
+    if (!s || !s->ws || !out) return 0;
+    const WsEntry *e = ws_visible(s->ws, vi);
+    if (!e) return 0;
+    out->rel = e->rel;
+    out->name = e->name;
+    out->depth = e->depth;
+    out->is_dir = e->is_dir;
+    out->collapsed = e->collapsed;
+    return 1;
+}
+
+/* Activate a sidebar row. Directories toggle; files open in a tab (preview on
+ * a single click, pinned on a double click). Returns 1 if a file was opened. */
+int wave_ws_activate(WaveSession *s, int row, int double_click) {
+    if (!s || !s->ws) return 0;
+    WsClickAction click = ws_click_visible(s->ws, row, double_click);
+    if (click.kind != WS_CLICK_OPEN_FILE || !click.entry) return 0;
+
+    char *full = ws_fullpath(s->ws, click.entry->rel);
+    if (!full) return 0;
+    int ok = open_in_tab(s, full, click.preview);
+    free(full);
+    return ok;
+}
+
+/* ---- Cmd-P file palette (overlay.c + palette.c) ----
+ *
+ * The palette filters over the workspace's *full* entry list, so its rows are
+ * indexed through ws_entry(), not the collapsed sidebar view. */
+
+int wave_palette_open(WaveSession *s) {
+    if (!s || !s->ws) return 0;
+    return overlay_open_palette(&s->overlay, s->ws);
+}
+
+void wave_palette_close(WaveSession *s) {
+    if (s) overlay_close(&s->overlay);
+}
+
+int wave_palette_active(const WaveSession *s) {
+    return s && overlay_active(&s->overlay) == OVERLAY_PALETTE;
+}
+
+const char *wave_palette_query(const WaveSession *s) {
+    if (!s) return "";
+    const char *q = overlay_query((OverlayState *)&s->overlay);
+    return q ? q : "";
+}
+
+size_t wave_palette_count(const WaveSession *s) {
+    if (!s) return 0;
+    int n = s->overlay.palette.filtered_n;
+    return n > 0 ? (size_t)n : 0;
+}
+
+int wave_palette_selected(const WaveSession *s) {
+    return s ? s->overlay.palette.sel : 0;
+}
+
+int wave_palette_entry(const WaveSession *s, size_t i, WaveEntry *out) {
+    if (!s || !s->ws || !out) return 0;
+    if (i >= wave_palette_count(s)) return 0;
+    const WsEntry *e = ws_entry(s->ws, (size_t)s->overlay.palette.filtered[i]);
+    if (!e) return 0;
+    out->rel = e->rel;
+    out->name = e->name;
+    out->depth = e->depth;
+    out->is_dir = e->is_dir;
+    out->collapsed = e->collapsed;
+    return 1;
+}
+
+void wave_palette_input(WaveSession *s, const char *text) {
+    if (!s || !text) return;
+    overlay_insert_text(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "", text);
+}
+
+void wave_palette_backspace(WaveSession *s) {
+    if (s) overlay_backspace(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "");
+}
+
+void wave_palette_move(WaveSession *s, int delta) {
+    if (s) overlay_move(&s->overlay, delta);
+}
+
+/* Open the highlighted result. Returns 1 if a file was opened. */
+int wave_palette_accept(WaveSession *s) {
+    if (!s) return 0;
+    OverlayAcceptTarget t = overlay_accept_target(&s->overlay, s->ws);
+    int ok = 0;
+    if (t.has_target && t.path) {
+        ok = open_in_tab(s, t.path, 0);
+        if (ok && t.has_location) {
+            Editor *e = tabs_current(&s->tabs);
+            if (e) editor_move_to_line_col(e, t.line, t.col);
+        }
+    }
+    overlay_accept_target_free(&t);
+    overlay_close(&s->overlay);
+    return ok;
+}
+
+/* ---- tabs ---- */
+
+int wave_tab_count(const WaveSession *s) {
+    return s ? tabs_count(&s->tabs) : 0;
+}
+
+int wave_tab_active(const WaveSession *s) {
+    return s ? tabs_active_index(&s->tabs) : 0;
+}
+
+size_t wave_tab_label(const WaveSession *s, int i, char *out, size_t cap) {
+    if (!s || !out || cap == 0) return 0;
+    tabs_label(&s->tabs, i, out, cap);
+    return strlen(out);
+}
+
+int wave_tab_modified(const WaveSession *s, int i) {
+    if (!s) return 0;
+    const Editor *e = tabs_at_const(&s->tabs, i);
+    return e ? e->modified : 0;
+}
+
+void wave_tab_set_active(WaveSession *s, int i) {
+    if (s) tabs_set_active(&s->tabs, i);
+}
+
+void wave_tab_close(WaveSession *s, int i) {
+    if (s) tabs_close(&s->tabs, i);
+}
+
+void wave_tab_goto(WaveSession *s, int delta) {
+    if (s) tabs_goto(&s->tabs, delta);
+}
+
+/* ---- current editor: state out ---- */
+
+int wave_has_buffer(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    return (e && editor_has_buffer(e)) ? 1 : 0;
+}
+
+const char *wave_path(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    return (e && editor_has_path(e)) ? editor_path(e) : "";
+}
+
+size_t wave_line_count(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    if (!e || !e->buf) return 0;
+    return pt_line_count(buffer_pt(e->buf));
+}
+
+/* Byte range of `line`, newline excluded. */
+static int line_bounds(const Editor *e, size_t line, size_t *a, size_t *b) {
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t nlines = pt_line_count(pt);
+    if (line >= nlines) return 0;
+    size_t start = pt_line_start(pt, line);
+    size_t end = (line + 1 < nlines) ? pt_line_start(pt, line + 1) : pt_length(pt);
+    while (end > start) {
+        unsigned char c = byte_at(pt, end - 1);
+        if (c != '\n' && c != '\r') break;
+        end--;
+    }
+    *a = start;
+    *b = end;
+    return 1;
+}
+
+size_t wave_line_text(const WaveSession *s, size_t line, char *out, size_t cap) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    if (!e || !e->buf || !out || cap == 0) return 0;
+    size_t start, end;
+    if (!line_bounds(e, line, &start, &end)) return 0;
+    size_t n = end - start;
+    if (n > cap) n = cap;
+    return pt_read(buffer_pt(e->buf), start, n, out);
+}
+
+/* tree-sitter spans for `line`, as byte columns relative to the line start. */
+size_t wave_line_spans(WaveSession *s, size_t line, WaveSpan *out, size_t max) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !out || max == 0) return 0;
+    size_t start, end;
+    if (!line_bounds(e, line, &start, &end)) return 0;
+
+    HighlightSpan tmp[256];
+    size_t n = editor_highlight_spans(e, start, end, tmp,
+                                      sizeof tmp / sizeof tmp[0]);
+    size_t k = 0;
+    for (size_t i = 0; i < n && k < max; i++) {
+        size_t a = tmp[i].start_byte < start ? start : tmp[i].start_byte;
+        size_t b = tmp[i].end_byte > end ? end : tmp[i].end_byte;
+        if (a >= b) continue;
+        out[k].start_col = a - start;
+        out[k].end_col = b - start;
+        out[k].name = tmp[i].name;
+        k++;
+    }
+    return k;
+}
+
+/* Diagnostics touching `line`, as byte columns. These are the merged set —
+ * tree-sitter ERROR/MISSING nodes plus whatever the language server published —
+ * courtesy of diagnostics_for_editor() behind lsp_manager_editor_diagnostics. */
+size_t wave_line_diagnostics(WaveSession *s, size_t line, WaveSpan *out,
+                             size_t max) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !out || max == 0) return 0;
+    size_t start, end;
+    if (!line_bounds(e, line, &start, &end)) return 0;
+    size_t width = end - start;
+
+    size_t k = 0;
+    for (size_t i = 0; i < s->ndiags && k < max; i++) {
+        const Diagnostic *d = &s->diags[i];
+        if (line < d->start_row || line > d->end_row) continue;
+        size_t a = (line == d->start_row) ? d->start_col : 0;
+        size_t b = (line == d->end_row) ? d->end_col : width;
+        if (a > width) a = width;
+        if (b > width) b = width;
+        if (b <= a) b = a + 1; /* zero-width diagnostics still need a mark */
+        out[k].start_col = a;
+        out[k].end_col = b;
+        out[k].name = d->message;
+        k++;
+    }
+    return k;
+}
+
+/* ---- language server ---- */
+
+/* The full text of the diagnostic under the cursor.
+ *
+ * Diagnostic.message is a non-owning `const char *`, so diagnostic_from_lsp()
+ * can only store the literal "diagnostic" — a server's message lives in an
+ * LspDiag buffer that would dangle. main.c has the same constraint and solves
+ * it the same way: underline from the merged set, but pull real text for the
+ * one under the cursor straight from the LspDiag array. */
+size_t wave_cursor_diagnostic(WaveSession *s, char *out, size_t cap) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !out || cap == 0) return 0;
+    out[0] = '\0';
+
+    LspDiag lsp[128];
+    int published = 0;
+    size_t n = lsp_manager_diagnostics(&s->lsp, e, lsp,
+                                       sizeof lsp / sizeof lsp[0], &published);
+    DiagnosticCursorInfo info = {0};
+    if (!diagnostics_cursor_info(e, lsp, n, out, cap, &info)) return 0;
+    return strlen(out);
+}
+
+int wave_lsp_active(const WaveSession *s) {
+    return s ? lsp_manager_active(&s->lsp) : 0;
+}
+
+const char *wave_hover(const WaveSession *s) {
+    return (s && s->has_hover) ? s->hover : "";
+}
+
+void wave_hover_clear(WaveSession *s) {
+    if (s) s->has_hover = 0;
+}
+
+/* Drain server replies. Returns 1 if anything changed and the UI should
+ * repaint. Called from a GPUI timer, since replies arrive asynchronously. */
+int wave_lsp_poll(WaveSession *s) {
+    if (!s) return 0;
+    Editor *e = cur(s);
+    if (!e) return 0;
+
+    LspManagerUpdate update = lsp_manager_update_ui(&s->lsp, e);
+    LspManagerUiPlan plan = lsp_manager_ui_plan(update);
+    int changed = 0;
+
+    if (plan.open_definition && plan.definition.path[0]) {
+        if (open_in_tab(s, plan.definition.path, 0)) {
+            Editor *ne = tabs_current(&s->tabs);
+            if (ne) editor_move_to_line_col(ne, plan.definition.line,
+                                            plan.definition.col);
+        }
+        changed = 1;
+    }
+    if (plan.show_hover && plan.hover[0]) {
+        snprintf(s->hover, sizeof s->hover, "%s", plan.hover);
+        s->has_hover = 1;
+        popover_show_hover(&s->pop, plan.hover);
+        changed = 1;
+    }
+    if (comp_drain_lsp(s, e)) changed = 1;
+
+    size_t before = s->ndiags;
+    refresh_diags(s);
+    if (s->ndiags != before) changed = 1;
+    return changed;
+}
+
+/* Wave's own palette, packed 0xRRGGBB, so the GPUI front-end doesn't fork it. */
+unsigned wave_theme_rgb(const char *name) {
+    Color c = theme_color(name);
+    unsigned r = (unsigned)(c.r * 255.0f + 0.5f);
+    unsigned g = (unsigned)(c.g * 255.0f + 0.5f);
+    unsigned b = (unsigned)(c.b * 255.0f + 0.5f);
+    return (r << 16) | (g << 8) | b;
+}
+
+void wave_cursor(const WaveSession *s, size_t *row, size_t *col) {
+    size_t r = 0, c = 0;
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    if (e && e->buf) pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &r, &c);
+    if (row) *row = r;
+    if (col) *col = c;
+}
+
+int wave_mode(const WaveSession *s) {
+    return s ? (int)s->modal.mode : (int)MODE_NORMAL;
+}
+
+const char *wave_mode_name(const WaveSession *s) {
+    return mode_name(s ? s->modal.mode : MODE_NORMAL);
+}
+
+int wave_modified(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    return e ? e->modified : 0;
+}
+
+/* ---- mouse selection ----
+ *
+ * editor_apply_click_position/editor_apply_drag_selection hit-test in pixels
+ * using e->scroll_y and the wrap index (e->vstart), neither of which this
+ * front-end drives — it scrolls in whole lines and lays out with flexbox. So
+ * the row/column are resolved on the Rust side and applied here, which is the
+ * same end state: cursor moved, anchor held. */
+
+/* `line`/`col` are 0-based, like every other position in this ABI.
+ * editor_move_to_line_col() is 1-based (it backs `:123` and the file finder),
+ * so convert rather than leaking that off-by-one to the front-end. */
+void wave_click_at(WaveSession *s, int line, int col) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return;
+    editor_move_to_line_col(e, line + 1, col + 1);
+    e->anchor = e->cursor; /* a bare click collapses any selection */
+    s->mouse_selecting = 0;
+    modal_enter_normal(&s->modal);
+}
+
+void wave_drag_to(WaveSession *s, int line, int col) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return;
+    size_t anchor = e->anchor; /* move_to_line_col resets it; put it back */
+    editor_move_to_line_col(e, line + 1, col + 1);
+    e->anchor = anchor;
+    e->group_open = 0;
+    s->mouse_selecting = 1;
+}
+
+int wave_has_selection(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    if (!e || !e->buf) return 0;
+    return (s->modal.mode == MODE_VISUAL || s->mouse_selecting) &&
+           e->cursor != e->anchor;
+}
+
+/* The selected text, for Cmd-C. Caller must free via wave_string_free(). */
+char *wave_selection_text(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return NULL;
+    if (!wave_has_selection(s)) return NULL;
+    return editor_copy_text(e, 1);
+}
+
+void wave_string_free(char *p) { free(p); }
+
+/* Selection on `line`, as byte columns. Covers both visual mode and a mouse
+ * drag — editor_visual_range only looks at cursor/anchor, not the modal mode. */
+int wave_line_selection(WaveSession *s, size_t line, size_t *a, size_t *b) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return 0;
+    if (s->modal.mode != MODE_VISUAL && !s->mouse_selecting) return 0;
+    EditorRange sel;
+    if (!editor_visual_range(e, &sel)) return 0;
+    size_t start, end;
+    if (!line_bounds(e, line, &start, &end)) return 0;
+    if (sel.end <= start || sel.start > end) return 0;
+    size_t lo = sel.start < start ? start : sel.start;
+    size_t hi = sel.end > end ? end : sel.end;
+    *a = lo - start;
+    *b = hi - start;
+    return 1;
+}
+
+/* ---- current editor: commands in ---- */
+
+unsigned wave_text_input(WaveSession *s, unsigned int cp) {
+    if (!s) return 0;
+    Editor *e = cur(s);
+
+    /* With no buffer, Wave's planner drops text entirely
+     * (input_text_target -> INPUT_TEXT_NONE), which also makes `:` unreachable.
+     * We deliberately diverge: the tab-spawning commands (`:term`, `:git`,
+     * `:claude`) are most useful with nothing open, and would otherwise depend
+     * on a keyboard shortcut being the only way in. */
+    if (!e || !e->buf) {
+        if (cp == ':') command_open(&s->cmd);
+        return 0;
+    }
+
+    if (s->modal.mode == MODE_INSERT) {
+        editor_apply_text_input(e, cp);
+        editor_update_highlighter(e);
+        lsp_manager_push_change(&s->lsp, e);
+        comp_after_insert(s, e, cp);
+        refresh_diags(s);
+        return 0;
+    }
+
+    EditCommandResult res = edit_command_apply(e, &s->modal, &s->yank, cp);
+    editor_update_highlighter(e);
+
+    /* gd / gh. Both are async: the reply lands in wave_lsp_poll(). Without a
+     * server, request_definition_at_cursor falls back to the tree-sitter
+     * heuristic and moves the cursor synchronously. */
+    if (res.flags & EDIT_COMMAND_GOTO_DEFINITION) {
+        char message[256];
+        if (!lsp_manager_request_definition_at_cursor(&s->lsp, e, message,
+                                                      sizeof message))
+            editor_goto_local_definition(e, message, sizeof message);
+    }
+    if (res.flags & EDIT_COMMAND_SHOW_INFO) {
+        /* gh: open the popover on the local info immediately, then let the
+         * server's hover compose into it when the reply lands. */
+        char base[LSP_MANAGER_HOVER_CAP];
+        LspManagerHoverInfo info =
+            lsp_manager_hover_info(&s->lsp, e, base, sizeof base);
+        popover_show_base(&s->pop, base, info.loading);
+        if (info.ok)
+            lsp_manager_request_hover(&s->lsp, e, (int)info.row, (int)info.col);
+    }
+    if (res.flags & EDIT_COMMAND_OPEN_COMMAND_LINE) command_open(&s->cmd);
+    if (res.flags & EDIT_COMMAND_OPEN_BUFFER_SEARCH) bufsearch_open(s);
+    if (res.flags & EDIT_COMMAND_SEARCH_NEXT) bufsearch_repeat(s, 0);
+    if (res.flags & EDIT_COMMAND_SEARCH_PREV) bufsearch_repeat(s, 1);
+    if (res.flags & EDIT_COMMAND_SEARCH_WORD) bufsearch_word(s);
+    if (res.flags & EDIT_COMMAND_UNDO_AT_OLDEST)
+        snprintf(s->info, sizeof s->info, "already at oldest change");
+
+    lsp_manager_push_change(&s->lsp, e);
+    refresh_diags(s);
+    return res.flags;
+}
+
+int wave_special_key(WaveSession *s, int key) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return 0;
+    int handled;
+    if (s->modal.mode == MODE_INSERT)
+        handled = editor_apply_insert_key(e, (EditorKey)key);
+    else
+        handled = editor_apply_motion_key(e, (EditorKey)key);
+    editor_update_highlighter(e);
+    lsp_manager_push_change(&s->lsp, e);
+    refresh_diags(s);
+    return handled;
+}
+
+void wave_escape(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s) return;
+    modal_enter_normal(&s->modal);
+    if (e) editor_cancel_group(e);
+}
+
+int wave_undo(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return 0;
+    int ok = editor_undo(e);
+    editor_update_highlighter(e);
+    return ok;
+}
+
+int wave_redo(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return 0;
+    int ok = editor_redo(e);
+    editor_update_highlighter(e);
+    return ok;
+}
+
+int wave_save(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return -1;
+    return editor_save_file(e, &s->watch);
+}
+
+/* Jump the cursor to a 0-based line/column (used by the file finder). */
+void wave_goto_line(WaveSession *s, int line, int column) {
+    Editor *e = cur(s);
+    if (e && e->buf) editor_move_to_line_col(e, line, column);
+}
+
+/* ==========================================================================
+ * Terminal tabs (terminal.c over libghostty-vt)
+ * ========================================================================== */
+
+/* Byte offsets, not columns. TerminalCellStyle carries both; the front-end
+ * indexes UTF-8 text, and a single multi-byte glyph (box drawing, `›`, …) is
+ * enough to make the two disagree — which misplaces colours and the cursor. */
+typedef struct {
+    size_t start_byte;
+    size_t end_byte;
+    unsigned fg; /* 0xRRGGBB, or WAVE_COLOR_DEFAULT */
+    unsigned bg;
+} WaveCellStyle;
+
+#define WAVE_COLOR_DEFAULT 0xFFFFFFFFu
+
+int wave_tab_kind(const WaveSession *s, int i) {
+    return s ? (int)tabs_kind_at(&s->tabs, i) : 0;
+}
+
+/* Spawn a login shell in a new tab, rooted at the workspace. */
+int wave_term_open(WaveSession *s, const char *label, const char *cmd) {
+    if (!s) return 0;
+    const char *root = s->ws ? ws_root(s->ws) : ".";
+    const char *shell = getenv("SHELL");
+    if (!shell || !*shell) shell = "/bin/zsh";
+
+    /* main.c spawns the bare shell; `-l` makes it a login shell and changes
+     * which startup files run, so keep it identical to the known-good path. */
+    const char *argv_shell[] = {shell, NULL};
+    const char *argv_cmd[] = {shell, "-lc", cmd, NULL};
+    Terminal *t = tabs_new_terminal(&s->tabs, label ? label : "terminal", root,
+                                    cmd && *cmd ? argv_cmd : argv_shell);
+    return t != NULL;
+}
+
+static Terminal *cur_term(WaveSession *s) {
+    return s ? tabs_current_terminal(&s->tabs) : NULL;
+}
+
+int wave_term_active(const WaveSession *s) {
+    return s && tabs_current_kind(&s->tabs) == TAB_ITEM_TERMINAL;
+}
+
+/* Drain any pty output across every terminal tab, as main.c's poll loop does.
+ *
+ * Returns 1 only when something actually changed. terminal_poll() is void, so
+ * "changed" is a cheap snapshot of the active terminal's line count, pending
+ * partial line and cursor — otherwise the UI would repaint at the poll rate
+ * forever just because a terminal tab exists. */
+int wave_term_poll(WaveSession *s) {
+    if (!s) return 0;
+    static size_t last_nlines, last_current_len;
+    static int last_row, last_col, last_running;
+
+    int any = 0;
+    for (int i = 0; i < tabs_count(&s->tabs); i++) {
+        Terminal *t = tabs_terminal_at(&s->tabs, i);
+        if (!t) continue;
+        terminal_poll(t);
+        any = 1;
+    }
+    if (!any) return 0;
+
+    const Terminal *t = tabs_current_terminal_const(&s->tabs);
+    if (!t) return 0;
+    int changed = t->nlines != last_nlines || t->current_len != last_current_len ||
+                  t->cursor_row != last_row || t->cursor_col != last_col ||
+                  t->running != last_running;
+    last_nlines = t->nlines;
+    last_current_len = t->current_len;
+    last_row = t->cursor_row;
+    last_col = t->cursor_col;
+    last_running = t->running;
+    return changed;
+}
+
+/* Total addressable lines, so the view can stop at the end of the scrollback
+ * instead of painting blank rows past it (draw_terminal_panel clamps too). */
+size_t wave_term_total_lines(const WaveSession *s) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (!t) return 0;
+    return t->nlines + (t->current_len ? 1u : 0u);
+}
+
+void wave_term_resize(WaveSession *s, int rows, int cols) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_resize(t, rows, cols);
+}
+
+size_t wave_term_visible_start(const WaveSession *s, int rows) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    return t ? terminal_visible_start(t, rows) : 0;
+}
+
+size_t wave_term_line(const WaveSession *s, size_t index, char *out, size_t cap) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (!t || !out || cap == 0) return 0;
+    const char *line = terminal_line(t, index);
+    if (!line) return 0;
+    size_t n = strlen(line);
+    if (n > cap) n = cap;
+    memcpy(out, line, n);
+    return n;
+}
+
+static unsigned pack_term_color(TerminalColor c) {
+    unsigned r = (unsigned)(c.r * 255.0f + 0.5f);
+    unsigned g = (unsigned)(c.g * 255.0f + 0.5f);
+    unsigned b = (unsigned)(c.b * 255.0f + 0.5f);
+    return (r << 16) | (g << 8) | b;
+}
+
+size_t wave_term_line_styles(const WaveSession *s, size_t index,
+                             WaveCellStyle *out, size_t max) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (!t || !out || max == 0) return 0;
+    const TerminalLineStyle *st = terminal_line_style(t, index);
+    if (!st) return 0;
+    size_t k = 0;
+    for (size_t i = 0; i < st->ncells && k < max; i++) {
+        const TerminalCellStyle *c = &st->cells[i];
+        out[k].start_byte = c->byte_start;
+        out[k].end_byte = c->byte_start + c->byte_len;
+        out[k].fg = c->has_fg ? pack_term_color(c->fg) : WAVE_COLOR_DEFAULT;
+        out[k].bg = c->has_bg ? pack_term_color(c->bg) : WAVE_COLOR_DEFAULT;
+        k++;
+    }
+    return k;
+}
+
+/* Byte offset of display column `col` on the terminal line at `index`, so the
+ * cursor (reported in columns) can be placed in byte-indexed text. */
+size_t wave_term_col_to_byte(const WaveSession *s, size_t index, size_t col) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (!t) return 0;
+    const char *line = terminal_line(t, index);
+    if (!line) return 0;
+
+    size_t byte = 0, seen = 0;
+    while (line[byte] && seen < col) {
+        unsigned char c = (unsigned char)line[byte];
+        /* Skip one UTF-8 sequence per display column. */
+        byte += c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        seen++;
+    }
+    return byte;
+}
+
+/* cursor_row is an *absolute* scrollback row — draw_terminal_panel subtracts
+ * terminal_visible_start() from it to get a screen row. Reported as-is; the
+ * caller does the same subtraction. */
+void wave_term_cursor(const WaveSession *s, int *row, int *col, int *visible) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (row) *row = t ? t->cursor_row : 0;
+    if (col) *col = t ? t->cursor_col : 0;
+    /* The C renderer only draws the cursor while the child is alive. */
+    if (visible) *visible = t ? (t->cursor_visible && t->running) : 0;
+}
+
+int wave_term_rows(const WaveSession *s) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    return t ? t->rows : 0;
+}
+
+int wave_term_running(const WaveSession *s) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    return t ? t->running : 0;
+}
+
+const char *wave_term_status(const WaveSession *s) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    return t ? terminal_status(t) : "";
+}
+
+void wave_term_write(WaveSession *s, const char *text) {
+    Terminal *t = cur_term(s);
+    if (t && text) terminal_write(t, text, strlen(text));
+}
+
+/* `key` is a GLFW key code — terminal_key_sequence() switches on those
+ * directly (256 Escape, 257 Enter, 258 Tab, 259 Backspace, 261 Delete,
+ * 262..265 arrows), and expects ASCII 'A'-'Z' for control chords. Passing
+ * EditorKey values here silently produces the wrong escape sequences. */
+void wave_term_key(WaveSession *s, int key, int shift, int alt, int control) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_send_key_mods(t, key, shift, alt, control);
+}
+
+void wave_term_scroll(WaveSession *s, int units) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_scroll(t, units);
+}
+
+/* ==========================================================================
+ * Git view (git_view.c)
+ * ========================================================================== */
+
+int wave_git_open(WaveSession *s) {
+    if (!s) return 0;
+    const char *root = s->ws ? ws_root(s->ws) : ".";
+    return tabs_new_git(&s->tabs, "git", root) != NULL;
+}
+
+static GitView *cur_git(WaveSession *s) {
+    return s ? tabs_current_git(&s->tabs) : NULL;
+}
+
+int wave_git_active(const WaveSession *s) {
+    return s && tabs_current_kind(&s->tabs) == TAB_ITEM_GIT;
+}
+
+int wave_git_mode(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? (int)g->mode : 0;
+}
+
+int wave_git_repo_count(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->repo_count : 0;
+}
+
+const char *wave_git_repo_label(const WaveSession *s, int i) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    if (!g || i < 0 || i >= g->repo_count) return "";
+    return g->repos[i].label;
+}
+
+int wave_git_selected_repo(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->selected_repo : 0;
+}
+
+int wave_git_file_count(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->file_count : 0;
+}
+
+int wave_git_file(const WaveSession *s, int i, const char **code,
+                  const char **path) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    if (!g || i < 0 || i >= g->file_count) return 0;
+    if (code) *code = g->files[i].code;
+    if (path) *path = g->files[i].path;
+    return 1;
+}
+
+int wave_git_selected_file(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->selected_file : 0;
+}
+
+int wave_git_diff_count(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->diff_count : 0;
+}
+
+const char *wave_git_diff_line(const WaveSession *s, int i) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    if (!g || i < 0 || i >= g->diff_count) return "";
+    return g->diff[i];
+}
+
+const char *wave_git_message(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->message : "";
+}
+
+const char *wave_git_info(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->info : "";
+}
+
+void wave_git_move(WaveSession *s, int delta) {
+    GitView *g = cur_git(s);
+    if (g) git_view_move(g, delta);
+}
+
+int wave_git_accept(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_accept(g) : 0;
+}
+
+int wave_git_stage_toggle(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_stage_toggle(g) : 0;
+}
+
+int wave_git_begin_commit(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_begin_commit(g) : 0;
+}
+
+int wave_git_commit(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_commit(g) : 0;
+}
+
+void wave_git_cancel_input(WaveSession *s) {
+    GitView *g = cur_git(s);
+    if (g) git_view_cancel_input(g);
+}
+
+int wave_git_insert_text(WaveSession *s, const char *text) {
+    GitView *g = cur_git(s);
+    return (g && text) ? git_view_insert_text(g, text) : 0;
+}
+
+int wave_git_backspace(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_backspace(g) : 0;
+}
+
+int wave_git_refresh(WaveSession *s) {
+    GitView *g = cur_git(s);
+    return g ? git_view_refresh(g) : 0;
+}
+
+void wave_git_diff_scroll(WaveSession *s, int delta) {
+    GitView *g = cur_git(s);
+    if (g) git_view_diff_scroll(g, delta);
+}
+
+/* ==========================================================================
+ * Insert-mode completion (complete.c, sourced from LSP / tree-sitter / words)
+ *
+ * Mirrors main.c's complete_trigger / complete_source_locally / after_insert.
+ * ========================================================================== */
+
+static void comp_clear_lsp_source(void) {
+    g_comp_lsp_count = 0;
+    g_comp_lsp_generation = 0;
+}
+
+/* LSP CompletionItemKind numbering, mapped the same way main.c maps it. */
+static CompleteKind comp_kind_from_lsp(int lsp_kind) {
+    switch (lsp_kind) {
+    case 3:  /* Function */
+    case 2:  /* Method */
+    case 4:  return COMPLETE_KIND_FUNCTION; /* Constructor */
+    case 5:  /* Field */
+    case 10: return COMPLETE_KIND_FIELD;    /* Property */
+    case 6:  return COMPLETE_KIND_VARIABLE;
+    case 7:  /* Class */
+    case 8:  /* Interface */
+    case 22: return COMPLETE_KIND_TYPE;     /* Struct */
+    case 9:  return COMPLETE_KIND_MODULE;
+    case 14: return COMPLETE_KIND_KEYWORD;
+    default: return COMPLETE_KIND_TEXT;
+    }
+}
+
+static void comp_source_locally(WaveSession *s, Editor *e, unsigned int gen,
+                                const char *prefix) {
+    comp_clear_lsp_source();
+    static CompleteItem items[COMPLETE_MAX_ITEMS];
+    int n = 0;
+    if (e->hl) {
+        static HlIdent idents[COMPLETE_MAX_ITEMS];
+        int ni = (int)hl_identifiers(e->hl, prefix, idents, COMPLETE_MAX_ITEMS);
+        for (int i = 0; i < ni; i++) {
+            CompleteItem *it = &items[n];
+            snprintf(it->label, sizeof it->label, "%s", idents[i].text);
+            snprintf(it->insert_text, sizeof it->insert_text, "%s",
+                     idents[i].text);
+            it->detail[0] = '\0';
+            it->sort_text[0] = '\0';
+            it->kind = idents[i].kind == HL_IDENT_TYPE      ? COMPLETE_KIND_TYPE
+                       : idents[i].kind == HL_IDENT_PROPERTY ? COMPLETE_KIND_FIELD
+                                                             : COMPLETE_KIND_VARIABLE;
+            it->scope = COMPLETE_SCOPE_UNKNOWN;
+            n++;
+        }
+    } else {
+        char *txt = editor_text(e);
+        n = complete_collect_buffer_words(txt, prefix, items, COMPLETE_MAX_ITEMS);
+        free(txt);
+    }
+    complete_set_items(&s->comp, gen, items, n);
+    if (s->comp.nfiltered == 0) complete_close(&s->comp);
+}
+
+static void comp_trigger(WaveSession *s, Editor *e, size_t word_start,
+                         const char *prefix, char trigger_character) {
+    int member = trigger_character == '.';
+    if (!member && e->buf && word_start > 0) {
+        char previous = 0;
+        pt_read(buffer_pt(e->buf), word_start - 1, 1, &previous);
+        member = previous == '.';
+    }
+    comp_clear_lsp_source();
+    unsigned int gen = complete_begin(&s->comp, word_start, prefix);
+
+    Lsp *l = lsp_manager_for(&s->lsp, e);
+    if (l && lsp_ready(l)) {
+        g_comp_trigger = trigger_character;
+        g_comp_member_context = member;
+        size_t row = 0, col = 0;
+        pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+        if (trigger_character)
+            lsp_manager_request_triggered_completion(&s->lsp, e, (int)row,
+                                                     (int)col, trigger_character);
+        else
+            lsp_manager_request_completion(&s->lsp, e, (int)row, (int)col);
+        complete_set_loading(&s->comp, gen);
+        return;
+    }
+    comp_source_locally(s, e, gen, prefix);
+}
+
+static void comp_after_insert(WaveSession *s, Editor *e,
+                              unsigned int trigger_character) {
+    if (!e || !e->buf) {
+        complete_close(&s->comp);
+        return;
+    }
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t ws = complete_prefix_start(pt, e->cursor);
+    size_t plen = e->cursor - ws;
+
+    if (trigger_character == '.') {
+        comp_trigger(s, e, e->cursor, "", '.');
+        return;
+    }
+    if (plen == 0) {
+        complete_close(&s->comp);
+        return;
+    }
+
+    char prefix[COMPLETE_LABEL_CAP];
+    size_t n = plen < sizeof prefix - 1 ? plen : sizeof prefix - 1;
+    pt_read(pt, ws, n, prefix);
+    prefix[n] = '\0';
+
+    if (s->comp.active && s->comp.word_start == ws) {
+        complete_set_prefix(&s->comp, prefix);
+        if (s->comp.nfiltered == 0 && !s->comp.loading)
+            comp_trigger(s, e, ws, prefix, 0);
+        return;
+    }
+    comp_trigger(s, e, ws, prefix, 0);
+}
+
+/* Drain a completion reply. Called from the LSP poll. */
+static int comp_drain_lsp(WaveSession *s, Editor *e) {
+    if (!s->comp.active || !e) return 0;
+    size_t n = 0;
+    if (!lsp_manager_take_completions(&s->lsp, e, g_comp_lsp,
+                                      LSP_MAX_COMPLETIONS, &n))
+        return 0;
+
+    g_comp_lsp_count = n;
+    g_comp_lsp_generation = s->comp.generation;
+
+    static CompleteItem items[COMPLETE_MAX_ITEMS];
+    int count = 0;
+    for (size_t i = 0; i < n && count < COMPLETE_MAX_ITEMS; i++) {
+        const LspCompletionItem *src = &g_comp_lsp[i];
+        CompleteItem *it = &items[count];
+        snprintf(it->label, sizeof it->label, "%s", src->label);
+        snprintf(it->insert_text, sizeof it->insert_text, "%s",
+                 src->insert_text[0] ? src->insert_text : src->label);
+        snprintf(it->detail, sizeof it->detail, "%s", src->detail);
+        snprintf(it->sort_text, sizeof it->sort_text, "%s", src->sort_text);
+        it->kind = comp_kind_from_lsp(src->kind);
+        it->scope = complete_scope_from_lsp_kind(src->kind, g_comp_member_context);
+        count++;
+    }
+    complete_set_items(&s->comp, s->comp.generation, items, count);
+    s->comp.loading = 0;
+    if (s->comp.nfiltered == 0) {
+        /* Lazy servers answer the first request with nothing; fall back. */
+        comp_source_locally(s, e, s->comp.generation, s->comp.prefix);
+    }
+    return 1;
+}
+
+int wave_complete_active(const WaveSession *s) {
+    return s ? complete_is_active(&s->comp) : 0;
+}
+
+int wave_complete_loading(const WaveSession *s) {
+    return s ? s->comp.loading : 0;
+}
+
+int wave_complete_count(const WaveSession *s) {
+    return s ? s->comp.nfiltered : 0;
+}
+
+int wave_complete_selected(const WaveSession *s) {
+    return s ? s->comp.sel : 0;
+}
+
+int wave_complete_item(const WaveSession *s, int i, const char **label,
+                       const char **detail, const char **kind) {
+    if (!s || i < 0 || i >= s->comp.nfiltered) return 0;
+    const CompleteItem *it = &s->comp.items[s->comp.filtered[i]];
+    if (label) *label = it->label;
+    if (detail) *detail = it->detail;
+    if (kind) *kind = complete_kind_tag(it->kind);
+    return 1;
+}
+
+void wave_complete_move(WaveSession *s, int delta) {
+    if (s) complete_move(&s->comp, delta);
+}
+
+void wave_complete_close(WaveSession *s) {
+    if (s) complete_close(&s->comp);
+}
+
+/* Apply the selection, keeping the server's additional edits (auto-imports). */
+int wave_complete_accept(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !s->comp.active || s->comp.nfiltered == 0) return 0;
+    CompleteEdit edit;
+    if (!complete_accept(&s->comp, e->cursor, &edit)) {
+        complete_close(&s->comp);
+        return 0;
+    }
+    int raw = s->comp.filtered[s->comp.sel];
+    const LspCompletionItem *item = NULL;
+    if (g_comp_lsp_generation == s->comp.generation && raw >= 0 &&
+        (size_t)raw < g_comp_lsp_count)
+        item = &g_comp_lsp[raw];
+
+    lsp_manager_apply_completion(e, edit.start, edit.end, edit.text, item);
+    complete_close(&s->comp);
+    comp_clear_lsp_source();
+    editor_update_highlighter(e);
+    lsp_manager_push_change(&s->lsp, e);
+    refresh_diags(s);
+    return 1;
+}
+
+/* ==========================================================================
+ * Cmd-Shift-F project search (project_search.c through the overlay)
+ * ========================================================================== */
+
+int wave_search_open(WaveSession *s) {
+    if (!s) return 0;
+    return overlay_open_search(&s->overlay);
+}
+
+int wave_search_active(const WaveSession *s) {
+    return s && overlay_active(&s->overlay) == OVERLAY_SEARCH;
+}
+
+const char *wave_search_query(const WaveSession *s) {
+    if (!s) return "";
+    const char *q = overlay_query((OverlayState *)&s->overlay);
+    return q ? q : "";
+}
+
+void wave_search_input(WaveSession *s, const char *text) {
+    if (!s || !text) return;
+    overlay_insert_text(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "", text);
+}
+
+void wave_search_backspace(WaveSession *s) {
+    if (s) overlay_backspace(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "");
+}
+
+void wave_search_move(WaveSession *s, int delta) {
+    if (s) overlay_move(&s->overlay, delta);
+}
+
+int wave_search_poll(WaveSession *s) {
+    if (!s || overlay_active(&s->overlay) != OVERLAY_SEARCH) return 0;
+    int running = overlay_search_running(&s->overlay);
+    overlay_poll_search(&s->overlay);
+    return running;
+}
+
+int wave_search_running(const WaveSession *s) {
+    return s ? overlay_search_running(&s->overlay) : 0;
+}
+
+size_t wave_search_count(const WaveSession *s) {
+    return s ? project_search_count(&s->overlay.search) : 0;
+}
+
+int wave_search_selected(const WaveSession *s) {
+    return s ? s->overlay.search.sel : 0;
+}
+
+int wave_search_hit(const WaveSession *s, size_t i, const char **path,
+                    int *line, int *col, const char **text) {
+    if (!s) return 0;
+    const SearchHit *h = project_search_hit(&s->overlay.search, i);
+    if (!h) return 0;
+    if (path) *path = h->path;
+    if (line) *line = h->line;
+    if (col) *col = h->col;
+    if (text) *text = h->text;
+    return 1;
+}
+
+/* Open the highlighted hit at its line/column. */
+int wave_search_accept(WaveSession *s) {
+    if (!s) return 0;
+    OverlayAcceptTarget t = overlay_accept_target(&s->overlay, s->ws);
+    int ok = 0;
+    if (t.has_target && t.path) {
+        ok = open_in_tab(s, t.path, 0);
+        if (ok && t.has_location) {
+            Editor *e = tabs_current(&s->tabs);
+            if (e) editor_move_to_line_col(e, t.line, t.col);
+        }
+    }
+    overlay_accept_target_free(&t);
+    overlay_close(&s->overlay);
+    return ok;
+}
+
+/* ==========================================================================
+ * `:` command line (command.c)
+ * ========================================================================== */
+
+int wave_cmd_active(const WaveSession *s) { return s ? s->cmd.active : 0; }
+
+const char *wave_cmd_text(const WaveSession *s) {
+    return s ? command_text((CommandLine *)&s->cmd) : "";
+}
+
+void wave_cmd_open(WaveSession *s) {
+    if (s) command_open(&s->cmd);
+}
+
+void wave_cmd_close(WaveSession *s) {
+    if (s) command_close(&s->cmd);
+}
+
+void wave_cmd_input(WaveSession *s, const char *text) {
+    if (s && text) command_insert_text(&s->cmd, text);
+}
+
+void wave_cmd_backspace(WaveSession *s) {
+    if (s) command_backspace(&s->cmd);
+}
+
+/* The tab-spawning commands main.c checks *before* handing the text to
+ * command_run: `:term`, `:codex`, `:claude`, `:git`. */
+static int cmd_open_tab(WaveSession *s, const char *text) {
+    if (!text) return 0;
+    const char *root = s->ws ? ws_root(s->ws) : ".";
+
+    if (!strcmp(text, "term") || !strcmp(text, "terminal")) {
+        const char *shell = getenv("SHELL");
+        if (!shell || !*shell) shell = "/bin/zsh";
+        const char *argv[] = {shell, NULL};
+        tabs_new_terminal(&s->tabs, "term", root, argv);
+        snprintf(s->info, sizeof s->info, "terminal opened");
+        return 1;
+    }
+    if (!strcmp(text, "codex")) {
+        const char *argv[] = {"codex", NULL};
+        tabs_new_terminal(&s->tabs, "codex", root, argv);
+        snprintf(s->info, sizeof s->info, "codex opened");
+        return 1;
+    }
+    if (!strcmp(text, "claude")) {
+        const char *argv[] = {"claude", NULL};
+        tabs_new_terminal(&s->tabs, "claude", root, argv);
+        snprintf(s->info, sizeof s->info, "claude opened");
+        return 1;
+    }
+    if (!strcmp(text, "git") || !strcmp(text, "changes")) {
+        tabs_new_git(&s->tabs, "git", root);
+        snprintf(s->info, sizeof s->info, "git opened");
+        return 1;
+    }
+    return 0;
+}
+
+/* Run the typed command. Returns a CommandCloseAction so the front-end knows
+ * whether to close a tab or the window; `info` carries any message. */
+int wave_cmd_accept(WaveSession *s) {
+    if (!s) return 0;
+    if (cmd_open_tab(s, command_text(&s->cmd))) {
+        command_close(&s->cmd);
+        return 0;
+    }
+    char config_path[1024];
+    wave_config_path(config_path, sizeof config_path);
+
+    CommandRun run = command_run(command_text(&s->cmd), &s->config, config_path);
+    snprintf(s->info, sizeof s->info, "%s", run.info);
+
+    Editor *e = cur(s);
+    CommandAppPlan plan =
+        command_app_plan(run.effect, e && editor_has_path(e));
+    if (plan.write_file && e) editor_save_file(e, &s->watch);
+    if (plan.save_config) wave_config_save(&s->config);
+
+    command_close(&s->cmd);
+    return (int)plan.close;
+}
+
+const char *wave_info(const WaveSession *s) { return s ? s->info : ""; }
+
+void wave_info_clear(WaveSession *s) {
+    if (s) s->info[0] = '\0';
+}
+
+/* ---- window / editor configuration (config.c) ----
+ *
+ * Namespaced `wave_cfg_` on purpose: libwave.a already exports
+ * wave_config_toggle_sidebar, wave_config_zoom, wave_config_toggle_wrap and
+ * friends, and reusing those names here would collide at link time. */
+
+int wave_cfg_opacity_pct(const WaveSession *s) {
+    return s ? (int)(s->config.opacity * 100.0f + 0.5f) : 100;
+}
+
+int wave_cfg_native_titlebar(const WaveSession *s) {
+    return s ? s->config.native_titlebar : 0;
+}
+
+int wave_cfg_blur(const WaveSession *s) { return s ? s->config.blur : 0; }
+
+float wave_cfg_radius(const WaveSession *s) { return s ? s->config.radius : 0.0f; }
+
+/* The *effective* point size. main.c loads its font at
+ * `base_pt * fb_scale * ui_scale`; the zoom shortcuts move ui_scale, not
+ * base_pt, so reading base_pt alone makes zoom look like a no-op. GPUI handles
+ * the device pixel ratio itself, so fb_scale is left out here. */
+float wave_cfg_base_pt(const WaveSession *s) {
+    if (!s) return 13.0f;
+    float pt = s->config.base_pt > 0.0f ? s->config.base_pt : 13.0f;
+    float scale = s->config.ui_scale > 0.0f ? s->config.ui_scale : 1.0f;
+    return pt * scale;
+}
+
+int wave_cfg_show_sidebar(const WaveSession *s) {
+    return s ? s->config.show_sidebar : 1;
+}
+
+int wave_cfg_wrap(const WaveSession *s) { return s ? s->config.wrap : 0; }
+
+int wave_cfg_toggle_sidebar(WaveSession *s) {
+    return s ? wave_config_toggle_sidebar(&s->config) : 0;
+}
+
+int wave_cfg_toggle_wrap(WaveSession *s) {
+    if (!s) return 0;
+    int on = wave_config_toggle_wrap(&s->config);
+    wave_config_wrap_text(&s->config, s->info, sizeof s->info);
+    return on;
+}
+
+/* dir: +1 larger, -1 smaller, 0 reset. */
+int wave_cfg_zoom(WaveSession *s, int dir) {
+    if (!s) return 0;
+    int changed = wave_config_zoom(&s->config, dir);
+    wave_config_zoom_text(&s->config, s->info, sizeof s->info);
+    return changed;
+}
+
+int wave_cfg_save(WaveSession *s) {
+    return s ? wave_config_save(&s->config) : 0;
+}
+
+/* ==========================================================================
+ * gh popover (popover.c)
+ * ========================================================================== */
+
+int wave_popover_active(const WaveSession *s) { return s ? s->pop.active : 0; }
+int wave_popover_loading(const WaveSession *s) { return s ? s->pop.loading : 0; }
+const char *wave_popover_text(const WaveSession *s) { return s ? s->pop.text : ""; }
+int wave_popover_scroll(const WaveSession *s) { return s ? s->pop.scroll : 0; }
+
+void wave_popover_close(WaveSession *s) {
+    if (s) popover_close(&s->pop);
+}
+
+void wave_popover_scroll_by(WaveSession *s, int delta) {
+    if (s) popover_scroll(&s->pop, delta);
+}
+
+void wave_popover_set_view(WaveSession *s, int total_rows, int vis_rows) {
+    if (s) popover_set_view(&s->pop, total_rows, vis_rows);
+}
+
+/* ==========================================================================
+ * `/` buffer search (command.c widget + editor_*_search)
+ * ========================================================================== */
+
+int wave_bufsearch_active(const WaveSession *s) {
+    return s ? s->buf_search.active : 0;
+}
+
+const char *wave_bufsearch_text(const WaveSession *s) {
+    return s ? command_text((CommandLine *)&s->buf_search) : "";
+}
+
+static void bufsearch_open(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!editor_has_buffer(e)) return;
+    command_open(&s->buf_search);
+    s->buf_search_editor = e;
+    s->buf_search_origin = e->cursor;
+    s->info[0] = '\0';
+    modal_enter_normal(&s->modal);
+}
+
+static void bufsearch_close(WaveSession *s) {
+    command_close(&s->buf_search);
+    s->buf_search_editor = NULL;
+}
+
+/* Live preview from the original cursor as the query grows. */
+static void bufsearch_update(WaveSession *s) {
+    Editor *e = s->buf_search_editor;
+    if (!editor_has_buffer(e)) return;
+    editor_preview_search(e, command_text(&s->buf_search), s->buf_search_origin,
+                          s->info, sizeof s->info);
+}
+
+void wave_bufsearch_input(WaveSession *s, const char *text) {
+    if (!s || !text) return;
+    command_insert_text(&s->buf_search, text);
+    bufsearch_update(s);
+}
+
+void wave_bufsearch_backspace(WaveSession *s) {
+    if (!s) return;
+    command_backspace(&s->buf_search);
+    bufsearch_update(s);
+}
+
+void wave_bufsearch_cancel(WaveSession *s) {
+    if (!s) return;
+    if (editor_has_buffer(s->buf_search_editor))
+        s->buf_search_editor->cursor = s->buf_search_origin;
+    s->info[0] = '\0';
+    bufsearch_close(s);
+}
+
+void wave_bufsearch_accept(WaveSession *s) {
+    if (!s) return;
+    const char *q = command_text(&s->buf_search);
+    if (q[0]) snprintf(s->last_buf_search, sizeof s->last_buf_search, "%s", q);
+    bufsearch_close(s);
+}
+
+static void bufsearch_jump(WaveSession *s, const char *query, int reverse) {
+    if (!query || !query[0]) return;
+    Editor *e = cur(s);
+    editor_search_text(e, query, reverse, s->info, sizeof s->info);
+}
+
+static void bufsearch_repeat(WaveSession *s, int reverse) {
+    if (!s->last_buf_search[0]) {
+        snprintf(s->info, sizeof s->info, "no previous search");
+        return;
+    }
+    bufsearch_jump(s, s->last_buf_search, reverse);
+}
+
+static void bufsearch_word(WaveSession *s) {
+    char word[256];
+    if (!editor_word_under_cursor(cur(s), word, sizeof word)) {
+        snprintf(s->info, sizeof s->info, "no word under cursor");
+        return;
+    }
+    snprintf(s->last_buf_search, sizeof s->last_buf_search, "%s", word);
+    bufsearch_jump(s, s->last_buf_search, 0);
+}
+
+/* Match ranges on `line`, so the UI can highlight them like the C renderer. */
+size_t wave_line_matches(WaveSession *s, size_t line, WaveSpan *out, size_t max) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !out || max == 0) return 0;
+
+    const char *needle = s->buf_search.active ? command_text(&s->buf_search)
+                                              : s->last_buf_search;
+    if (!needle || !needle[0]) return 0;
+
+    size_t start, end;
+    if (!line_bounds(e, line, &start, &end)) return 0;
+
+    static EditorRange ranges[512];
+    size_t n = editor_search_matches(e, needle, ranges,
+                                     sizeof ranges / sizeof ranges[0]);
+    size_t k = 0;
+    for (size_t i = 0; i < n && k < max; i++) {
+        if (ranges[i].end <= start || ranges[i].start >= end) continue;
+        size_t a = ranges[i].start < start ? start : ranges[i].start;
+        size_t b = ranges[i].end > end ? end : ranges[i].end;
+        if (a >= b) continue;
+        out[k].start_col = a - start;
+        out[k].end_col = b - start;
+        out[k].name = "match";
+        k++;
+    }
+    return k;
+}
+
+/* ==========================================================================
+ * Yank register (so the front-end can mirror it to the system clipboard)
+ * ========================================================================== */
+
+const char *wave_yank_text(const WaveSession *s) {
+    return (s && s->yank.text) ? s->yank.text : "";
+}
+
+/* ==========================================================================
+ * Sidebar file operations (ws_create_* / ws_delete_path)
+ * ========================================================================== */
+
+/* dir_rel is the workspace-relative directory; "" means the root. */
+int wave_ws_create(WaveSession *s, const char *dir_rel, const char *name,
+                   int is_dir, char *message, size_t cap) {
+    if (!s || !s->ws || !name) return 0;
+    WsFileEffect eff = is_dir ? ws_create_dir_in(s->ws, dir_rel, name)
+                              : ws_create_file_in(s->ws, dir_rel, name);
+    if (message && cap) snprintf(message, cap, "%s", eff.message);
+    if (eff.ok && !is_dir && eff.path[0]) open_in_tab(s, eff.path, 0);
+    return eff.ok;
+}
+
+int wave_ws_delete(WaveSession *s, const char *rel, char *message, size_t cap) {
+    if (!s || !s->ws || !rel) return 0;
+    WsFileEffect eff = ws_delete_path(s->ws, rel);
+    if (message && cap) snprintf(message, cap, "%s", eff.message);
+    return eff.ok;
+}
+
+/* Rename is a move onto the same parent: the core exposes it as paste+cut. */
+int wave_ws_rename(WaveSession *s, const char *rel, const char *dir_rel,
+                   char *message, size_t cap) {
+    if (!s || !s->ws || !rel) return 0;
+    char *full = ws_fullpath(s->ws, rel);
+    if (!full) return 0;
+    WsFileEffect eff = ws_paste_path_into(s->ws, full, dir_rel, 1);
+    free(full);
+    if (message && cap) snprintf(message, cap, "%s", eff.message);
+    return eff.ok;
+}
+
+/* The directory a sidebar row belongs to, for "new file here". */
+int wave_ws_parent_dir(const WaveSession *s, size_t vi, char *out, size_t cap) {
+    if (!s || !s->ws || !out || cap == 0) return 0;
+    out[0] = '\0';
+    const WsEntry *e = ws_visible(s->ws, vi);
+    if (!e) return 0;
+    if (e->is_dir) {
+        snprintf(out, cap, "%s", e->rel);
+        return 1;
+    }
+    const char *slash = strrchr(e->rel, '/');
+    if (slash) {
+        size_t n = (size_t)(slash - e->rel);
+        if (n >= cap) n = cap - 1;
+        memcpy(out, e->rel, n);
+        out[n] = '\0';
+    }
+    return 1;
+}
+
+/* ==========================================================================
+ * Recent projects (recent.c)
+ * ========================================================================== */
+
+size_t wave_recent_count(const WaveSession *s) {
+    return s ? s->recent.filtered_count : 0;
+}
+
+const char *wave_recent_path(const WaveSession *s, size_t i) {
+    if (!s) return "";
+    const char *p = recent_projects_filtered_path(&s->recent, i);
+    return p ? p : "";
+}
+
+int wave_recent_selected(const WaveSession *s) {
+    return s ? s->recent.selected : 0;
+}
+
+void wave_recent_move(WaveSession *s, int delta) {
+    if (s) recent_projects_move(&s->recent, delta);
+}
+
+void wave_recent_input(WaveSession *s, const char *text) {
+    if (s && text) recent_projects_insert_text(&s->recent, text);
+}
+
+void wave_recent_backspace(WaveSession *s) {
+    if (s) recent_projects_backspace(&s->recent);
+}
+
+const char *wave_recent_query(const WaveSession *s) {
+    return s ? s->recent.query : "";
+}
+
+/* Open the highlighted project as the workspace. */
+int wave_recent_accept(WaveSession *s) {
+    if (!s) return 0;
+    const char *path = recent_projects_selected(&s->recent);
+    if (!path || !*path) return 0;
+    return wave_open_path(s, path) == 0;
+}
+
+/* ==========================================================================
+ * File watching (watch.c) — external edits reload the affected tab
+ * ========================================================================== */
+
+int wave_watch_poll(WaveSession *s, double now, char *message, size_t cap) {
+    if (!s) return 0;
+    if (message && cap) message[0] = '\0';
+
+    static double next_poll = 0.0;
+    TabWatchEffect effect =
+        tabs_process_file_watchers(&s->tabs, &s->watch, now, &next_poll, 1.0);
+    if (effect.has_message) {
+        if (message && cap) snprintf(message, cap, "%s", effect.message);
+        snprintf(s->info, sizeof s->info, "%s", effect.message);
+    }
+    if (effect.reset_mode) modal_enter_normal(&s->modal);
+
+    /* The workspace tree itself may have changed on disk. */
+    if (s->ws) {
+        WsReloadEffect ws_effect =
+            ws_apply_watch_event(s->ws, watch_workspace_consume(&s->watch));
+        if (ws_effect.ok && ws_effect.refilter_palette)
+            overlay_refilter_palette(&s->overlay, s->ws);
+    }
+    if (effect.has_message) refresh_diags(s);
+    return effect.has_message || effect.reset_mode;
+}
+
+void wave_watch_workspace_start(WaveSession *s) {
+    if (s && s->ws) watch_workspace_start(&s->watch, ws_root(s->ws));
+}
