@@ -24,8 +24,10 @@ use gpui::{
     UnderlineStyle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
+use std::cell::RefCell;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 actions!(wave, [Quit]);
@@ -48,22 +50,55 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 const GIT_FILES_WIDTH: f32 = 320.0;
 const INDENT: f32 = 12.0;
 
-const BG: u32 = 0x1a1c20;
-const SIDEBAR_BG: u32 = 0x16181c;
-const STATUS_BG: u32 = 0x22252b;
-const TAB_BG: u32 = 0x16181c;
-const TAB_ACTIVE_BG: u32 = 0x1a1c20;
-const BORDER: u32 = 0x33383f;
-const DEFAULT_FG: u32 = 0xd9dbe0;
-const DIM_FG: u32 = 0x6b7280;
-const GUTTER_FG: u32 = 0x4a505c;
-const CURSOR_BG: u32 = 0xd9dbe0;
-const SELECTION_BG: u32 = 0x2f4f6f;
-const MATCH_BG: u32 = 0x5a4a1f;
-const DIAGNOSTIC: u32 = 0xd9534f;
-const DIR_FG: u32 = 0x89b4fa;
-const ADDED_FG: u32 = 0x7fb069;
-const REMOVED_FG: u32 = 0xd9534f;
+/// The chrome colors, cached from the active theme in `src/theme.c`.
+///
+/// Read as functions rather than consts because the theme changes at runtime,
+/// and cached in atomics rather than fetched per use because these are read
+/// hundreds of times per frame — a line's worth of cells alone touches several
+/// — while `theme_ui` is a string lookup across the FFI. `reload()` is the only
+/// writer, called once at startup and once per theme switch.
+mod palette {
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+    // Two names per slot: the cache and its reader cannot share one, since
+    // statics and functions live in the same namespace.
+    macro_rules! slots {
+        ($($cache:ident $get:ident = $slot:literal @ $default:literal),* $(,)?) => {
+            $(
+                static $cache: AtomicU32 = AtomicU32::new($default);
+                pub fn $get() -> u32 { $cache.load(Relaxed) }
+            )*
+
+            /// Pull every slot from the core's active theme.
+            pub fn reload() {
+                $( $cache.store(crate::ffi::theme_ui($slot), Relaxed); )*
+            }
+        };
+    }
+
+    // Defaults are the "wave" theme, so the first frame is right even if
+    // reload() has not run yet.
+    slots! {
+        BG bg = "bg" @ 0x1a1c20,
+        SIDEBAR_BG sidebar_bg = "sidebar_bg" @ 0x16181c,
+        STATUS_BG status_bg = "status_bg" @ 0x22252b,
+        TAB_BG tab_bg = "tab_bg" @ 0x16181c,
+        TAB_ACTIVE_BG tab_active_bg = "tab_active_bg" @ 0x1a1c20,
+        BORDER border = "border" @ 0x33383f,
+        DEFAULT_FG default_fg = "fg" @ 0xd9dbe0,
+        MUTED_FG muted_fg = "muted" @ 0xb5bac4,
+        DIM_FG dim_fg = "dim" @ 0x6b7280,
+        GUTTER_FG gutter_fg = "gutter" @ 0x4a505c,
+        CURSOR_BG cursor_bg = "cursor" @ 0xd9dbe0,
+        SELECTION_BG selection_bg = "selection" @ 0x2f4f6f,
+        MATCH_BG match_bg = "match" @ 0x5a4a1f,
+        ACCENT accent = "accent" @ 0xe6c07b,
+        DIAGNOSTIC diagnostic = "diagnostic" @ 0xd9534f,
+        DIR_FG dir_fg = "dir" @ 0x89b4fa,
+        ADDED_FG added_fg = "added" @ 0x7fb069,
+        REMOVED_FG removed_fg = "removed" @ 0xd9534f,
+    }
+}
 
 /// An entry in the Cmd-Shift-P command palette.
 ///
@@ -82,6 +117,7 @@ enum Cmd {
     ResetConfig,
     Settings,
     ChooseFont,
+    ChooseTheme,
     FindFile,
     ProjectSearch,
     BufferSearch,
@@ -95,15 +131,17 @@ enum Cmd {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    InstallCli,
     Quit,
 }
 
 impl Cmd {
-    const ALL: [Cmd; 25] = [
+    const ALL: [Cmd; 27] = [
         Cmd::OpenFolder,
         Cmd::OpenFile,
         Cmd::Settings,
         Cmd::ChooseFont,
+        Cmd::ChooseTheme,
         Cmd::RecentProjects,
         Cmd::CloseProject,
         Cmd::NewFile,
@@ -124,6 +162,7 @@ impl Cmd {
         Cmd::ZoomReset,
         Cmd::SaveConfig,
         Cmd::ResetConfig,
+        Cmd::InstallCli,
         Cmd::Quit,
     ];
 
@@ -138,6 +177,7 @@ impl Cmd {
             Cmd::SaveFile => "Save File",
             Cmd::Settings => "Settings",
             Cmd::ChooseFont => "Change Font…",
+            Cmd::ChooseTheme => "Change Theme…",
             Cmd::SaveConfig => "Save Config",
             Cmd::ResetConfig => "Reset Settings to Defaults",
             Cmd::FindFile => "Find File",
@@ -153,6 +193,7 @@ impl Cmd {
             Cmd::ZoomIn => "Zoom In",
             Cmd::ZoomOut => "Zoom Out",
             Cmd::ZoomReset => "Reset Zoom",
+            Cmd::InstallCli => "Install wave Command in PATH",
             Cmd::Quit => "Quit Wave",
         }
     }
@@ -317,6 +358,11 @@ struct WaveView {
     fonts_all: bool,
     /// Monospace families, discovered once from the platform text system.
     mono_fonts: Option<Vec<String>>,
+    /// Theme picker. `themes_prev` is what to put back if it is dismissed,
+    /// since moving the selection repaints the whole window as a preview.
+    themes_open: bool,
+    themes_sel: usize,
+    themes_prev: String,
 }
 
 /// Folder and file marks, mirroring `draw_folder_icon` / `draw_file_icon`:
@@ -328,7 +374,7 @@ fn caret(height: f32) -> impl IntoElement {
         .w(px(2.))
         .h(px(height))
         .flex_none()
-        .bg(rgb(CURSOR_BG))
+        .bg(rgb(palette::cursor_bg()))
 }
 
 fn folder_icon(color: u32) -> impl IntoElement {
@@ -383,7 +429,7 @@ fn file_icon(color: u32) -> impl IntoElement {
                 .top(px(1.))
                 .w(px(4.))
                 .h(px(4.))
-                .bg(rgb(SIDEBAR_BG)),
+                .bg(rgb(palette::sidebar_bg())),
         )
 }
 
@@ -457,8 +503,8 @@ fn wheel_lines(ev: &ScrollWheelEvent, line_height: f32) -> f32 {
 fn highlight_for(cell: Cell) -> HighlightStyle {
     let mut style = HighlightStyle::default();
     if cell.invert {
-        style.color = Some(rgb(BG).into());
-        style.background_color = Some(rgb(CURSOR_BG).into());
+        style.color = Some(rgb(palette::bg()).into());
+        style.background_color = Some(rgb(palette::cursor_bg()).into());
     } else {
         style.color = cell.fg.map(|c| rgb(c).into());
         style.background_color = cell.bg.map(|c| rgb(c).into());
@@ -525,6 +571,9 @@ fn styled_line(text: String, cells: &[Cell]) -> StyledText {
 impl WaveView {
     fn new(path: Option<PathBuf>, focus: FocusHandle) -> Self {
         let mut session = Session::new();
+        // Session::new() loads the config, which applies the saved theme, so
+        // the chrome cache has to be filled after it — not at module init.
+        palette::reload();
         let status = match &path {
             Some(p) => match session.open(p) {
                 Ok(()) => {
@@ -564,6 +613,9 @@ impl WaveView {
             fonts_sel: 0,
             fonts_all: false,
             mono_fonts: None,
+            themes_open: false,
+            themes_sel: 0,
+            themes_prev: String::new(),
         }
     }
 
@@ -907,7 +959,7 @@ impl WaveView {
                     .justify_between()
                     .h(px(self.line_height + 6.))
                     .px(px(12.))
-                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_sel = i;
                         this.adjust_setting(setting, 1);
@@ -922,17 +974,17 @@ impl WaveView {
                                 div()
                                     .w(px(150.))
                                     .flex_none()
-                                    .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                                    .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                                     .child(setting.label()),
                             )
                             .when(!note.is_empty(), |d| {
-                                d.child(div().text_color(rgb(GUTTER_FG)).child(note))
+                                d.child(div().text_color(rgb(palette::gutter_fg())).child(note))
                             }),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgb(if selected { 0xe6c07b } else { DIM_FG }))
+                            .text_color(rgb(if selected { palette::accent() } else { palette::dim_fg() }))
                             .child(value),
                     )
             })
@@ -952,9 +1004,9 @@ impl WaveView {
                     .w(px(720.))
                     .flex()
                     .flex_col()
-                    .bg(rgb(SIDEBAR_BG))
+                    .bg(rgb(palette::sidebar_bg()))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(palette::border()))
                     .rounded(px(6.))
                     .overflow_hidden()
                     .child(
@@ -965,8 +1017,8 @@ impl WaveView {
                             .items_center()
                             .px(px(12.))
                             .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(DEFAULT_FG))
+                            .border_color(rgb(palette::border()))
+                            .text_color(rgb(palette::default_fg()))
                             .child("Settings"),
                     )
                     .children(rows)
@@ -975,8 +1027,8 @@ impl WaveView {
                             .h(px(self.line_height + 6.))
                             .px(px(12.))
                             .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(GUTTER_FG))
+                            .border_color(rgb(palette::border()))
+                            .text_color(rgb(palette::gutter_fg()))
                             .child("↑↓ select · ←→ adjust · ⏎ toggle · s save · r reset · esc close"),
                     ),
             )
@@ -1031,6 +1083,92 @@ impl WaveView {
         self.status = format!("font: {}", self.fe_config.font);
     }
 
+    // ---- theme picker ----
+
+    /// Repaint in the theme at `index` without committing to it, so arrowing
+    /// through the list previews each one on the real editor behind the panel.
+    fn preview_theme(&mut self, index: usize) {
+        let themes = ffi::themes();
+        if let Some((name, _)) = themes.get(index) {
+            ffi::theme_preview(name);
+            palette::reload();
+        }
+    }
+
+    /// Keep the previewed theme: recorded in the config and written out.
+    fn commit_theme(&mut self, index: usize) {
+        let themes = ffi::themes();
+        if let Some((name, label)) = themes.get(index) {
+            self.session.theme_set(name);
+            palette::reload();
+            self.status = format!("theme: {label}");
+        }
+        self.themes_open = false;
+    }
+
+    /// Put back whatever was active when the picker opened.
+    fn cancel_theme(&mut self) {
+        if !self.themes_prev.is_empty() {
+            ffi::theme_preview(&self.themes_prev);
+            palette::reload();
+        }
+        self.themes_open = false;
+    }
+
+    fn render_themes(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let themes = ffi::themes();
+        let saved = self.themes_prev.clone();
+        let sel = self.themes_sel.min(themes.len().saturating_sub(1));
+
+        let rows: Vec<_> = themes
+            .iter()
+            .enumerate()
+            .map(|(i, (name, label))| {
+                let selected = i == sel;
+                let is_saved = *name == saved;
+                div()
+                    .id(("theme-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(self.line_height + 4.))
+                    .px(px(12.))
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.themes_sel = i;
+                        this.commit_theme(i);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_color(rgb(if selected {
+                                palette::default_fg()
+                            } else {
+                                palette::dim_fg()
+                            }))
+                            .child(label.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(palette::gutter_fg()))
+                            .child(if is_saved {
+                                format!("{name}  ✓")
+                            } else {
+                                name.clone()
+                            }),
+                    )
+            })
+            .collect();
+
+        overlay_panel(
+            "theme".to_string(),
+            rows,
+            "↑↓ to preview · ⏎ to keep · esc to cancel".to_string(),
+            self.line_height - 6.0,
+        )
+    }
+
     fn render_fonts(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         const VISIBLE: usize = 12;
         let items = self.fonts_filtered(window);
@@ -1056,7 +1194,7 @@ impl WaveView {
                     .justify_between()
                     .h(px(self.line_height + 4.))
                     .px(px(12.))
-                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_font(pick.clone());
                         this.fonts_open = false;
@@ -1064,14 +1202,14 @@ impl WaveView {
                     }))
                     .child(
                         div()
-                            .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                            .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                             .child(name.clone()),
                     )
                     // Preview each family in itself.
                     .child(
                         div()
                             .font_family(name)
-                            .text_color(rgb(if is_current { 0xe6c07b } else { GUTTER_FG }))
+                            .text_color(rgb(if is_current { palette::accent() } else { palette::gutter_fg() }))
                             .child(if is_current {
                                 "fn main() {}  ✓"
                             } else {
@@ -1166,10 +1304,41 @@ impl WaveView {
                 self.settings_open = true;
                 self.settings_sel = 0;
             }
+            Cmd::ChooseTheme => {
+                self.themes_open = true;
+                self.themes_sel = self.session.theme_index();
+                self.themes_prev = ffi::themes()
+                    .get(self.themes_sel)
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_default();
+            }
             Cmd::ChooseFont => {
                 self.fonts_open = true;
                 self.fonts_query.clear();
                 self.fonts_sel = 0;
+            }
+            Cmd::InstallCli => {
+                // The admin prompt is a modal the OS puts up, so this cannot run
+                // on the UI thread — the window would stop drawing behind it.
+                match cli_shim_path() {
+                    Err(e) => self.status = e,
+                    Ok(shim) => {
+                        self.status = "installing wave…".into();
+                        cx.spawn(async move |this, cx| {
+                            let done = cx
+                                .background_executor()
+                                .spawn(async move { install_cli(&shim) })
+                                .await;
+                            let _ = this.update(cx, |this: &mut WaveView, cx| {
+                                this.status = match done {
+                                    Ok(msg) | Err(msg) => msg,
+                                };
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
+                }
             }
             Cmd::ResetConfig => {
                 self.session.reset_config();
@@ -1242,19 +1411,19 @@ impl WaveView {
                     .justify_between()
                     .h(px(self.line_height))
                     .px(px(10.))
-                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.cmds_open = false;
                         this.run_cmd(cmd, window, cx);
                     }))
                     .child(
                         div()
-                            .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                            .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                             .child(cmd.label()),
                     )
                     .child(
                         div()
-                            .text_color(rgb(GUTTER_FG))
+                            .text_color(rgb(palette::gutter_fg()))
                             .child(cmd.shortcut()),
                     )
             })
@@ -1293,7 +1462,7 @@ impl WaveView {
                     .gap(px(10.))
                     .h(px(self.line_height + 2.))
                     .px(px(12.))
-                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let cur = this.session.recent_selected();
                         this.session.recent_move(i as i32 - cur as i32);
@@ -1304,16 +1473,16 @@ impl WaveView {
                         this.recent_open = false;
                         cx.notify();
                     }))
-                    .child(folder_icon(DIR_FG))
+                    .child(folder_icon(palette::dir_fg()))
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                            .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                             .child(name),
                     )
                     .child(
                         div()
-                            .text_color(rgb(GUTTER_FG))
+                            .text_color(rgb(palette::gutter_fg()))
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .child(parent),
@@ -1342,7 +1511,7 @@ impl WaveView {
                         div()
                             .h(px(self.line_height + 10.))
                             .px(px(12.))
-                            .text_color(rgb(DIM_FG))
+                            .text_color(rgb(palette::dim_fg()))
                             .child(if total == 0 && query.is_empty() {
                                 "no recent projects — ⇧⌘P then \"Open Folder\"".to_string()
                             } else {
@@ -1359,8 +1528,8 @@ impl WaveView {
                             .h(px(self.line_height + 6.))
                             .px(px(12.))
                             .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(DEFAULT_FG))
+                            .border_color(rgb(palette::border()))
+                            .text_color(rgb(palette::default_fg()))
                             .child(format!("› {query}"))
                             .child(caret(self.line_height - 6.0)),
                     )
@@ -1370,7 +1539,7 @@ impl WaveView {
                             div()
                                 .h(px(self.line_height))
                                 .px(px(12.))
-                                .text_color(rgb(GUTTER_FG))
+                                .text_color(rgb(palette::gutter_fg()))
                                 .child("no match"),
                         )
                     }),
@@ -1404,7 +1573,7 @@ impl WaveView {
         // One extra cell so a cursor parked past the last character has a slot.
         let mut cells = vec![Cell::default(); text.len() + 1];
         for c in cells.iter_mut() {
-            c.fg = Some(DEFAULT_FG);
+            c.fg = Some(palette::default_fg());
         }
 
         for s in &spans {
@@ -1420,19 +1589,19 @@ impl WaveView {
         for m in &matches {
             let end = m.end_col.min(text.len());
             for cell in cells.iter_mut().take(end).skip(m.start_col) {
-                cell.bg = Some(MATCH_BG);
+                cell.bg = Some(palette::match_bg());
             }
         }
         if let Some((a, b)) = selection {
             let end = b.min(text.len());
             for cell in cells.iter_mut().take(end).skip(a) {
-                cell.bg = Some(SELECTION_BG);
+                cell.bg = Some(palette::selection_bg());
             }
         }
         for d in &diags {
             let end = d.end_col.min(text.len());
             for cell in cells.iter_mut().take(end).skip(d.start_col) {
-                cell.underline = Some(DIAGNOSTIC);
+                cell.underline = Some(palette::diagnostic());
                 cell.wavy = true;
             }
         }
@@ -1533,9 +1702,9 @@ impl WaveView {
                                 .w(px(GUTTER_WIDTH))
                                 .flex_none()
                                 .text_color(rgb(if row.line == cur_row {
-                                    DIM_FG
+                                    palette::dim_fg()
                                 } else {
-                                    GUTTER_FG
+                                    palette::gutter_fg()
                                 }))
                                 // Continuation rows get a blank gutter, so the
                                 // numbering still counts logical lines.
@@ -1575,7 +1744,7 @@ impl WaveView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_text_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_text_mouse_up))
             .when(!has_buffer, |d| {
-                d.text_color(rgb(GUTTER_FG))
+                d.text_color(rgb(palette::gutter_fg()))
                     .child("  no file open — Cmd-P, or click one in the sidebar")
             })
             .children(lines)
@@ -1608,7 +1777,7 @@ impl WaveView {
                 let mut text = text;
                 let mut cells = vec![Cell::default(); text.len() + 1];
                 for c in cells.iter_mut() {
-                    c.fg = Some(DEFAULT_FG);
+                    c.fg = Some(palette::default_fg());
                 }
                 // Both of these are byte offsets: the terminal reports styles
                 // in bytes and the cursor in columns, and `cells` is indexed by
@@ -1628,7 +1797,7 @@ impl WaveView {
                     let a = self.session.term_col_to_byte(index, sa);
                     let b = self.session.term_col_to_byte(index, sb).min(text.len());
                     for cell in cells.iter_mut().take(b).skip(a) {
-                        cell.bg = Some(SELECTION_BG);
+                        cell.bg = Some(palette::selection_bg());
                     }
                 }
                 if cur_vis && cursor_screen_row == Some(i) {
@@ -1667,7 +1836,7 @@ impl WaveView {
                 d.child(
                     div()
                         .pl(px(8.))
-                        .text_color(rgb(DIM_FG))
+                        .text_color(rgb(palette::dim_fg()))
                         .child(format!("[{status}]")),
                 )
             })
@@ -1692,8 +1861,8 @@ impl WaveView {
                             .id(("git-repo", i))
                             .h(px(self.line_height))
                             .px(px(10.))
-                            .when(i == sel, |d| d.bg(rgb(SELECTION_BG)))
-                            .text_color(rgb(if i == sel { DEFAULT_FG } else { DIM_FG }))
+                            .when(i == sel, |d| d.bg(rgb(palette::selection_bg())))
+                            .text_color(rgb(if i == sel { palette::default_fg() } else { palette::dim_fg() }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let cur = this.session.git_selected_repo();
                                 this.session.git_move(i as i32 - cur as i32);
@@ -1712,7 +1881,7 @@ impl WaveView {
                         div()
                             .h(px(self.line_height))
                             .px(px(10.))
-                            .text_color(rgb(DIM_FG))
+                            .text_color(rgb(palette::dim_fg()))
                             .child("select a repository — ↑/↓, Enter"),
                     )
                     .children(rows)
@@ -1733,7 +1902,7 @@ impl WaveView {
                             .gap(px(8.))
                             .h(px(self.line_height))
                             .px(px(10.))
-                            .when(i == sel, |d| d.bg(rgb(SELECTION_BG)))
+                            .when(i == sel, |d| d.bg(rgb(palette::selection_bg())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let cur = this.session.git_selected_file();
                                 this.session.git_move(i as i32 - cur as i32);
@@ -1744,12 +1913,12 @@ impl WaveView {
                                 div()
                                     .w(px(24.))
                                     .flex_none()
-                                    .text_color(rgb(if staged { ADDED_FG } else { REMOVED_FG }))
+                                    .text_color(rgb(if staged { palette::added_fg() } else { palette::removed_fg() }))
                                     .child(f.code),
                             )
                             .child(
                                 div()
-                                    .text_color(rgb(if i == sel { DEFAULT_FG } else { DIM_FG }))
+                                    .text_color(rgb(if i == sel { palette::default_fg() } else { palette::dim_fg() }))
                                     .whitespace_nowrap()
                                     .child(f.path),
                             )
@@ -1762,10 +1931,10 @@ impl WaveView {
                     .enumerate()
                     .map(|(i, l)| {
                         let color = match l.as_bytes().first() {
-                            Some(b'+') => ADDED_FG,
-                            Some(b'-') => REMOVED_FG,
-                            Some(b'@') => DIR_FG,
-                            _ => DIM_FG,
+                            Some(b'+') => palette::added_fg(),
+                            Some(b'-') => palette::removed_fg(),
+                            Some(b'@') => palette::dir_fg(),
+                            _ => palette::dim_fg(),
                         };
                         let mut cells = vec![Cell::default(); l.len() + 1];
                         for c in cells.iter_mut() {
@@ -1776,7 +1945,7 @@ impl WaveView {
                         if let Some((a, b)) = self.session.git_sel_span(i) {
                             let end = b.min(l.len());
                             for cell in cells.iter_mut().take(end).skip(a) {
-                                cell.bg = Some(SELECTION_BG);
+                                cell.bg = Some(palette::selection_bg());
                             }
                         }
                         div()
@@ -1797,7 +1966,7 @@ impl WaveView {
                             .flex_none()
                             .flex()
                             .flex_col()
-                            .bg(rgb(SIDEBAR_BG))
+                            .bg(rgb(palette::sidebar_bg()))
                             .overflow_hidden()
                             .children(files),
                     )
@@ -1836,8 +2005,8 @@ impl WaveView {
                         .h(px(self.line_height + 8.))
                         .px(px(10.))
                         .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(DEFAULT_FG))
+                        .border_color(rgb(palette::border()))
+                        .text_color(rgb(palette::default_fg()))
                         .child(format!("commit: {msg}")),
                 )
             })
@@ -1846,7 +2015,7 @@ impl WaveView {
                     div()
                         .h(px(self.line_height))
                         .px(px(10.))
-                        .text_color(rgb(DIM_FG))
+                        .text_color(rgb(palette::dim_fg()))
                         .child(info),
                 )
             })
@@ -1863,7 +2032,7 @@ impl WaveView {
                 let e = self.session.ws_entry(i)?;
                 let is_dir = e.is_dir;
                 let collapsed = e.collapsed;
-                let color = if is_dir { DIR_FG } else { DEFAULT_FG };
+                let color = if is_dir { palette::dir_fg() } else { palette::default_fg() };
                 Some(
                     div()
                         .id(("ws-row", i))
@@ -1874,7 +2043,7 @@ impl WaveView {
                         .h(px(self.line_height))
                         .pl(px(6.0 + e.depth as f32 * INDENT))
                         .text_color(rgb(color))
-                        .hover(|s| s.bg(rgb(TAB_ACTIVE_BG)))
+                        .hover(|s| s.bg(rgb(palette::tab_active_bg())))
                         .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
                             this.session.ws_activate(i, ev.click_count() >= 2);
                             this.scroll = 0;
@@ -1886,7 +2055,7 @@ impl WaveView {
                             div()
                                 .w(px(9.))
                                 .flex_none()
-                                .text_color(rgb(GUTTER_FG))
+                                .text_color(rgb(palette::gutter_fg()))
                                 .child(if is_dir {
                                     if collapsed {
                                         "▸"
@@ -1898,7 +2067,7 @@ impl WaveView {
                                 }),
                         )
                         .child(if is_dir {
-                            folder_icon(DIR_FG).into_any_element()
+                            folder_icon(palette::dir_fg()).into_any_element()
                         } else {
                             file_icon(0x8b93a1).into_any_element()
                         })
@@ -1912,7 +2081,7 @@ impl WaveView {
             .flex_none()
             .flex()
             .flex_col()
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(palette::sidebar_bg()))
             .overflow_hidden()
             .on_scroll_wheel(cx.listener(Self::on_side_wheel))
             .children(rows)
@@ -1941,13 +2110,13 @@ impl WaveView {
                     .h(px(TAB_HEIGHT))
                     .px(px(10.))
                     .flex_none()
-                    .bg(rgb(if is_active { TAB_ACTIVE_BG } else { TAB_BG }))
+                    .bg(rgb(if is_active { palette::tab_active_bg() } else { palette::tab_bg() }))
                     // view_tab_label() already appends " *" when modified, so
                     // the marker is the C core's convention, not ours.
                     .text_color(rgb(match (is_active, tab.modified) {
-                        (true, true) => 0xe6c07b,
-                        (true, false) => DEFAULT_FG,
-                        (false, _) => DIM_FG,
+                        (true, true) => palette::accent(),
+                        (true, false) => palette::default_fg(),
+                        (false, _) => palette::dim_fg(),
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.session.tab_set_active(i);
@@ -1959,8 +2128,8 @@ impl WaveView {
                     .child(
                         div()
                             .id(("tab-x", i))
-                            .text_color(rgb(DIM_FG))
-                            .hover(|s| s.text_color(rgb(DEFAULT_FG)))
+                            .text_color(rgb(palette::dim_fg()))
+                            .hover(|s| s.text_color(rgb(palette::default_fg())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.session.tab_close(i);
@@ -1977,7 +2146,7 @@ impl WaveView {
             .flex_none()
             .flex()
             .flex_row()
-            .bg(rgb(TAB_BG))
+            .bg(rgb(palette::tab_bg()))
             .overflow_hidden()
             .children(chips)
     }
@@ -1995,9 +2164,9 @@ impl WaveView {
             .flex()
             .flex_row()
             .items_center()
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(palette::sidebar_bg()))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(palette::border()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_, ev: &MouseDownEvent, window: &mut Window, _| {
@@ -2014,11 +2183,11 @@ impl WaveView {
                     .flex()
                     .flex_row()
                     .gap(px(6.))
-                    .text_color(rgb(DIM_FG))
+                    .text_color(rgb(palette::dim_fg()))
                     .child(root_name)
                     .when(!path.is_empty(), |d| {
-                        d.child(div().text_color(rgb(GUTTER_FG)).child("—"))
-                            .child(div().text_color(rgb(DIM_FG)).child(path))
+                        d.child(div().text_color(rgb(palette::gutter_fg())).child("—"))
+                            .child(div().text_color(rgb(palette::dim_fg())).child(path))
                     }),
             )
     }
@@ -2053,7 +2222,7 @@ impl WaveView {
                         .gap(px(8.))
                         .h(px(self.line_height))
                         .px(px(10.))
-                        .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                        .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let cur = this.session.palette_selected();
                             this.session.palette_move(i as i32 - cur as i32);
@@ -2066,12 +2235,12 @@ impl WaveView {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                                .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                                 .child(e.name),
                         )
                         .child(
                             div()
-                                .text_color(rgb(GUTTER_FG))
+                                .text_color(rgb(palette::gutter_fg()))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .child(dir),
@@ -2112,7 +2281,7 @@ impl WaveView {
                         .gap(px(8.))
                         .h(px(self.line_height))
                         .px(px(10.))
-                        .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                        .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let cur = this.session.search_selected();
                             this.session.search_move(i as i32 - cur as i32);
@@ -2125,12 +2294,12 @@ impl WaveView {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(DIR_FG))
+                                .text_color(rgb(palette::dir_fg()))
                                 .child(format!("{}:{}", h.path, h.line)),
                         )
                         .child(
                             div()
-                                .text_color(rgb(if selected { DEFAULT_FG } else { DIM_FG }))
+                                .text_color(rgb(if selected { palette::default_fg() } else { palette::dim_fg() }))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .child(h.text),
@@ -2201,7 +2370,7 @@ impl WaveView {
                         .gap(px(8.))
                         .h(px(self.line_height))
                         .px(px(8.))
-                        .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                        .when(selected, |d| d.bg(rgb(palette::selection_bg())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let cur = this.session.complete_selected();
                             this.session.complete_move(i as i32 - cur as i32);
@@ -2212,19 +2381,19 @@ impl WaveView {
                             div()
                                 .w(px(28.))
                                 .flex_none()
-                                .text_color(rgb(GUTTER_FG))
+                                .text_color(rgb(palette::gutter_fg()))
                                 .child(item.kind),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                                .text_color(rgb(if selected { palette::default_fg() } else { palette::muted_fg() }))
                                 .child(item.label),
                         )
                         .when(!item.detail.is_empty(), |d| {
                             d.child(
                                 div()
-                                    .text_color(rgb(GUTTER_FG))
+                                    .text_color(rgb(palette::gutter_fg()))
                                     .whitespace_nowrap()
                                     .overflow_hidden()
                                     .child(item.detail),
@@ -2242,9 +2411,9 @@ impl WaveView {
             .max_w(px(560.))
             .flex()
             .flex_col()
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(palette::sidebar_bg()))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(palette::border()))
             .rounded(px(4.))
             .overflow_hidden()
             .children(rows)
@@ -2253,7 +2422,7 @@ impl WaveView {
                     div()
                         .h(px(self.line_height))
                         .px(px(8.))
-                        .text_color(rgb(GUTTER_FG))
+                        .text_color(rgb(palette::gutter_fg()))
                         .child("loading…"),
                 )
             })
@@ -2271,17 +2440,17 @@ impl WaveView {
             .max_h(px(VISIBLE as f32 * self.line_height + 12.))
             .px(px(10.))
             .py(px(6.))
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(palette::sidebar_bg()))
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .text_color(rgb(0xb5bac4))
+            .border_color(rgb(palette::border()))
+            .text_color(rgb(palette::muted_fg()))
             .overflow_hidden()
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                 this.session.popover_scroll_by(-wheel_lines(ev, this.line_height).round() as i32);
                 cx.notify();
             }))
             .when(loading, |d| {
-                d.child(div().text_color(rgb(GUTTER_FG)).child("loading…"))
+                d.child(div().text_color(rgb(palette::gutter_fg())).child("loading…"))
             })
             .children(lines.into_iter().take(VISIBLE).map(|l| {
                 div()
@@ -2428,6 +2597,29 @@ impl WaveView {
                         self.cmds_sel = 0;
                     }
                 }
+            }
+            cx.notify();
+            return;
+        }
+
+        if self.themes_open {
+            let n = ffi::themes().len();
+            match key {
+                "escape" => self.cancel_theme(),
+                "enter" => {
+                    let sel = self.themes_sel;
+                    self.commit_theme(sel);
+                }
+                "up" | "down" => {
+                    self.themes_sel = if key == "up" {
+                        self.themes_sel.saturating_sub(1)
+                    } else {
+                        (self.themes_sel + 1).min(n.saturating_sub(1))
+                    };
+                    let sel = self.themes_sel;
+                    self.preview_theme(sel);
+                }
+                _ => {}
             }
             cx.notify();
             return;
@@ -2965,9 +3157,9 @@ fn overlay_panel(
                 .w(px(680.))
                 .flex()
                 .flex_col()
-                .bg(rgb(SIDEBAR_BG))
+                .bg(rgb(palette::sidebar_bg()))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(palette::border()))
                 .rounded(px(6.))
                 .overflow_hidden()
                 .child(
@@ -2978,8 +3170,8 @@ fn overlay_panel(
                         .items_center()
                         .px(px(10.))
                         .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(DEFAULT_FG))
+                        .border_color(rgb(palette::border()))
+                        .text_color(rgb(palette::default_fg()))
                         .child(header)
                         .child(caret(caret_h)),
                 )
@@ -2988,7 +3180,7 @@ fn overlay_panel(
                     div()
                         .h(px(20.))
                         .px(px(10.))
-                        .text_color(rgb(GUTTER_FG))
+                        .text_color(rgb(palette::gutter_fg()))
                         .child(footer),
                 ),
         )
@@ -3084,8 +3276,8 @@ impl Render for WaveView {
 
         let mode_color = match self.session.mode() {
             Mode::Normal => 0x7fb069,
-            Mode::Insert => 0x5aa9e6,
-            Mode::Visual => 0xd98a4f,
+            Mode::Insert => palette::dir_fg(),
+            Mode::Visual => palette::accent(),
         };
         // Mode and cursor are editor concepts; a terminal or git tab should say
         // what *it* is doing instead.
@@ -3097,12 +3289,12 @@ impl Render for WaveView {
                     "EXITED".to_string()
                 },
                 if self.session.term_running() {
-                    0x5aa9e6
+                    palette::dir_fg()
                 } else {
-                    DIM_FG
+                    palette::dim_fg()
                 },
             ),
-            TabKind::Git => ("GIT".to_string(), 0xd98a4f),
+            TabKind::Git => ("GIT".to_string(), palette::accent()),
             TabKind::Editor => (self.session.mode_name(), mode_color),
         };
         let cursor_diag = self.session.cursor_diagnostic();
@@ -3131,6 +3323,7 @@ impl Render for WaveView {
         let recent_overlay = self.recent_open.then(|| self.render_recent_overlay(cx));
         let settings = self.settings_open.then(|| self.render_settings(cx));
         let fonts = self.fonts_open.then(|| self.render_fonts(window, cx));
+        let themes = self.themes_open.then(|| self.render_themes(cx));
         let search = self.session.search_active().then(|| self.render_search(cx));
         let completion = (self.session.complete_active() && self.session.complete_count() > 0)
             .then(|| self.render_completion(cx));
@@ -3141,7 +3334,7 @@ impl Render for WaveView {
         let search_text = self.session.bufsearch_text();
 
         let opacity = self.session.opacity_pct();
-        let bg = rgba((BG << 8) | ((opacity * 255 / 100) & 0xff));
+        let bg = rgba((palette::bg() << 8) | ((opacity * 255 / 100) & 0xff));
 
         div()
             .key_context("Wave")
@@ -3185,8 +3378,8 @@ impl Render for WaveView {
                     .flex_row()
                     .items_center()
                     .px(px(8.))
-                    .bg(rgb(STATUS_BG))
-                    .text_color(rgb(0xe6c07b))
+                    .bg(rgb(palette::status_bg()))
+                    .text_color(rgb(palette::accent()))
                     .child(prompt)
                     .child(caret(self.line_height - 6.0))
             } else if cmd_active || search_active {
@@ -3197,8 +3390,8 @@ impl Render for WaveView {
                     .flex_row()
                     .items_center()
                     .px(px(8.))
-                    .bg(rgb(STATUS_BG))
-                    .text_color(rgb(DEFAULT_FG))
+                    .bg(rgb(palette::status_bg()))
+                    .text_color(rgb(palette::default_fg()))
                     .child(if cmd_active {
                         format!(":{cmd_text}")
                     } else {
@@ -3212,8 +3405,8 @@ impl Render for WaveView {
                     .flex()
                     .flex_row()
                     .gap(px(12.))
-                    .bg(rgb(STATUS_BG))
-                    .text_color(rgb(DIM_FG))
+                    .bg(rgb(palette::status_bg()))
+                    .text_color(rgb(palette::dim_fg()))
                     .child(
                         div()
                             .pl(px(8.))
@@ -3222,12 +3415,12 @@ impl Render for WaveView {
                     )
                     .child(div().child(detail))
                     .when(!info.is_empty(), |d| {
-                        d.child(div().text_color(rgb(DEFAULT_FG)).child(info))
+                        d.child(div().text_color(rgb(palette::default_fg())).child(info))
                     })
                     .when(!cursor_diag.is_empty(), |d| {
                         d.child(
                             div()
-                                .text_color(rgb(DIAGNOSTIC))
+                                .text_color(rgb(palette::diagnostic()))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .child(cursor_diag),
@@ -3241,6 +3434,7 @@ impl Render for WaveView {
             .children(recent_overlay)
             .children(settings)
             .children(fonts)
+            .children(themes)
     }
 }
 
@@ -3551,6 +3745,71 @@ fn selftest(root: &str) {
             );
         }
     }
+
+    // ---- themes ----
+    //
+    // The palette lives in C so both front-ends share it; what is worth
+    // checking from here is the round trip: selecting a theme repaints *and*
+    // sticks, since the config write is what a restart reads back.
+    println!("\n=== themes ===");
+    {
+        let mut t = Session::new();
+        let names: Vec<String> = ffi::themes().iter().map(|(n, _)| n.clone()).collect();
+        println!("{} themes: {}", names.len(), names.join(", "));
+        println!(
+            "active={} bg=#{:06x} keyword=#{:06x}",
+            names[t.theme_index()],
+            ffi::theme_ui("bg"),
+            ffi::theme_rgb("keyword")
+        );
+        println!("set gruvbox-dark -> {}", t.theme_set("gruvbox-dark"));
+        println!(
+            "active={} bg=#{:06x} keyword=#{:06x} muted=#{:06x}",
+            names[t.theme_index()],
+            ffi::theme_ui("bg"),
+            ffi::theme_rgb("keyword"),
+            ffi::theme_ui("muted")
+        );
+        println!("unknown name rejected: {}", !t.theme_set("no-such-theme"));
+
+        // The front-end paints from a cache, not from theme_ui() directly, so
+        // the switch is only real once reload() has run — this is what the
+        // picker does on every keypress.
+        palette::reload();
+        println!(
+            "front-end cache after reload: bg=#{:06x} muted=#{:06x} accent=#{:06x}",
+            palette::bg(),
+            palette::muted_fg(),
+            palette::accent()
+        );
+
+        // A fresh session re-reads the config, which is the restart path.
+        let fresh = Session::new();
+        println!(
+            "after reopening the session: active={} (config kept it)",
+            names[fresh.theme_index()]
+        );
+    }
+
+    // ---- bundled resources ----
+    //
+    // langs.c reads queries/<lang>/highlights.scm from the cwd first and only
+    // then from ../Resources/queries next to the executable; runtime.c resolves
+    // the vendored server and ripgrep the same way. Both paths look identical
+    // from the repo root, so this probes with an absolute file and prints the
+    // cwd: run it from `/` against an installed Wave.app and a zero span count
+    // means the bundle is missing its queries, not that highlighting broke.
+    println!("\n=== resources ===");
+    println!("cwd={:?}", std::env::current_dir().unwrap_or_default());
+    let probe = std::path::Path::new(root).join("src/piece_table.c");
+    let mut r = Session::new();
+    if r.open(&probe).is_ok() {
+        let lines = r.line_count().min(80);
+        let spans: usize = (0..lines).map(|l| r.line_spans(l).len()).sum();
+        println!("tree-sitter spans in first {lines} lines of {probe:?}: {spans}");
+    } else {
+        println!("could not open {probe:?}");
+    }
 }
 
 /// Geist Mono, compiled into the binary so a fresh clone ships with a real
@@ -3684,20 +3943,151 @@ fn list_fonts() {
     });
 }
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let first = args.next();
-    if first.as_deref() == Some("--fonts") {
-        list_fonts();
-        return;
-    }
-    if first.as_deref() == Some("--selftest") {
-        selftest(&args.next().unwrap_or_else(|| ".".into()));
-        return;
-    }
-    let path = first.map(PathBuf::from);
+// ---- `wave` on PATH ----
+//
+// Dragging Wave.app out of a .dmg cannot put anything on PATH, so the shim that
+// ships at Contents/Resources/bin/wave needs one symlink to become a command.
+// This is that step, done from the palette instead of a README one-liner.
 
-    Application::new().run(move |cx: &mut App| {
+/// `/usr/local/bin` is in macOS's stock `/etc/paths`, so it is on every user's
+/// PATH. Deliberately not chosen by inspecting our own `$PATH`: a Finder launch
+/// inherits a minimal environment, not the shell's, so `~/.local/bin` and the
+/// Homebrew directories are invisible from in here even when the user has them.
+const CLI_LINK: &str = "/usr/local/bin/wave";
+
+/// The shim inside the running bundle: `Contents/MacOS/wave` -> `../Resources/bin/wave`.
+fn cli_shim_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate Wave: {e}"))?;
+    let shim = exe
+        .parent()
+        .and_then(|macos| macos.parent())
+        .map(|contents| contents.join("Resources/bin/wave"))
+        .ok_or("cannot locate Wave.app")?;
+    if !shim.is_file() {
+        return Err("no bundled CLI here — this is a dev build, use `make install-cli`".into());
+    }
+    Ok(shim)
+}
+
+/// `/a/b c` -> `'/a/b c'`, for pasting into a `/bin/sh` command line.
+fn sh_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Symlink the shim onto PATH, asking for an admin password only if it turns
+/// out to be needed. Returns the line to show in the status bar.
+fn install_cli(shim: &Path) -> Result<String, String> {
+    let link = Path::new(CLI_LINK);
+
+    // Homebrew leaves /usr/local user-owned on Intel machines, where this needs
+    // no password at all. Try it and read the error rather than stat-ing the
+    // directory, which cannot answer "may I write here" reliably.
+    if link.parent().is_some_and(Path::is_dir) {
+        let _ = std::fs::remove_file(link);
+        match std::os::unix::fs::symlink(shim, link) {
+            Ok(()) => return Ok(format!("installed {CLI_LINK}")),
+            Err(e) if e.kind() != std::io::ErrorKind::PermissionDenied => {
+                return Err(format!("install failed: {e}"));
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Otherwise one authenticated shell command, which is also what creates
+    // /usr/local/bin on a machine that has never had it.
+    let command = format!("mkdir -p /usr/local/bin && ln -sf {} {CLI_LINK}", sh_quote(shim));
+    let script = format!(
+        "do shell script \"{}\" with administrator privileges",
+        command.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("install failed: {e}"))?;
+    if out.status.success() {
+        return Ok(format!("installed {CLI_LINK}"));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("User canceled") {
+        Err("install canceled".into())
+    } else {
+        Err(format!("install failed: {}", err.trim()))
+    }
+}
+
+/// `file:///Users/me/a%20b.tsx` -> `/Users/me/a b.tsx`.
+///
+/// NSURL hands back a percent-encoded absolute string. Anything that is not a
+/// local file URL is dropped: Wave registers no custom scheme, so the only
+/// URLs it ever sees are the documents Finder is asking it to open.
+fn path_from_file_url(url: &str) -> Option<PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let mut path = String::from_utf8(out).ok()?;
+    // Directories arrive with a trailing slash; ws_open_context wants the path.
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    // Dev-only flags, deliberately outside the shipped CLI contract below.
+    match argv.get(1).map(String::as_str) {
+        Some("--fonts") => return list_fonts(),
+        Some("--selftest") => {
+            return selftest(argv.get(2).map(String::as_str).unwrap_or("."));
+        }
+        _ => {}
+    }
+
+    // Parsed in C, by the same function main.c calls: `wave --line 42 src/x.c`
+    // has to mean the same thing whichever front-end the .app bundles, because
+    // the `wave` shim in Contents/Resources/bin just execs the one that's there.
+    let Some(request) = ffi::parse_open_request(&argv) else {
+        eprintln!("usage: wave [--line N] [--column N] [file-or-folder]");
+        std::process::exit(2);
+    };
+    let path = request.path.as_deref().map(PathBuf::from);
+    // A path is relative to the shell's cwd, which the shim inherits by exec'ing
+    // the binary rather than going through `open`.
+    let location = request
+        .has_location
+        .then_some((request.line, request.column));
+
+    // Finder double-clicks and `open -a Wave file.tsx` arrive as file URLs on
+    // application:openURLs: — the only document-open event GPUI forwards, since
+    // it installs nothing like mac.m's application:openFiles: for the GLFW
+    // build. Without this the app comes up empty and drops the file.
+    //
+    // The handler has to be registered before run(), so it cannot touch the
+    // window (which run() creates) and it can fire before there is one. It
+    // parks paths here instead, and the poll loop below picks them up.
+    let opened: Rc<RefCell<Vec<PathBuf>>> = Rc::new(RefCell::new(Vec::new()));
+    let app = Application::new();
+    let queue = opened.clone();
+    app.on_open_urls(move |urls| {
+        queue
+            .borrow_mut()
+            .extend(urls.iter().filter_map(|u| path_from_file_url(u)));
+    });
+
+    app.run(move |cx: &mut App| {
         // Register fonts before any window measures text.
         let ts = cx.text_system();
         load_bundled_fonts(&ts);
@@ -3735,10 +4125,17 @@ fn main() {
                     window.activate_window();
 
                     // Server replies, pty output and ripgrep results all arrive
-                    // asynchronously and only surface when polled.
+                    // asynchronously and only surface when polled — as do the
+                    // paths Finder asks for, which is why the open-URL handler
+                    // can be a plain queue instead of holding a window handle.
+                    let opened = opened.clone();
                     cx.spawn(async move |this, cx| loop {
                         Timer::after(POLL).await;
                         let polled = this.update(cx, |this: &mut WaveView, cx| {
+                            for path in opened.borrow_mut().drain(..) {
+                                dbg(format_args!("open from Finder: {path:?}"));
+                                this.open_path(&path, cx);
+                            }
                             let mut dirty = this.session.lsp_poll();
                             if this.session.term_poll() {
                                 dirty = true;
@@ -3762,7 +4159,14 @@ fn main() {
                     })
                     .detach();
 
-                    WaveView::new(path.clone(), focus)
+                    let mut view = WaveView::new(path.clone(), focus);
+                    if let Some((line, column)) = location {
+                        // `--line`/`--column` are 1-based, like `:123` and the
+                        // file finder; wave_goto_line takes them as given.
+                        view.session.goto_line(line, column);
+                        view.center_cursor();
+                    }
+                    view
                 })
             },
         )

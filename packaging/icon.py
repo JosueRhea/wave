@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Wave app icon — a 1024x1024 master PNG.
 
-Draws a macOS-style rounded "squircle" with a blue->teal vertical gradient and
+Draws a macOS-style rounded "squircle" with a navy->blue vertical gradient and
 three stacked white waves. Output feeds the .icns pipeline (see `make icon`).
 """
 import math
@@ -12,8 +12,8 @@ S = 1024                      # master canvas
 MARGIN = 100                  # transparent padding around the squircle
 BOX = S - 2 * MARGIN          # squircle side
 RADIUS = 200                  # corner radius
-TOP = (56, 132, 255)          # gradient top   (blue)
-BOTTOM = (38, 208, 206)       # gradient bottom (teal)
+TOP = (16, 38, 78)            # gradient top    (navy)
+BOTTOM = (22, 74, 128)        # gradient bottom (deep blue)
 
 
 def lerp(a, b, t):

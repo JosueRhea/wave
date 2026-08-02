@@ -3,6 +3,10 @@
 # Vendors the tree-sitter runtime and the C grammar on first build, compiles
 # the core as a static lib, builds + runs the test binaries, and links the
 # GUI application (`wave`) against GLFW + OpenGL.
+#
+# There are two front-ends over that core: the GLFW/OpenGL one built here
+# (`make app`) and the GPUI/Rust one in rust/ (`make gpui`). Wave.app ships the
+# GPUI one unless you ask for the other — see FRONTEND under macOS packaging.
 
 CC      ?= cc
 ZIG     ?= zig
@@ -101,21 +105,43 @@ GHOSTTY_GUI_LIBS += -Wl,-force_load,$(GHOSTTY_INTERNAL_LIB)
 GUI_LIBS += $(GHOSTTY_INTERNAL_FRAMEWORKS)
 endif
 
-TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view test_theme
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
-.PHONY: all app test clean vendor lsp rg distclean icon bundle dist \
-        dmg notarize release-macos ghostty-vt ghostty-internal FORCE
+.PHONY: all app gpui test clean vendor lsp rg distclean icon bundle dist \
+        dmg notarize notarize-dmg zip-app release-macos install-cli uninstall-cli \
+        ghostty-vt ghostty-internal FORCE
 
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
 #   make dist VERSION=0.1.7-alpha
-VERSION  ?= 0.1.16-alpha
+VERSION  ?= 0.1.17-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources
 DIST      := $(BUILD)/Wave-$(VERSION)-macos.zip
 DMG       := $(BUILD)/Wave-$(VERSION)-macos.dmg
+
+# Which front-end goes into Wave.app: the GPUI/Rust one (`gpui`, default) or the
+# original GLFW/C binary (`c`, i.e. `make bundle FRONTEND=c`). Both link the same
+# libwave.a and resolve queries/ + vendor/ relative to the executable, so the
+# bundle layout below is the same either way and only the copied binary differs.
+FRONTEND ?= gpui
+GPUI_BIN := rust/target/release/wave-gpui
+ifeq ($(FRONTEND),gpui)
+BUNDLE_BIN := $(GPUI_BIN)
+BUNDLE_DEP := gpui lsp rg
+else
+BUNDLE_BIN := $(BUILD)/wave
+BUNDLE_DEP := app
+endif
+
+# Where `make install-cli` puts the `wave` shim. It is a symlink into the app,
+# so an app update needs no reinstall.
+CLI_DIR  ?= /usr/local/bin
+# The app the shim should point at: the installed copy if there is one, else the
+# one just built.
+CLI_APP  ?= $(shell test -d /Applications/Wave.app && echo /Applications/Wave.app || echo $(abspath $(APP)))
 
 # Signing + notarization (ZENIT GROUP LLC). CODESIGN_ID auto-selects the
 # "Developer ID Application" identity if one is installed, else falls back to an
@@ -131,6 +157,13 @@ all: $(BUILD)/libwave.a app
 # `app` pulls in the bundled language server + ripgrep so a fresh build is
 # shippable as a self-contained pack (the C binary + its vendored tools).
 app: lsp rg $(BUILD)/wave
+
+# The GPUI front-end. cargo's own dependency tracking decides what to rebuild;
+# the shim (rust/shim/wave_ffi.c) is compiled by build.rs, which links the
+# libwave.a made here — so that has to exist first.
+gpui: $(BUILD)/libwave.a $(GHOSTTY_DEP)
+	@echo "  CARGO wave-gpui (release)"
+	@cd rust && cargo build --release
 
 # Install the bundled TS/JS language server into vendor/lsp (prefers bun, the
 # project's standard runtime; falls back to npm). Idempotent.
@@ -289,11 +322,11 @@ icon:
 
 # Assemble Wave.app: binary in Contents/MacOS, vendored lsp+rg beside it (Wave
 # resolves them relative to the executable), icon + Info.plist in place.
-bundle: app
-	@echo "  BUNDLE $(APP) ($(VERSION))"
+bundle: $(BUNDLE_DEP)
+	@echo "  BUNDLE $(APP) ($(VERSION), $(FRONTEND) front-end)"
 	@rm -rf $(APP)
 	@mkdir -p $(APP_BIN) $(APP_RES)
-	@cp $(BUILD)/wave $(APP_BIN)/wave
+	@cp $(BUNDLE_BIN) $(APP_BIN)/wave
 	@# Vendored payload lives in Resources/ (the canonical spot for non-code
 	@# files) — NOT in MacOS/, where codesign would treat each .js as nested code
 	@# and refuse to sign. Wave resolves ../Resources/vendor at runtime.
@@ -306,6 +339,12 @@ bundle: app
 	@# cli.mjs directly) and they break codesign's bundle seal.
 	@rm -rf $(APP_RES)/vendor/lsp/node_modules/.bin
 	@cp packaging/wave.icns $(APP_RES)/wave.icns
+	@# The `wave` CLI shim, so an installed app can be driven from a shell
+	@# (`make install-cli` symlinks it onto PATH). It goes in Resources/ for the
+	@# same reason the vendored payload does — codesign seals it as a resource.
+	@mkdir -p $(APP_RES)/bin
+	@cp packaging/wave-cli.sh $(APP_RES)/bin/wave
+	@chmod +x $(APP_RES)/bin/wave
 	@sed 's/__VERSION__/$(VERSION)/g' packaging/Info.plist.in > $(APP)/Contents/Info.plist
 	@printf 'APPL????' > $(APP)/Contents/PkgInfo
 	@touch $(APP)
@@ -321,12 +360,43 @@ bundle: app
 	    codesign --force --deep --sign - $(APP) >/dev/null 2>&1 || true; \
 	fi
 
-# Zip the bundle for a GitHub release asset.
-dist: bundle
+# Put `wave` on PATH, pointing into an installed Wave.app:
+#   make install-cli                      # /Applications/Wave.app if present
+#   make install-cli CLI_DIR=~/.local/bin # somewhere that needs no sudo
+# A symlink, not a copy, so app updates carry over. The shim resolves the link
+# back to its bundle, which is also how it finds the binary to launch.
+install-cli:
+	@test -x "$(CLI_APP)/Contents/Resources/bin/wave" || \
+	    (echo "ERROR: no CLI shim in $(CLI_APP) — run 'make bundle' first, or pass CLI_APP=/path/to/Wave.app"; exit 1)
+	@mkdir -p $(CLI_DIR) 2>/dev/null || true
+	@if [ -w "$(CLI_DIR)" ]; then \
+	    ln -sf "$(CLI_APP)/Contents/Resources/bin/wave" "$(CLI_DIR)/wave"; \
+	else \
+	    echo "  SUDO  $(CLI_DIR) is not writable"; \
+	    sudo mkdir -p "$(CLI_DIR)" && \
+	    sudo ln -sf "$(CLI_APP)/Contents/Resources/bin/wave" "$(CLI_DIR)/wave"; \
+	fi
+	@echo "  ->    $(CLI_DIR)/wave -> $(CLI_APP)"
+	@case ":$$PATH:" in *":$(CLI_DIR):"*) ;; \
+	    *) echo "  NOTE  $(CLI_DIR) is not on your PATH";; esac
+
+uninstall-cli:
+	@if [ -w "$(CLI_DIR)" ]; then rm -f "$(CLI_DIR)/wave"; \
+	else sudo rm -f "$(CLI_DIR)/wave"; fi
+	@echo "  ->    removed $(CLI_DIR)/wave"
+
+# Zip whatever Wave.app is sitting in build/, without touching it. Split out of
+# `dist` because release-macos needs it *after* stapling, and `bundle` rebuilds
+# the app from scratch — running dist there would throw the ticket away.
+zip-app:
 	@echo "  DIST  $(DIST)"
 	@rm -f $(DIST)
 	@cd $(BUILD) && /usr/bin/ditto -c -k --keepParent Wave.app $(notdir $(DIST))
 	@echo "  ->    $(DIST)"
+
+# Build the bundle, then zip it, for a GitHub release asset.
+dist: bundle
+	@$(MAKE) zip-app
 
 # Submit the (Developer ID-signed) app to Apple's notary service and staple the
 # ticket onto Wave.app, so a downloaded copy opens with no Gatekeeper warning —
@@ -348,6 +418,21 @@ notarize: bundle
 	@rm -f $(BUILD)/notarize.zip
 	@echo "  ->    stapled $(APP)"
 
+# Notarize the .dmg itself and staple the ticket to it.
+#
+# Stapling the app is not enough for a .dmg download: Gatekeeper assesses the
+# disk image too, and without its own ticket that check needs the network — so
+# a first open offline, or behind a blocked notary endpoint, warns. The 0.1.16
+# release was stapled this way by hand; this is that step, kept in the pipeline
+# so it cannot be forgotten.
+notarize-dmg:
+	@test -f $(DMG) || (echo "ERROR: no $(DMG) — run 'make dmg' first"; exit 1)
+	@echo "  NOTARIZE $(DMG) as $(NOTARY_PROFILE)"
+	@xcrun notarytool submit $(DMG) --keychain-profile $(NOTARY_PROFILE) --wait
+	@xcrun stapler staple $(DMG)
+	@xcrun stapler validate $(DMG)
+	@echo "  ->    stapled $(DMG)"
+
 # Build a drag-to-Applications .dmg from the current Wave.app (run after bundle,
 # or after notarize so the app inside is stapled).
 dmg:
@@ -361,10 +446,13 @@ dmg:
 	@rm -rf $(BUILD)/dmgroot
 	@echo "  ->    $(DMG)"
 
-# Full notarized macOS release: build + sign + notarize + staple, then a .dmg
-# whose embedded app is stapled (opens offline, zero warnings).
+# Full notarized macOS release: build + sign + notarize + staple the app, then a
+# .dmg that is itself notarized + stapled. Two submissions, because the app and
+# the disk image are assessed separately — the result opens offline, no warnings.
 release-macos:
 	@$(MAKE) bundle
 	@$(MAKE) notarize
 	@$(MAKE) dmg
-	@echo "  DONE  $(DMG) (notarized + stapled)"
+	@$(MAKE) notarize-dmg
+	@$(MAKE) zip-app
+	@echo "  DONE  $(DMG) + $(DIST) (notarized + stapled)"

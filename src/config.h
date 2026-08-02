@@ -13,6 +13,9 @@ typedef struct {
     float radius;
     int blur;
     int native_titlebar;
+    /* A theme *name* (see theme.h), not an index, so reordering the built-in
+     * list cannot silently repaint everyone's editor. */
+    char theme[32];
 } WaveConfig;
 
 void wave_config_defaults(WaveConfig *cfg);

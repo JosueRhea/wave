@@ -57,7 +57,44 @@ Prebuilt macOS builds are on the [Releases](../../releases) page —
 
 To build from source instead, see [Build & run](#build--run). Packaging targets:
 `make bundle` assembles `Wave.app`; `make dist VERSION=x.y.z` produces the
-release zip; `make icon` regenerates the app icon.
+release zip; `make icon` regenerates the app icon. `make bundle` ships the GPUI
+front-end by default — `make bundle FRONTEND=c` bundles the original GLFW
+binary instead; everything else about the bundle is identical.
+
+### The `wave` command
+
+The CLI ships inside the app, but installing Wave cannot put it on your PATH by
+itself. In Wave, run **⇧⌘P → "Install wave Command in PATH"**: it symlinks
+`/usr/local/bin/wave`, asking for your password only if that directory needs
+admin rights (it usually does).
+
+The equivalent by hand, if you would rather:
+
+```sh
+sudo ln -sf /Applications/Wave.app/Contents/Resources/bin/wave /usr/local/bin/wave
+```
+
+From a source checkout, `make` does it for you:
+
+```sh
+make install-cli                      # -> /usr/local/bin/wave
+make install-cli CLI_DIR=~/.local/bin # somewhere that needs no sudo
+make uninstall-cli                    # remove it again
+```
+
+Either way it is a symlink into the bundle, pointing at `/Applications/Wave.app`
+when that exists (else the copy you just built), so app updates need no
+reinstall. Then, from any directory:
+
+```sh
+wave .                    # open the current folder
+wave src/main.c           # open a file — relative paths work, cwd is inherited
+wave --line 42 src/main.c # …at a line (-l/-c also work)
+```
+
+The shim launches the app detached and hands the prompt straight back, like
+`code .`. Each invocation is a new window: Wave has no IPC to pass a path to an
+already-running instance.
 
 ## Architecture
 
@@ -182,7 +219,23 @@ opacity=1.000  # window opacity 0.2..1.0 (:opacity 0.85)
 radius=7.0     # UI corner radius 0..24 px (:radius 10)
 blur=0         # macOS background blur behind the window (:blur)
 titlebar=1     # macOS native traffic lights floating over our header (:titlebar)
+theme=wave     # color theme (⇧⌘P → "Change Theme…")
 ```
+
+### Themes
+
+Six built-in themes, in `src/theme.c`: **Wave** (the default), **Gruvbox Dark**,
+**Gruvbox Light**, **Nord**, **Solarized Dark** and **Tokyo Night**. Pick one
+with `⇧⌘P → "Change Theme…"` — `↑`/`↓` previews each one on the live editor,
+`⏎` keeps it, `Esc` puts the old one back. The choice is written to the config
+immediately, so it survives a restart.
+
+A theme carries both halves of the palette: the tree-sitter capture colors
+(keyword, string, comment, …) and the chrome slots the window is painted from
+(background, gutter, selection, borders, diff colors). Adding one is a single
+row of `0xRRGGBB` values in `THEMES[]` — no code. The GLFW front-end shares the
+capture colors, since both front-ends call `theme_color()`; its chrome still
+comes from `draw.c`.
 
 Transparency and blur are adjustable live: `:opacity 0.85` makes the window
 translucent, and `:blur` toggles a macOS frosted-glass layer behind it (a

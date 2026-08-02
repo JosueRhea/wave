@@ -1,5 +1,7 @@
 #include "config.h"
 
+#include "theme.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +18,10 @@ void wave_config_defaults(WaveConfig *cfg) {
     cfg->radius = 7.0f;
     cfg->blur = 0;
     cfg->native_titlebar = 1;
+    /* Applied, not just recorded: "Reset Settings to Defaults" has to repaint,
+     * the same way loading a config with a theme= line does. */
+    snprintf(cfg->theme, sizeof cfg->theme, "%s", theme_name(0));
+    theme_set(cfg->theme);
 }
 
 void wave_config_path(char *out, size_t cap) {
@@ -46,6 +52,7 @@ int wave_config_save(const WaveConfig *cfg) {
     fprintf(f, "radius=%.1f\n", cfg->radius);
     fprintf(f, "blur=%d\n", cfg->blur);
     fprintf(f, "titlebar=%d\n", cfg->native_titlebar);
+    fprintf(f, "theme=%s\n", cfg->theme);
     fclose(f);
     return 0;
 }
@@ -117,6 +124,11 @@ void wave_config_load(WaveConfig *cfg) {
             if (v >= 0.0f && v <= 24.0f) cfg->radius = v;
         } else if (!strcmp(key, "blur")) cfg->blur = atoi(val) != 0;
         else if (!strcmp(key, "titlebar")) cfg->native_titlebar = atoi(val) != 0;
+        else if (!strcmp(key, "theme")) {
+            /* Only a name the build actually has, so an old or hand-edited
+             * config falls back to the default rather than to no colors. */
+            if (theme_set(val)) snprintf(cfg->theme, sizeof cfg->theme, "%s", val);
+        }
     }
     fclose(f);
 }

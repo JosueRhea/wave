@@ -30,6 +30,7 @@
 #include "piece_table.h"
 #include "popover.h"
 #include "recent.h"
+#include "runtime.h"
 #include "tabs.h"
 #include "terminal.h"
 #include "theme.h"
@@ -170,6 +171,26 @@ int wave_open_path(WaveSession *s, const char *path) {
     }
     if (ctx.kind == WS_OPEN_FILE) return open_in_tab(s, ctx.file, 0) ? 0 : -1;
     return 0;
+}
+
+/* ---- command line ----
+ *
+ * `wave [--line N] [--column N] [file-or-folder]` is parsed by the same
+ * function main.c calls, so the argument contract does not fork between the two
+ * front-ends — the `wave` shim inside the .app just execs whichever binary is
+ * bundled. `path` points into `argv`, which the caller owns.
+ *
+ * Returns 0 for an unusable command line (the caller should print usage and
+ * exit non-zero), 1 when a path/no-path is all that was asked for, 2 when a
+ * line/column was given too. */
+int wave_cli_open_request(int argc, char **argv, const char **path, int *line,
+                          int *column) {
+    WaveRuntimeOpenRequest r = wave_runtime_open_request(argc, argv);
+    if (path) *path = r.path;
+    if (line) *line = r.line;
+    if (column) *column = r.column;
+    if (!r.valid) return 0;
+    return r.has_location ? 2 : 1;
 }
 
 /* ---- workspace / sidebar ---- */
@@ -1489,6 +1510,40 @@ int wave_cfg_zoom(WaveSession *s, int dir) {
 
 int wave_cfg_save(WaveSession *s) {
     return s ? wave_config_save(&s->config) : 0;
+}
+
+/* ---- themes (theme.c) ----
+ *
+ * The active theme is process-global in C — theme_color() is called from
+ * highlight drawing with no session in hand — so the listing accessors take no
+ * session. Only selection does, because that is what records the choice in the
+ * config and writes it out. */
+
+int wave_theme_count(void) { return theme_count(); }
+const char *wave_theme_name(int i) { return theme_name(i); }
+const char *wave_theme_label(int i) { return theme_label(i); }
+/* Takes a session it does not read, for symmetry with the rest of this ABI and
+ * so the front-end need not know the theme is process-global. */
+int wave_theme_index(const WaveSession *s) { return theme_active_index(); }
+
+/* 0xRRGGBB for a chrome slot; see theme.h for the slot names. */
+unsigned wave_theme_ui(const char *slot) { return theme_ui(slot); }
+
+/* Repaint in `name` without committing to it — what arrowing through the theme
+ * picker does. Escaping the picker previews the original back, so nothing here
+ * touches the config. */
+int wave_theme_preview(const char *name) { return theme_set(name); }
+
+/* Select and persist. Saving here rather than on quit means the choice survives
+ * a crash, and it is the only config write the front-end does not have to ask
+ * for. Returns 1 if the name was known. */
+int wave_theme_set(WaveSession *s, const char *name) {
+    if (!theme_set(name)) return 0;
+    if (s) {
+        snprintf(s->config.theme, sizeof s->config.theme, "%s", name);
+        wave_config_save(&s->config);
+    }
+    return 1;
 }
 
 /* ==========================================================================

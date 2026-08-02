@@ -32,6 +32,28 @@ Run **from the repo root** so `queries/<lang>/highlights.scm` resolves:
 ./rust/target/debug/wave-gpui src/main.c   # file → opens in a tab
 ```
 
+The command line is `wave [--line N] [--column N] [file-or-folder]`, parsed by
+`wave_runtime_open_request` — main.c's own parser, reached through
+`wave_cli_open_request` — so the contract does not fork between the two
+front-ends. `--fonts` and `--selftest` sit outside it, on purpose.
+
+## Packaging
+
+`make bundle` from the repo root puts **this** binary in
+`Wave.app/Contents/MacOS/wave` (`make bundle FRONTEND=c` bundles the GLFW one).
+Nothing here needs a bundle-aware code path: `langs.c` and `runtime.c` already
+look next to the executable, so `../Resources/queries`, the vendored language
+server and ripgrep all resolve from inside the .app. `--selftest` prints the cwd
+and a span count under `=== resources ===`, which is the cheap way to tell a
+bundle that found its queries from one that only worked in a dev tree:
+
+```sh
+cd / && /Applications/Wave.app/Contents/MacOS/wave --selftest ~/dev/edui
+```
+
+Geist Mono is `include_bytes!`-ed into the binary, so no font ships in the
+bundle. `Contents/Resources/bin/wave` is the CLI shim; see the root README.
+
 ## Working
 
 All of this is computed in C; the front-end only lays it out and forwards input.
@@ -80,6 +102,11 @@ All of this is computed in C; the front-end only lays it out and forwards input.
 - **Custom titlebar** — the native one is hidden (`appears_transparent`), with
   window dragging, double-click zoom, and traffic-light inset handled here.
   Window opacity comes from `WaveConfig`.
+- **Themes** — `theme.c` owns both the capture colors and the chrome slots, so
+  `⇧⌘P → Change Theme…` retints the whole window, not just the code. The chrome
+  is cached in atomics (`mod palette`) rather than read per use: a frame touches
+  those colors hundreds of times and `theme_ui()` is a string lookup across the
+  FFI. `palette::reload()` is the only writer — startup, and each preview.
 
 - **`/` buffer search** — live preview from the original cursor, `n`/`N` repeat,
   `*` for the word under the cursor, and matches highlighted inline.
@@ -106,11 +133,10 @@ contiguous ranges just before rendering.
 
 | Feature | Notes |
 |---|---|
-| Mouse text selection | `editor_apply_drag_selection` exists; no drag wiring |
-| Soft wrap | `wrap_build` / `line_at_vrow` exist; the view is unwrapped |
 | Sidebar rename | `ws_paste_path_into` is bound but has no UI |
 | Signature help | `lsp_manager_request_signature_help` unbound |
 | Terminal / git-diff selection + copy | `terminal_copy_selection`, `git_view_copy_diff_selection` |
+| Finder / `open -a` file opening | GPUI exposes `on_open_urls` only; `mac.m`'s `application:openFiles:` has no equivalent here, so the CLI shim execs the binary rather than going through `open` |
 
 Also: lines are truncated at 4 KiB on read, and the completion menu is the one
 thing positioned with a hard-coded character advance (`ADVANCE`), since it has

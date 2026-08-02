@@ -35,6 +35,14 @@ unsafe extern "C" {
     fn wave_free(s: *mut c_void);
     fn wave_open_path(s: *mut c_void, path: *const c_char) -> c_int;
 
+    fn wave_cli_open_request(
+        argc: c_int,
+        argv: *const *const c_char,
+        path: *mut *const c_char,
+        line: *mut c_int,
+        column: *mut c_int,
+    ) -> c_int;
+
     fn wave_has_workspace(s: *const c_void) -> c_int;
     fn wave_ws_root(s: *const c_void) -> *const c_char;
     fn wave_ws_count(s: *const c_void) -> usize;
@@ -79,6 +87,13 @@ unsafe extern "C" {
     fn wave_selection_text(s: *mut c_void) -> *mut c_char;
     fn wave_string_free(p: *mut c_char);
     fn wave_theme_rgb(name: *const c_char) -> c_uint;
+    fn wave_theme_ui(slot: *const c_char) -> c_uint;
+    fn wave_theme_count() -> c_int;
+    fn wave_theme_name(i: c_int) -> *const c_char;
+    fn wave_theme_label(i: c_int) -> *const c_char;
+    fn wave_theme_index(s: *const c_void) -> c_int;
+    fn wave_theme_preview(name: *const c_char) -> c_int;
+    fn wave_theme_set(s: *mut c_void, name: *const c_char) -> c_int;
     fn wave_cursor(s: *const c_void, row: *mut usize, col: *mut usize);
     fn wave_mode(s: *const c_void) -> c_int;
     fn wave_mode_name(s: *const c_void) -> *const c_char;
@@ -1549,10 +1564,102 @@ impl Drop for Session {
     }
 }
 
-/// Wave's own highlight palette, packed `0xRRGGBB`.
+/// What the command line asked for: `wave [--line N] [--column N] [path]`.
+pub struct OpenRequest {
+    pub path: Option<String>,
+    /// 1-based, and only meaningful when `has_location` is set.
+    pub line: usize,
+    pub column: usize,
+    pub has_location: bool,
+}
+
+/// Parse argv through the C core's parser — the one `main.c` uses — so the CLI
+/// contract is identical whichever front-end the `.app` bundles. `args` must
+/// include the program name, since the parser skips it.
+///
+/// `None` means the command line was unusable (an unknown flag, a second path,
+/// `--line` without a number); the caller prints usage and exits non-zero.
+pub fn parse_open_request(args: &[String]) -> Option<OpenRequest> {
+    let owned: Vec<CString> = args
+        .iter()
+        .map(|a| CString::new(a.as_str()).unwrap_or_default())
+        .collect();
+    let argv: Vec<*const c_char> = owned.iter().map(|a| a.as_ptr()).collect();
+
+    let mut path: *const c_char = std::ptr::null();
+    let mut line: c_int = 1;
+    let mut column: c_int = 1;
+    // `path` borrows from `owned`, so it is copied out before this returns.
+    let rc = unsafe {
+        wave_cli_open_request(
+            argv.len() as c_int,
+            argv.as_ptr(),
+            &mut path,
+            &mut line,
+            &mut column,
+        )
+    };
+    if rc == 0 {
+        return None;
+    }
+    Some(OpenRequest {
+        path: (!path.is_null())
+            .then(|| unsafe { CStr::from_ptr(path) }.to_string_lossy().into_owned()),
+        line: line.max(1) as usize,
+        column: column.max(1) as usize,
+        has_location: rc == 2,
+    })
+}
+
+/// A tree-sitter capture's color in the active theme, packed `0xRRGGBB`.
 pub fn theme_rgb(name: &str) -> u32 {
     let Ok(c) = CString::new(name) else {
         return 0xd9dbe0;
     };
     unsafe { wave_theme_rgb(c.as_ptr()) }
+}
+
+/// A chrome color in the active theme (`"bg"`, `"selection"`, …), packed
+/// `0xRRGGBB`. Slot names are listed in `src/theme.h`.
+pub fn theme_ui(slot: &str) -> u32 {
+    let Ok(c) = CString::new(slot) else {
+        return 0xd9dbe0;
+    };
+    unsafe { wave_theme_ui(c.as_ptr()) }
+}
+
+/// The built-in themes as `(name, label)`, in menu order.
+pub fn themes() -> Vec<(String, String)> {
+    (0..unsafe { wave_theme_count() })
+        .map(|i| unsafe {
+            (
+                CStr::from_ptr(wave_theme_name(i)).to_string_lossy().into_owned(),
+                CStr::from_ptr(wave_theme_label(i)).to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Repaint in `name` without recording the choice — what the theme picker does
+/// as the selection moves. Call [`Session::theme_set`] to keep it.
+pub fn theme_preview(name: &str) -> bool {
+    let Ok(c) = CString::new(name) else {
+        return false;
+    };
+    unsafe { wave_theme_preview(c.as_ptr()) != 0 }
+}
+
+impl Session {
+    pub fn theme_index(&self) -> usize {
+        unsafe { wave_theme_index(self.raw).max(0) as usize }
+    }
+
+    /// Select a theme by name and write the choice to the config. False if the
+    /// build has no theme by that name.
+    pub fn theme_set(&mut self, name: &str) -> bool {
+        let Ok(c) = CString::new(name) else {
+            return false;
+        };
+        unsafe { wave_theme_set(self.raw, c.as_ptr()) != 0 }
+    }
 }
