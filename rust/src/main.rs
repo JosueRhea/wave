@@ -3371,16 +3371,21 @@ fn selftest(root: &str) {
     let mut e = Session::new();
     if e.open(std::path::Path::new("src/piece_table.c")).is_ok() {
         println!("\n=== mouse selection ===");
+        // The mode is printed with each step because the two have to agree: a
+        // painted selection outside VISUAL is a selection normal-mode motions
+        // would silently extend.
         e.click_at(20, 4);
         println!(
-            "click(20,4) -> cursor={:?} has_selection={}",
+            "click(20,4) -> cursor={:?} mode={:?} has_selection={}",
             e.cursor(),
+            e.mode(),
             e.has_selection()
         );
         e.drag_to(22, 10);
         println!(
-            "drag(22,10) -> cursor={:?} has_selection={}",
+            "drag(22,10) -> cursor={:?} mode={:?} has_selection={}",
             e.cursor(),
+            e.mode(),
             e.has_selection()
         );
         for line in 20..=22 {
@@ -3391,7 +3396,25 @@ fn selftest(root: &str) {
             None => println!("selection_text: None"),
         }
         e.click_at(20, 4);
-        println!("click again -> has_selection={}", e.has_selection());
+        println!(
+            "click again -> mode={:?} has_selection={}",
+            e.mode(),
+            e.has_selection()
+        );
+
+        // Motions after a drag must not keep painting: the anchor the drag left
+        // behind is still set, so a selection here would grow with every j/l
+        // while the status bar still read NORMAL.
+        for ch in "jjll".chars() {
+            e.text_input(ch);
+        }
+        println!(
+            "jjll -> cursor={:?} mode={:?} has_selection={} line 22 cols={:?}",
+            e.cursor(),
+            e.mode(),
+            e.has_selection(),
+            e.line_selection(22)
+        );
 
         // ---- one Escape leaves insert mode, even with a completion menu up ----
         println!("\n=== escape ===");

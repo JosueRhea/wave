@@ -66,8 +66,6 @@ typedef struct WaveSession {
     char hover[LSP_MANAGER_HOVER_CAP];
     int has_hover;
     char info[256];
-    /* A mouse drag selects without entering vim's VISUAL mode. */
-    int mouse_selecting;
 } WaveSession;
 
 /* The LSP completion pool, kept file-static exactly as main.c keeps it on its
@@ -537,10 +535,18 @@ void wave_click_at(WaveSession *s, int line, int col) {
     if (!e || !e->buf) return;
     editor_move_to_line_col(e, line + 1, col + 1);
     e->anchor = e->cursor; /* a bare click collapses any selection */
-    s->mouse_selecting = 0;
     modal_enter_normal(&s->modal);
 }
 
+/* A drag enters VISUAL mode, exactly as main.c does after
+ * editor_apply_drag_selection. Keeping the selection outside the modal state
+ * instead would leave NORMAL on the status bar while a selection is painted,
+ * and normal-mode motions would then extend it, since the range is just
+ * cursor/anchor.
+ *
+ * main.c gates on a movement threshold (layout_drag_should_start) so a jittery
+ * click does not become a drag; this front-end has no such threshold, so the
+ * mode only flips once the drag has actually covered ground. */
 void wave_drag_to(WaveSession *s, int line, int col) {
     Editor *e = cur(s);
     if (!e || !e->buf) return;
@@ -548,14 +554,15 @@ void wave_drag_to(WaveSession *s, int line, int col) {
     editor_move_to_line_col(e, line + 1, col + 1);
     e->anchor = anchor;
     e->group_open = 0;
-    s->mouse_selecting = 1;
+    if (e->cursor != e->anchor) modal_enter_visual(&s->modal);
 }
 
+/* VISUAL mode always covers at least the character under the cursor, which is
+ * what editor_visual_range returns and what main.c copies on Cmd-C. */
 int wave_has_selection(const WaveSession *s) {
     const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
     if (!e || !e->buf) return 0;
-    return (s->modal.mode == MODE_VISUAL || s->mouse_selecting) &&
-           e->cursor != e->anchor;
+    return s->modal.mode == MODE_VISUAL;
 }
 
 /* The selected text, for Cmd-C. Caller must free via wave_string_free(). */
@@ -568,12 +575,13 @@ char *wave_selection_text(WaveSession *s) {
 
 void wave_string_free(char *p) { free(p); }
 
-/* Selection on `line`, as byte columns. Covers both visual mode and a mouse
- * drag — editor_visual_range only looks at cursor/anchor, not the modal mode. */
+/* Selection on `line`, as byte columns. editor_visual_range only looks at
+ * cursor/anchor, so the mode gate here is what keeps a stale anchor from
+ * painting a selection outside VISUAL — text_view_selection does the same. */
 int wave_line_selection(WaveSession *s, size_t line, size_t *a, size_t *b) {
     Editor *e = cur(s);
     if (!e || !e->buf) return 0;
-    if (s->modal.mode != MODE_VISUAL && !s->mouse_selecting) return 0;
+    if (s->modal.mode != MODE_VISUAL) return 0;
     EditorRange sel;
     if (!editor_visual_range(e, &sel)) return 0;
     size_t start, end;
@@ -1770,7 +1778,6 @@ int wave_paste(WaveSession *s, const char *text) {
     EditorPasteResult r = editor_paste_text(e, text, replace);
     if (r == EDITOR_PASTE_NONE) return 0;
 
-    s->mouse_selecting = 0;
     if (s->modal.mode == MODE_VISUAL) modal_enter_normal(&s->modal);
     editor_update_highlighter(e);
     lsp_manager_push_change(&s->lsp, e);
