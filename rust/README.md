@@ -169,6 +169,32 @@ cursor abs row=8 col=36 visible=1, visible_start=0 -> screen row 8
 idle polls reporting change: 0/20
 ```
 
+## Fonts
+
+GPUI renders text through the platform stack — CoreText on macOS
+(`platform/mac/text_system.rs`), cosmic-text on Linux, DirectWrite on Windows.
+It shapes runs, caches glyphs in an atlas, and does fallback and subpixel
+positioning, none of which `font.c`'s baked stb_truetype atlas could do. It is
+also why each line is handed over as a single `StyledText`: advances only sum
+correctly when the whole run is shaped together.
+
+**Geist Mono is bundled** (`assets/fonts`, SIL OFL, see `OFL.txt`) and compiled
+into the binary with `include_bytes!`, so a fresh clone ships with a real
+monospace font and no install step. It is the default family.
+
+Drop `.ttf`/`.otf`/`.ttc` files in `~/.config/wave/fonts` to add more — they are
+registered at startup via `add_fonts` and appear in the picker
+(`⇧⌘P → Change Font…`, or `⌘,` → Font).
+
+The picker lists monospace families only. GPUI exposes no monospace trait, so
+each family is *measured*: `i M W l 0 .` must all advance identically. That is a
+heuristic — it wrongly admitted Webdings before the sample was widened, and
+macOS hides SF Mono from enumeration entirely — so `⌃A` toggles the full list.
+
+Font choice lives in `~/.config/wave/gpui.conf`, not the shared config:
+`wave_config_save()` rewrites `~/.config/wave/config` from a fixed field list
+and would destroy any key it does not know.
+
 ## Debugging without a GUI
 
 ```sh

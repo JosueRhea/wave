@@ -12,13 +12,16 @@
 //! Zed's are.
 
 mod ffi;
+mod frontend_config;
 
 use ffi::{flags, CloseAction, GitMode, Key, Mode, Session, TabKind, COLOR_DEFAULT};
+use frontend_config::FrontendConfig;
 use gpui::{
     actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, ClickEvent,
     ClipboardItem, Context, CursorStyle, FocusHandle, HighlightStyle, KeyBinding, KeyDownEvent,
     Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
-    ScrollWheelEvent, StyledText, SystemMenuType, Timer, TitlebarOptions, UnderlineStyle, Window,
+    FontStyle, FontWeight, ScrollWheelEvent, StyledText, SystemMenuType, Timer, TitlebarOptions,
+    UnderlineStyle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 use std::ops::Range;
@@ -30,7 +33,6 @@ actions!(wave, [Quit]);
 /// How often to drain async work (server replies, pty output, ripgrep).
 const POLL: Duration = Duration::from_millis(50);
 
-const FONT: &str = "Menlo";
 /// Fallbacks until the config is read; the live values live on WaveView.
 const TEXT_SIZE_DEFAULT: f32 = 13.0;
 /// Menlo's advance at 13px. Only used to anchor the cursor-relative completion
@@ -43,6 +45,7 @@ const TITLEBAR_HEIGHT: f32 = 36.0;
 const TRAFFIC_LIGHT_INSET: f32 = 78.0;
 const GUTTER_WIDTH: f32 = 52.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
+const GIT_FILES_WIDTH: f32 = 320.0;
 const INDENT: f32 = 12.0;
 
 const BG: u32 = 0x1a1c20;
@@ -61,6 +64,200 @@ const DIAGNOSTIC: u32 = 0xd9534f;
 const DIR_FG: u32 = 0x89b4fa;
 const ADDED_FG: u32 = 0x7fb069;
 const REMOVED_FG: u32 = 0xd9534f;
+
+/// An entry in the Cmd-Shift-P command palette.
+///
+/// These are front-end actions, not `:` commands — `command.c` only parses the
+/// vim-style set (`:w`, `:opacity`, …) and has no notion of "open a folder".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cmd {
+    OpenFolder,
+    OpenFile,
+    CloseProject,
+    RecentProjects,
+    NewFile,
+    NewFolder,
+    SaveFile,
+    SaveConfig,
+    ResetConfig,
+    Settings,
+    ChooseFont,
+    FindFile,
+    ProjectSearch,
+    BufferSearch,
+    NewTerminal,
+    GitView,
+    CloseTab,
+    NextTab,
+    PrevTab,
+    ToggleSidebar,
+    ToggleWrap,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    Quit,
+}
+
+impl Cmd {
+    const ALL: [Cmd; 25] = [
+        Cmd::OpenFolder,
+        Cmd::OpenFile,
+        Cmd::Settings,
+        Cmd::ChooseFont,
+        Cmd::RecentProjects,
+        Cmd::CloseProject,
+        Cmd::NewFile,
+        Cmd::NewFolder,
+        Cmd::SaveFile,
+        Cmd::FindFile,
+        Cmd::ProjectSearch,
+        Cmd::BufferSearch,
+        Cmd::NewTerminal,
+        Cmd::GitView,
+        Cmd::CloseTab,
+        Cmd::NextTab,
+        Cmd::PrevTab,
+        Cmd::ToggleSidebar,
+        Cmd::ToggleWrap,
+        Cmd::ZoomIn,
+        Cmd::ZoomOut,
+        Cmd::ZoomReset,
+        Cmd::SaveConfig,
+        Cmd::ResetConfig,
+        Cmd::Quit,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Cmd::OpenFolder => "Open Folder…",
+            Cmd::OpenFile => "Open File…",
+            Cmd::CloseProject => "Close Project",
+            Cmd::RecentProjects => "Recent Projects",
+            Cmd::NewFile => "New File",
+            Cmd::NewFolder => "New Folder",
+            Cmd::SaveFile => "Save File",
+            Cmd::Settings => "Settings",
+            Cmd::ChooseFont => "Change Font…",
+            Cmd::SaveConfig => "Save Config",
+            Cmd::ResetConfig => "Reset Settings to Defaults",
+            Cmd::FindFile => "Find File",
+            Cmd::ProjectSearch => "Search in Project",
+            Cmd::BufferSearch => "Find in File",
+            Cmd::NewTerminal => "New Terminal",
+            Cmd::GitView => "Git Changes",
+            Cmd::CloseTab => "Close Tab",
+            Cmd::NextTab => "Next Tab",
+            Cmd::PrevTab => "Previous Tab",
+            Cmd::ToggleSidebar => "Toggle Sidebar",
+            Cmd::ToggleWrap => "Toggle Soft Wrap",
+            Cmd::ZoomIn => "Zoom In",
+            Cmd::ZoomOut => "Zoom Out",
+            Cmd::ZoomReset => "Reset Zoom",
+            Cmd::Quit => "Quit Wave",
+        }
+    }
+
+    fn shortcut(self) -> &'static str {
+        match self {
+            Cmd::SaveFile => "⌘S",
+            Cmd::FindFile => "⌘P",
+            Cmd::ProjectSearch => "⇧⌘F",
+            Cmd::BufferSearch => "/",
+            Cmd::NewTerminal => "⌘T",
+            Cmd::GitView => "⇧⌘G",
+            Cmd::CloseTab => "⌘W",
+            Cmd::NextTab => "⌃⇥",
+            Cmd::PrevTab => "⇧⌃⇥",
+            Cmd::ToggleSidebar => "⌘B",
+            Cmd::Settings => "⌘,",
+            Cmd::NewFile => "⌘N",
+            Cmd::NewFolder => "⇧⌘N",
+            Cmd::ZoomIn => "⌘+",
+            Cmd::ZoomOut => "⌘-",
+            Cmd::ZoomReset => "⌘0",
+            Cmd::Quit => "⌘Q",
+            _ => "",
+        }
+    }
+
+    /// Case-insensitive subsequence match, so "of" finds "Open Folder".
+    fn matches(self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let label = self.label().to_lowercase();
+        let mut chars = label.chars();
+        query
+            .to_lowercase()
+            .chars()
+            .all(|q| q == ' ' || chars.any(|c| c == q))
+    }
+}
+
+/// A row on the settings screen. Each one maps to a `WaveConfig` field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    Font,
+    Opacity,
+    Blur,
+    Radius,
+    FontSize,
+    Zoom,
+    Sidebar,
+    SidebarWidth,
+    Wrap,
+    NativeTitlebar,
+}
+
+impl Setting {
+    const ALL: [Setting; 10] = [
+        Setting::Font,
+        Setting::Opacity,
+        Setting::Blur,
+        Setting::Radius,
+        Setting::FontSize,
+        Setting::Zoom,
+        Setting::Sidebar,
+        Setting::SidebarWidth,
+        Setting::Wrap,
+        Setting::NativeTitlebar,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Setting::Font => "Font",
+            Setting::Opacity => "Window opacity",
+            Setting::Blur => "Background blur",
+            Setting::Radius => "Corner radius",
+            Setting::FontSize => "Font size",
+            Setting::Zoom => "Zoom",
+            Setting::Sidebar => "Sidebar",
+            Setting::SidebarWidth => "Sidebar width",
+            Setting::Wrap => "Soft wrap",
+            Setting::NativeTitlebar => "Native titlebar",
+        }
+    }
+
+    /// Whether ← / → adjust it, versus Enter toggling it.
+    fn is_toggle(self) -> bool {
+        matches!(
+            self,
+            Setting::Blur | Setting::Sidebar | Setting::Wrap | Setting::NativeTitlebar
+        )
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Setting::Opacity => "needs a transparent window; 20–100%",
+            Setting::Radius => "not applied — GPUI has no window corner radius",
+            Setting::Wrap => "rewraps to the pane width",
+            Setting::NativeTitlebar => "not applied — this build always draws its own",
+            Setting::Zoom => "multiplies the font size",
+            Setting::Font => "monospace families only · ⏎ to choose",
+            _ => "",
+        }
+    }
+}
 
 /// A one-line prompt in the status bar, for the workspace file operations that
 /// need a name or a confirmation.
@@ -99,10 +296,41 @@ struct WaveView {
     line_height: f32,
     /// Last background appearance pushed to the platform window.
     window_bg: WindowBackgroundAppearance,
+    /// Viewport height from the last frame, for cursor-anchored popups.
+    viewport_height: f32,
+    /// Cmd-Shift-P command palette.
+    cmds_open: bool,
+    cmds_query: String,
+    cmds_sel: usize,
+    /// Recent-projects overlay, openable without closing the workspace.
+    recent_open: bool,
+    /// Settings screen.
+    settings_open: bool,
+    settings_sel: usize,
+    /// Front-end-only settings (font family), stored separately from WaveConfig.
+    fe_config: FrontendConfig,
+    /// Font picker.
+    fonts_open: bool,
+    fonts_query: String,
+    fonts_sel: usize,
+    /// Show every family, not just the ones measured as fixed-pitch.
+    fonts_all: bool,
+    /// Monospace families, discovered once from the platform text system.
+    mono_fonts: Option<Vec<String>>,
 }
 
 /// Folder and file marks, mirroring `draw_folder_icon` / `draw_file_icon`:
 /// a tab-and-body rectangle, and a page with a folded corner.
+/// A vertical caret bar. Insert mode uses a bar rather than a block, and the
+/// single-line inputs get one instead of a literal `_` character.
+fn caret(height: f32) -> impl IntoElement {
+    div()
+        .w(px(2.))
+        .h(px(height))
+        .flex_none()
+        .bg(rgb(CURSOR_BG))
+}
+
 fn folder_icon(color: u32) -> impl IntoElement {
     div()
         .w(px(13.))
@@ -171,6 +399,10 @@ struct Cell {
     fg: Option<u32>,
     bg: Option<u32>,
     underline: Option<u32>,
+    /// Squiggly rather than straight, for diagnostics.
+    wavy: bool,
+    bold: bool,
+    italic: bool,
     /// The block cursor: swap foreground and background.
     invert: bool,
 }
@@ -193,6 +425,28 @@ fn now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Is this family fixed-pitch?
+///
+/// GPUI exposes no monospace trait, so this measures. Comparing only `i` and
+/// `M` lets symbol faces like Webdings through, so a wider sample is used —
+/// every glyph in a fixed-pitch font advances identically.
+fn is_monospace(ts: &std::sync::Arc<gpui::TextSystem>, size: gpui::Pixels, name: &str) -> bool {
+    let id = ts.resolve_font(&gpui::font(name.to_string()));
+    let mut widths = ['i', 'M', 'W', 'l', '0', '.'].into_iter().map(|c| {
+        ts.advance(id, size, c)
+            .map(|s| f32::from(s.width))
+            .unwrap_or(-1.0)
+    });
+    let Some(first) = widths.next() else {
+        return false;
+    };
+    first > 0.0 && widths.all(|w| (w - first).abs() < 0.01)
+}
+
+fn on_off(v: bool) -> String {
+    if v { "on".into() } else { "off".into() }
+}
+
 fn wheel_lines(ev: &ScrollWheelEvent, line_height: f32) -> f32 {
     match ev.delta {
         ScrollDelta::Pixels(p) => f32::from(p.y) / line_height,
@@ -209,14 +463,35 @@ fn highlight_for(cell: Cell) -> HighlightStyle {
         style.color = cell.fg.map(|c| rgb(c).into());
         style.background_color = cell.bg.map(|c| rgb(c).into());
     }
+    if cell.bold {
+        style.font_weight = Some(FontWeight::BOLD);
+    }
+    if cell.italic {
+        style.font_style = Some(FontStyle::Italic);
+    }
     if let Some(u) = cell.underline {
         style.underline = Some(UnderlineStyle {
             thickness: px(1.0),
             color: Some(rgb(u).into()),
-            wavy: false,
+            wavy: cell.wavy,
         });
     }
     style
+}
+
+/// Weight and slant for a tree-sitter capture.
+///
+/// `theme.c` only maps a capture name to a colour — it has no notion of weight
+/// or slant — so the emphasis table lives here rather than in the C core.
+fn capture_emphasis(name: &str) -> (bool, bool) {
+    match name {
+        // (bold, italic)
+        "comment" => (false, true),
+        "keyword" => (true, false),
+        "function" => (true, false),
+        "type" => (false, false),
+        _ => (false, false),
+    }
 }
 
 /// Collapse per-byte cells into contiguous highlight ranges and shape the line
@@ -276,6 +551,19 @@ impl WaveView {
             text_size: TEXT_SIZE_DEFAULT,
             line_height: LINE_HEIGHT_DEFAULT,
             window_bg: WindowBackgroundAppearance::Opaque,
+            viewport_height: 720.0,
+            cmds_open: false,
+            cmds_query: String::new(),
+            cmds_sel: 0,
+            recent_open: false,
+            settings_open: false,
+            settings_sel: 0,
+            fe_config: FrontendConfig::load(),
+            fonts_open: false,
+            fonts_query: String::new(),
+            fonts_sel: 0,
+            fonts_all: false,
+            mono_fonts: None,
         }
     }
 
@@ -305,7 +593,7 @@ impl WaveView {
             return a;
         }
         let ts = window.text_system();
-        let font_id = ts.resolve_font(&gpui::font(FONT));
+        let font_id = ts.resolve_font(&gpui::font(self.fe_config.font.clone()));
         let a = ts
             .advance(font_id, px(self.text_size), 'M')
             .map(|s| f32::from(s.width))
@@ -328,10 +616,18 @@ impl WaveView {
         let x = (f32::from(position.x) - text_left).max(0.0);
         let y = (f32::from(position.y) - text_top).max(0.0);
 
-        let row = self.scroll + (y / self.line_height) as usize;
-        let col = (x / adv + 0.5) as usize;
-        let last = self.session.line_count().saturating_sub(1);
-        (row.min(last), col)
+        let vrow = self.scroll + (y / self.line_height) as usize;
+        let col_in_row = (x / adv + 0.5) as usize;
+
+        // A visual row maps back to a logical line plus a byte offset, so a
+        // click on a wrapped continuation lands in the right place.
+        match self.session.visual_row(vrow) {
+            Some(row) => (row.line, row.start_byte + col_in_row),
+            None => {
+                let last = self.session.line_count().saturating_sub(1);
+                (last, col_in_row)
+            }
+        }
     }
 
     fn on_text_mouse_down(
@@ -373,6 +669,82 @@ impl WaveView {
     fn on_text_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.dragging {
             self.dragging = false;
+            cx.notify();
+        }
+    }
+
+    /// Window point -> terminal (scrollback row, column).
+    fn point_to_term_cell(&mut self, position: gpui::Point<gpui::Pixels>, window: &Window) -> (usize, usize) {
+        let adv = self.advance(window).max(1.0);
+        let has_ws = self.session.has_workspace() && self.session.show_sidebar();
+        let left = if has_ws { SIDEBAR_WIDTH } else { 0.0 } + 8.0;
+        let top = TITLEBAR_HEIGHT + if self.session.tab_count() > 0 { TAB_HEIGHT } else { 0.0 };
+
+        let x = (f32::from(position.x) - left).max(0.0);
+        let y = (f32::from(position.y) - top).max(0.0);
+        let screen_row = (y / self.line_height) as usize;
+        let start = self.session.term_visible_start(self.rows);
+        (start + screen_row, (x / adv) as usize)
+    }
+
+    fn on_term_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (row, col) = self.point_to_term_cell(ev.position, window);
+        self.session.term_sel_begin(row, col);
+        self.dragging = true;
+        cx.notify();
+    }
+
+    fn on_term_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dragging || ev.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let (row, col) = self.point_to_term_cell(ev.position, window);
+        self.session.term_sel_update(row, col);
+        cx.notify();
+    }
+
+    fn on_term_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.dragging = false;
+            self.session.term_sel_end();
+            cx.notify();
+        }
+    }
+
+    /// Window point -> git diff (line index, column).
+    fn point_to_git_cell(&mut self, position: gpui::Point<gpui::Pixels>, window: &Window) -> (usize, usize) {
+        let adv = self.advance(window).max(1.0);
+        let has_ws = self.session.has_workspace() && self.session.show_sidebar();
+        // The diff pane sits right of the sidebar and the file list.
+        let left = if has_ws { SIDEBAR_WIDTH } else { 0.0 } + GIT_FILES_WIDTH + 10.0;
+        let top = TITLEBAR_HEIGHT + if self.session.tab_count() > 0 { TAB_HEIGHT } else { 0.0 };
+
+        let x = (f32::from(position.x) - left).max(0.0);
+        let y = (f32::from(position.y) - top).max(0.0);
+        let row = (y / self.line_height) as usize + self.session.git_diff_scroll_pos();
+        (row, (x / adv) as usize)
+    }
+
+    fn on_git_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (line, col) = self.point_to_git_cell(ev.position, window);
+        self.session.git_sel_begin(line, col);
+        self.dragging = true;
+        cx.notify();
+    }
+
+    fn on_git_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dragging || ev.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let (line, col) = self.point_to_git_cell(ev.position, window);
+        self.session.git_sel_update(line, col);
+        cx.notify();
+    }
+
+    fn on_git_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging {
+            self.dragging = false;
+            self.session.git_sel_end();
             cx.notify();
         }
     }
@@ -446,12 +818,12 @@ impl WaveView {
         match &self.prompt {
             Prompt::None => None,
             Prompt::NewFile { dir, text } => Some(format!(
-                "new file: {}{}{text}_",
+                "new file: {}{}{text}",
                 dir,
                 if dir.is_empty() { "" } else { "/" }
             )),
             Prompt::NewDir { dir, text } => Some(format!(
-                "new folder: {}{}{text}_",
+                "new folder: {}{}{text}",
                 dir,
                 if dir.is_empty() { "" } else { "/" }
             )),
@@ -459,17 +831,460 @@ impl WaveView {
         }
     }
 
+    /// Current value of a setting, formatted for display.
+    fn setting_value(&self, setting: Setting) -> String {
+        match setting {
+            Setting::Font => self.fe_config.font.clone(),
+            Setting::Opacity => format!("{}%", self.session.opacity_pct()),
+            Setting::Blur => on_off(self.session.blur()),
+            Setting::Radius => format!("{:.0}", self.session.radius()),
+            Setting::FontSize => format!("{:.0}pt", self.session.base_pt() / (self.session.scale_pct() as f32 / 100.0)),
+            Setting::Zoom => format!("{}%", self.session.scale_pct()),
+            Setting::Sidebar => on_off(self.session.show_sidebar()),
+            Setting::SidebarWidth => format!("{} cols", self.session.side_cells()),
+            Setting::Wrap => on_off(self.session.wrap()),
+            Setting::NativeTitlebar => on_off(self.session.native_titlebar()),
+        }
+    }
+
+    /// Adjust a setting. `delta` is +1/-1; toggles ignore it.
+    fn adjust_setting(&mut self, setting: Setting, delta: i32) {
+        match setting {
+            // Opened from the settings screen with Enter; nothing to nudge.
+            Setting::Font => {}
+            Setting::Opacity => {
+                let next = self.session.opacity_pct() as i32 + delta * 5;
+                self.session.set_opacity(next.clamp(20, 100) as f32 / 100.0);
+            }
+            Setting::Blur => {
+                self.session.toggle_blur();
+            }
+            Setting::Radius => {
+                let next = self.session.radius() + delta as f32;
+                self.session.set_radius(next);
+            }
+            Setting::FontSize => {
+                // base_pt is the unscaled size; back it out of the effective one.
+                let scale = (self.session.scale_pct() as f32 / 100.0).max(0.01);
+                let base = self.session.base_pt() / scale;
+                self.session.set_base_pt(base + delta as f32);
+            }
+            Setting::Zoom => {
+                self.session.zoom(delta);
+            }
+            Setting::Sidebar => {
+                self.session.toggle_sidebar();
+            }
+            Setting::SidebarWidth => {
+                let next = self.session.side_cells() as i32 + delta * 2;
+                self.session.set_side_cells(next.max(0) as usize);
+            }
+            Setting::Wrap => {
+                self.session.toggle_wrap();
+            }
+            Setting::NativeTitlebar => {
+                self.session.toggle_titlebar();
+            }
+        }
+        // Type metrics may have moved; re-measure the advance.
+        self.advance = None;
+    }
+
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let sel = self.settings_sel.min(Setting::ALL.len() - 1);
+        let rows: Vec<_> = Setting::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(i, setting)| {
+                let selected = i == sel;
+                let value = self.setting_value(setting);
+                let note = setting.note();
+                div()
+                    .id(("setting", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(self.line_height + 6.))
+                    .px(px(12.))
+                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settings_sel = i;
+                        this.adjust_setting(setting, 1);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                                    .child(setting.label()),
+                            )
+                            .when(!note.is_empty(), |d| {
+                                d.child(div().text_color(rgb(GUTTER_FG)).child(note))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(if selected { 0xe6c07b } else { DIM_FG }))
+                            .child(value),
+                    )
+            })
+            .collect();
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .mt(px(56.))
+                    .w(px(720.))
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(SIDEBAR_BG))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .rounded(px(6.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h(px(self.line_height + 10.))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .px(px(12.))
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(DEFAULT_FG))
+                            .child("Settings"),
+                    )
+                    .children(rows)
+                    .child(
+                        div()
+                            .h(px(self.line_height + 6.))
+                            .px(px(12.))
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(GUTTER_FG))
+                            .child("↑↓ select · ←→ adjust · ⏎ toggle · s save · r reset · esc close"),
+                    ),
+            )
+    }
+
+    /// Monospace families available to the platform text system.
+    ///
+    /// GPUI has no "is this monospace" query, so each family is measured: in a
+    /// fixed-pitch font `i` and `M` advance identically. Done once and cached —
+    /// it resolves every installed family.
+    fn mono_fonts(&mut self, window: &Window) -> Vec<String> {
+        if let Some(cached) = &self.mono_fonts {
+            return cached.clone();
+        }
+        let ts = window.text_system();
+        let size = px(TEXT_SIZE_DEFAULT);
+
+        let mut names: Vec<String> = ts
+            .all_font_names()
+            .into_iter()
+            .filter(|name| is_monospace(&ts, size, name))
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup();
+
+        dbg(format_args!("{} monospace families", names.len()));
+        self.mono_fonts = Some(names.clone());
+        names
+    }
+
+    fn fonts_filtered(&mut self, window: &Window) -> Vec<String> {
+        let query = self.fonts_query.to_lowercase();
+        let names = if self.fonts_all {
+            let mut all = window.text_system().all_font_names();
+            all.sort_by_key(|n| n.to_lowercase());
+            all.dedup();
+            all
+        } else {
+            self.mono_fonts(window)
+        };
+        names
+            .into_iter()
+            .filter(|n| query.is_empty() || n.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    fn set_font(&mut self, name: String) {
+        self.fe_config.font = name;
+        self.fe_config.save();
+        // The advance was measured against the previous family.
+        self.advance = None;
+        self.status = format!("font: {}", self.fe_config.font);
+    }
+
+    fn render_fonts(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        const VISIBLE: usize = 12;
+        let items = self.fonts_filtered(window);
+        let total = items.len();
+        let sel = self.fonts_sel.min(total.saturating_sub(1));
+        let first = sel
+            .saturating_sub(VISIBLE / 2)
+            .min(total.saturating_sub(VISIBLE.min(total)));
+        let last = (first + VISIBLE).min(total);
+        let current = self.fe_config.font.clone();
+
+        let rows: Vec<_> = (first..last)
+            .map(|i| {
+                let name = items[i].clone();
+                let selected = i == sel;
+                let is_current = name == current;
+                let pick = name.clone();
+                div()
+                    .id(("font-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(self.line_height + 4.))
+                    .px(px(12.))
+                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_font(pick.clone());
+                        this.fonts_open = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                            .child(name.clone()),
+                    )
+                    // Preview each family in itself.
+                    .child(
+                        div()
+                            .font_family(name)
+                            .text_color(rgb(if is_current { 0xe6c07b } else { GUTTER_FG }))
+                            .child(if is_current {
+                                "fn main() {}  ✓"
+                            } else {
+                                "fn main() {}"
+                            }),
+                    )
+            })
+            .collect();
+
+        overlay_panel(
+            format!("font › {}", self.fonts_query),
+            rows,
+            if self.fonts_all {
+                format!("{total} families (all) · ⌃A for monospace only · current: {current}")
+            } else {
+                format!("{total} monospace · ⌃A for all families · current: {current}")
+            },
+            self.line_height - 6.0,
+        )
+    }
+
+    fn cmds_filtered(&self) -> Vec<Cmd> {
+        Cmd::ALL
+            .into_iter()
+            .filter(|c| c.matches(&self.cmds_query))
+            .collect()
+    }
+
+    fn open_path(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        match self.session.open(path) {
+            Ok(()) => {
+                self.session.watch_workspace_start();
+                self.session.recent_add(&path.to_string_lossy());
+                self.scroll = 0;
+                self.status = String::new();
+            }
+            Err(e) => self.status = e,
+        }
+        cx.notify();
+    }
+
+    /// Run a palette entry. Anything needing a native dialog goes async.
+    fn run_cmd(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        match cmd {
+            Cmd::OpenFolder | Cmd::OpenFile => {
+                let directories = cmd == Cmd::OpenFolder;
+                let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: !directories,
+                    directories,
+                    multiple: false,
+                    prompt: None,
+                });
+                cx.spawn(async move |this, cx| {
+                    let Ok(Ok(Some(paths))) = rx.await else {
+                        return;
+                    };
+                    let Some(path) = paths.into_iter().next() else {
+                        return;
+                    };
+                    let _ = this.update(cx, |this: &mut WaveView, cx| {
+                        this.open_path(&path, cx);
+                    });
+                })
+                .detach();
+            }
+            Cmd::CloseProject => {
+                self.session.close_workspace();
+                self.scroll = 0;
+            }
+            Cmd::RecentProjects => self.recent_open = true,
+            Cmd::NewFile => {
+                self.prompt = Prompt::NewFile {
+                    dir: self.current_dir(),
+                    text: String::new(),
+                }
+            }
+            Cmd::NewFolder => {
+                self.prompt = Prompt::NewDir {
+                    dir: self.current_dir(),
+                    text: String::new(),
+                }
+            }
+            Cmd::SaveFile => {
+                let ok = self.session.save();
+                self.status = if ok { "written".into() } else { "write failed".into() };
+            }
+            Cmd::SaveConfig => {
+                self.session.save_config();
+                self.status = "config saved".into();
+            }
+            Cmd::Settings => {
+                self.settings_open = true;
+                self.settings_sel = 0;
+            }
+            Cmd::ChooseFont => {
+                self.fonts_open = true;
+                self.fonts_query.clear();
+                self.fonts_sel = 0;
+            }
+            Cmd::ResetConfig => {
+                self.session.reset_config();
+                // Metrics are derived from the config, so re-measure.
+                self.advance = None;
+                self.status = "settings reset".into();
+            }
+            Cmd::FindFile => {
+                self.session.palette_open();
+            }
+            Cmd::ProjectSearch => {
+                self.session.search_open();
+            }
+            Cmd::BufferSearch => {
+                self.session.text_input('/');
+            }
+            Cmd::NewTerminal => {
+                self.session.term_open("terminal", "");
+            }
+            Cmd::GitView => {
+                self.session.git_open();
+            }
+            Cmd::CloseTab => {
+                let i = self.session.tab_active();
+                self.session.tab_close(i);
+            }
+            Cmd::NextTab => self.session.tab_goto(1),
+            Cmd::PrevTab => self.session.tab_goto(-1),
+            Cmd::ToggleSidebar => {
+                self.session.toggle_sidebar();
+            }
+            Cmd::ToggleWrap => {
+                self.session.toggle_wrap();
+            }
+            Cmd::ZoomIn => {
+                self.session.zoom(1);
+            }
+            Cmd::ZoomOut => {
+                self.session.zoom(-1);
+            }
+            Cmd::ZoomReset => {
+                self.session.zoom(0);
+            }
+            Cmd::Quit => cx.quit(),
+        }
+        let _ = window;
+        self.follow_cursor();
+        cx.notify();
+    }
+
+    fn render_cmds(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        const VISIBLE: usize = 12;
+        let items = self.cmds_filtered();
+        let total = items.len();
+        let sel = self.cmds_sel.min(total.saturating_sub(1));
+        let first = sel
+            .saturating_sub(VISIBLE / 2)
+            .min(total.saturating_sub(VISIBLE.min(total)));
+        let last = (first + VISIBLE).min(total);
+
+        let rows: Vec<_> = (first..last)
+            .map(|i| {
+                let cmd = items[i];
+                let selected = i == sel;
+                div()
+                    .id(("cmd-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .h(px(self.line_height))
+                    .px(px(10.))
+                    .when(selected, |d| d.bg(rgb(SELECTION_BG)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.cmds_open = false;
+                        this.run_cmd(cmd, window, cx);
+                    }))
+                    .child(
+                        div()
+                            .text_color(rgb(if selected { DEFAULT_FG } else { 0xb5bac4 }))
+                            .child(cmd.label()),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(GUTTER_FG))
+                            .child(cmd.shortcut()),
+                    )
+            })
+            .collect();
+
+        overlay_panel(
+            format!("> {}", self.cmds_query),
+            rows,
+            format!("{total} commands"),
+            self.line_height - 6.0,
+        )
+    }
+
     /// The empty state: recent projects, straight from `recent.c`.
-    fn render_recent(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Recent-project rows, shared by the empty state and the overlay.
+    fn recent_rows(&mut self, cx: &mut Context<Self>) -> Vec<gpui::Stateful<gpui::Div>> {
         let total = self.session.recent_count();
         let sel = self.session.recent_selected().min(total.saturating_sub(1));
-        let query = self.session.recent_query();
 
-        let rows: Vec<_> = (0..total.min(16))
+        (0..total.min(16))
             .map(|i| {
                 let path = self.session.recent_path(i);
                 let selected = i == sel;
                 let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                // Show the containing directory rather than the full path; the
+                // basename is the useful part and these get long.
+                let parent = path
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_default();
                 div()
                     .id(("recent", i))
                     .flex()
@@ -486,8 +1301,10 @@ impl WaveView {
                             this.session.watch_workspace_start();
                             this.scroll = 0;
                         }
+                        this.recent_open = false;
                         cx.notify();
                     }))
+                    .child(folder_icon(DIR_FG))
                     .child(
                         div()
                             .flex_none()
@@ -499,11 +1316,17 @@ impl WaveView {
                             .text_color(rgb(GUTTER_FG))
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .child(path),
+                            .child(parent),
                     )
             })
-            .collect();
+            .collect()
+    }
 
+    /// The empty state, shown when no project is open.
+    fn render_recent_empty(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let total = self.session.recent_count();
+        let query = self.session.recent_query();
+        let rows = self.recent_rows(cx);
         div()
             .flex()
             .flex_col()
@@ -517,27 +1340,62 @@ impl WaveView {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(28.))
+                            .h(px(self.line_height + 10.))
                             .px(px(12.))
                             .text_color(rgb(DIM_FG))
-                            .child(if total == 0 {
-                                "no recent projects — pass a folder as argv[1]".to_string()
-                            } else if query.is_empty() {
-                                "recent projects".to_string()
+                            .child(if total == 0 && query.is_empty() {
+                                "no recent projects — ⇧⌘P then \"Open Folder\"".to_string()
                             } else {
-                                format!("recent projects › {query}")
+                                "recent projects".to_string()
                             }),
                     )
-                    .children(rows),
+                    // Typing here filters the list, so it needs a visible query
+                    // and caret — without them the keystrokes look ignored.
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .h(px(self.line_height + 6.))
+                            .px(px(12.))
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(DEFAULT_FG))
+                            .child(format!("› {query}"))
+                            .child(caret(self.line_height - 6.0)),
+                    )
+                    .children(rows)
+                    .when(total == 0 && !query.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .h(px(self.line_height))
+                                .px(px(12.))
+                                .text_color(rgb(GUTTER_FG))
+                                .child("no match"),
+                        )
+                    }),
             )
+    }
+
+    /// The same list as an overlay, openable over an existing project.
+    fn render_recent_overlay(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let total = self.session.recent_count();
+        let query = self.session.recent_query();
+        let rows = self.recent_rows(cx);
+        overlay_panel(
+            format!("recent › {query}"),
+            rows,
+            format!("{total} projects"),
+            self.line_height - 6.0,
+        )
     }
 
     // ---- editor surface ----
 
     /// Style one buffer line, byte by byte, then hand it to the text system as
     /// a single shaped run. Byte columns come from the C core.
-    fn editor_line(&mut self, line: usize, cursor_col: Option<usize>) -> StyledText {
-        let mut text = self.session.line_text(line);
+    fn editor_line(&mut self, line: usize, cursor_col: Option<usize>) -> (String, Vec<Cell>) {
+        let text = self.session.line_text(line);
         let spans = self.session.line_spans(line);
         let diags = self.session.line_diagnostics(line);
         let matches = self.session.line_matches(line);
@@ -551,9 +1409,12 @@ impl WaveView {
 
         for s in &spans {
             let color = ffi::theme_rgb(s.name);
+            let (bold, italic) = capture_emphasis(s.name);
             let end = s.end_col.min(text.len());
             for cell in cells.iter_mut().take(end).skip(s.start_col) {
                 cell.fg = Some(color);
+                cell.bold = bold;
+                cell.italic = italic;
             }
         }
         for m in &matches {
@@ -572,58 +1433,140 @@ impl WaveView {
             let end = d.end_col.min(text.len());
             for cell in cells.iter_mut().take(end).skip(d.start_col) {
                 cell.underline = Some(DIAGNOSTIC);
+                cell.wavy = true;
             }
         }
         if let Some(col) = cursor_col {
-            if col == text.len() {
-                text.push(' ');
-            }
             if let Some(cell) = cells.get_mut(col) {
                 cell.invert = true;
             }
         }
 
-        styled_line(text, &cells)
+        (text, cells)
+    }
+
+    /// Render one visual row: a byte slice of a logical line. With wrapping off
+    /// the slice is the whole line.
+    fn editor_row(&mut self, row: ffi::VisualRow, cursor_col: Option<usize>) -> StyledText {
+        let (text, cells) = self.editor_line(row.line, cursor_col);
+
+        // wrap_line breaks on byte offsets; snap defensively so a slice can
+        // never land inside a multi-byte sequence.
+        let snap = |i: usize| {
+            let mut i = i.min(text.len());
+            while i > 0 && !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let start = snap(row.start_byte);
+        let end = snap(row.end_byte.max(row.start_byte));
+
+        let mut sliced_text = text[start..end].to_string();
+        let mut sliced: Vec<Cell> = cells[start..end.min(cells.len())].to_vec();
+
+        // A cursor parked past the last character needs a cell of its own, and
+        // it belongs to the row that actually ends the line.
+        if cursor_col == Some(text.len()) && end == text.len() {
+            sliced_text.push(' ');
+            sliced.push(Cell {
+                invert: true,
+                ..Cell::default()
+            });
+        }
+
+        styled_line(sliced_text, &sliced)
+    }
+
+    /// Put the cursor line in the middle of the viewport. main.c does this
+    /// after a jump (go-to-definition, a search hit, opening at a line) rather
+    /// than scrolling minimally, which loses the surrounding context.
+    fn center_cursor(&mut self) {
+        let Some((vrow, _)) = self.session.cursor_visual() else {
+            return;
+        };
+        self.scroll = vrow.saturating_sub(self.rows / 2);
     }
 
     fn follow_cursor(&mut self) {
-        let (row, _) = self.session.cursor();
-        if row < self.scroll {
-            self.scroll = row;
-        } else if self.rows > 0 && row >= self.scroll + self.rows {
-            self.scroll = row + 1 - self.rows;
+        // Scrolling is in visual rows, which equal logical lines when wrapping
+        // is off.
+        let Some((vrow, _)) = self.session.cursor_visual() else {
+            return;
+        };
+        if vrow < self.scroll {
+            self.scroll = vrow;
+        } else if self.rows > 0 && vrow >= self.scroll + self.rows {
+            self.scroll = vrow + 1 - self.rows;
         }
     }
 
     fn render_editor(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let total = self.session.line_count();
+        let total = self.session.visual_rows();
         let (cur_row, cur_col) = self.session.cursor();
+        let insert_mode = self.session.mode() == Mode::Insert;
         let last = (self.scroll + self.rows).min(total);
         let has_buffer = self.session.has_buffer();
 
         let lines: Vec<_> = (self.scroll..last)
-            .map(|line| {
-                let cursor_col = (line == cur_row).then_some(cur_col);
-                let styled = self.editor_line(line, cursor_col);
-                div()
-                    .flex()
-                    .flex_row()
-                    .h(px(self.line_height))
-                    .child(
-                        div()
-                            .w(px(GUTTER_WIDTH))
-                            .flex_none()
-                            .text_color(rgb(if line == cur_row { DIM_FG } else { GUTTER_FG }))
-                            .child(format!("{:>4} ", line + 1)),
-                    )
-                    .child(styled)
+            .filter_map(|vrow| {
+                let row = self.session.visual_row(vrow)?;
+                // The cursor belongs to this row when its byte offset falls in
+                // the row's slice; `<=` so an end-of-line cursor lands on the
+                // row that ends the line rather than the next one.
+                // Insert mode draws a bar caret over the top instead, so the
+                // block-inverting cell is suppressed there.
+                let cursor_col = (!insert_mode
+                    && row.line == cur_row
+                    && cur_col >= row.start_byte
+                    && cur_col <= row.end_byte)
+                    .then_some(cur_col);
+                let is_first = row.start_byte == 0;
+                let styled = self.editor_row(row, cursor_col);
+                Some(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .h(px(self.line_height))
+                        .child(
+                            div()
+                                .w(px(GUTTER_WIDTH))
+                                .flex_none()
+                                .text_color(rgb(if row.line == cur_row {
+                                    DIM_FG
+                                } else {
+                                    GUTTER_FG
+                                }))
+                                // Continuation rows get a blank gutter, so the
+                                // numbering still counts logical lines.
+                                .child(if is_first {
+                                    format!("{:>4} ", row.line + 1)
+                                } else {
+                                    "     ".to_string()
+                                }),
+                        )
+                        .child(styled),
+                )
             })
             .collect();
+
+        // Insert-mode caret, placed in the pane's own coordinate space.
+        let insert_caret = insert_mode.then(|| {
+            let (vrow, vcol) = self.session.cursor_visual().unwrap_or((0, 0));
+            let adv = self.advance.unwrap_or(ADVANCE_FALLBACK);
+            let y = vrow.saturating_sub(self.scroll) as f32 * self.line_height;
+            div()
+                .absolute()
+                .left(px(GUTTER_WIDTH + vcol as f32 * adv))
+                .top(px(y + 2.0))
+                .child(caret(self.line_height - 4.0))
+        });
 
         div()
             .flex()
             .flex_col()
             .flex_grow()
+            .relative()
             .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .on_scroll_wheel(cx.listener(Self::on_wheel))
@@ -636,6 +1579,7 @@ impl WaveView {
                     .child("  no file open — Cmd-P, or click one in the sidebar")
             })
             .children(lines)
+            .children(insert_caret)
     }
 
     // ---- terminal surface ----
@@ -680,6 +1624,13 @@ impl WaveView {
                         }
                     }
                 }
+                if let Some((sa, sb)) = self.session.term_sel_span(index) {
+                    let a = self.session.term_col_to_byte(index, sa);
+                    let b = self.session.term_col_to_byte(index, sb).min(text.len());
+                    for cell in cells.iter_mut().take(b).skip(a) {
+                        cell.bg = Some(SELECTION_BG);
+                    }
+                }
                 if cur_vis && cursor_screen_row == Some(i) {
                     let byte = self.session.term_col_to_byte(index, cur_col);
                     if byte >= text.len() {
@@ -702,10 +1653,15 @@ impl WaveView {
             .flex_col()
             .flex_grow()
             .overflow_hidden()
+            .cursor(CursorStyle::IBeam)
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                 this.session.term_scroll(-wheel_lines(ev, this.line_height).round() as i32);
                 cx.notify();
             }))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_term_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_term_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_term_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_term_mouse_up))
             .children(lines)
             .when(!running, |d| {
                 d.child(
@@ -800,23 +1756,33 @@ impl WaveView {
                     })
                     .collect();
 
-                let diff: Vec<_> = self
-                    .session
-                    .git_diff()
+                let diff_lines = self.session.git_diff();
+                let diff: Vec<_> = diff_lines
                     .into_iter()
-                    .map(|l| {
+                    .enumerate()
+                    .map(|(i, l)| {
                         let color = match l.as_bytes().first() {
                             Some(b'+') => ADDED_FG,
                             Some(b'-') => REMOVED_FG,
                             Some(b'@') => DIR_FG,
                             _ => DIM_FG,
                         };
+                        let mut cells = vec![Cell::default(); l.len() + 1];
+                        for c in cells.iter_mut() {
+                            c.fg = Some(color);
+                        }
+                        // Columns are byte columns here: the diff is plain
+                        // ASCII-ish text straight out of `git diff`.
+                        if let Some((a, b)) = self.session.git_sel_span(i) {
+                            let end = b.min(l.len());
+                            for cell in cells.iter_mut().take(end).skip(a) {
+                                cell.bg = Some(SELECTION_BG);
+                            }
+                        }
                         div()
                             .h(px(self.line_height))
                             .px(px(10.))
-                            .text_color(rgb(color))
-                            .whitespace_nowrap()
-                            .child(l)
+                            .child(styled_line(l, &cells))
                     })
                     .collect();
 
@@ -827,7 +1793,7 @@ impl WaveView {
                     .overflow_hidden()
                     .child(
                         div()
-                            .w(px(320.))
+                            .w(px(GIT_FILES_WIDTH))
                             .flex_none()
                             .flex()
                             .flex_col()
@@ -841,12 +1807,17 @@ impl WaveView {
                             .flex_col()
                             .flex_grow()
                             .overflow_hidden()
+                            .cursor(CursorStyle::IBeam)
                             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                                 let lh = this.line_height;
                                 this.session
                                     .git_diff_scroll(-wheel_lines(ev, lh).round() as i32);
                                 cx.notify();
                             }))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_git_mouse_down))
+                            .on_mouse_move(cx.listener(Self::on_git_mouse_move))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_git_mouse_up))
+                            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_git_mouse_up))
                             .children(diff),
                     )
             }
@@ -867,7 +1838,7 @@ impl WaveView {
                         .border_t_1()
                         .border_color(rgb(BORDER))
                         .text_color(rgb(DEFAULT_FG))
-                        .child(format!("commit: {msg}_")),
+                        .child(format!("commit: {msg}")),
                 )
             })
             .when(!info.is_empty(), |d| {
@@ -1113,6 +2084,7 @@ impl WaveView {
             format!("› {query}"),
             rows,
             format!("{total} files"),
+            self.line_height - 6.0,
         )
     }
 
@@ -1175,6 +2147,7 @@ impl WaveView {
             } else {
                 format!("{total} matches")
             },
+            self.line_height - 6.0,
         )
     }
 
@@ -1184,18 +2157,36 @@ impl WaveView {
         const VISIBLE: usize = 10;
         let total = self.session.complete_count();
         let sel = self.session.complete_selected().min(total.saturating_sub(1));
-        let (cur_row, cur_col) = self.session.cursor();
         let first = sel
             .saturating_sub(VISIBLE / 2)
             .min(total.saturating_sub(VISIBLE.min(total)));
         let last = (first + VISIBLE).min(total);
 
-        let visible_row = cur_row.saturating_sub(self.scroll);
-        let has_ws = self.session.has_workspace();
+        // The anchor must be in the same coordinate space the view scrolls in.
+        // `cursor()` returns a logical line and a column within that line;
+        // `scroll` counts visual rows. Mixing them puts the menu at an
+        // arbitrary offset once any line above the cursor has wrapped.
+        let (cur_vrow, cur_vcol) = self.session.cursor_visual().unwrap_or((0, 0));
+        let visible_row = cur_vrow.saturating_sub(self.scroll);
+
+        let has_ws = self.session.has_workspace() && self.session.show_sidebar();
         // Measured in render() before this runs.
         let adv = self.advance.unwrap_or(ADVANCE_FALLBACK);
-        let x = (if has_ws { SIDEBAR_WIDTH } else { 0.0 }) + GUTTER_WIDTH + cur_col as f32 * adv;
-        let y = TITLEBAR_HEIGHT + TAB_HEIGHT + (visible_row + 1) as f32 * self.line_height;
+        let x = (if has_ws { SIDEBAR_WIDTH } else { 0.0 }) + GUTTER_WIDTH + cur_vcol as f32 * adv;
+
+        let has_tabs = self.session.tab_count() > 0;
+        let top = TITLEBAR_HEIGHT + if has_tabs { TAB_HEIGHT } else { 0.0 };
+        let below = top + (visible_row + 1) as f32 * self.line_height;
+
+        // Flip above the cursor when there is not room below, the way
+        // complete_layout() does for the C renderer.
+        let menu_h = (last - first) as f32 * self.line_height + 8.0;
+        let viewport_h = self.viewport_height;
+        let y = if below + menu_h > viewport_h - STATUS_HEIGHT && visible_row as f32 * self.line_height > menu_h {
+            top + visible_row as f32 * self.line_height - menu_h
+        } else {
+            below
+        };
 
         let rows: Vec<_> = (first..last)
             .filter_map(|i| {
@@ -1308,7 +2299,7 @@ impl WaveView {
         if delta == 0 {
             return;
         }
-        let total = self.session.line_count() as i64;
+        let total = self.session.visual_rows() as i64;
         let max = (total - self.rows as i64).max(0);
         let next = (self.scroll as i64 + delta).clamp(0, max) as usize;
         if next == self.scroll {
@@ -1408,6 +2399,131 @@ impl WaveView {
             self.session.term_active(),
         ));
 
+        // The command palette and the recent-projects list own the keyboard
+        // while they are up, ahead of every other surface.
+        if self.cmds_open {
+            match key {
+                "escape" => self.cmds_open = false,
+                "enter" => {
+                    let items = self.cmds_filtered();
+                    if let Some(&cmd) = items.get(self.cmds_sel.min(items.len().saturating_sub(1))) {
+                        self.cmds_open = false;
+                        self.run_cmd(cmd, window, cx);
+                        return;
+                    }
+                    self.cmds_open = false;
+                }
+                "up" => self.cmds_sel = self.cmds_sel.saturating_sub(1),
+                "down" => {
+                    let n = self.cmds_filtered().len();
+                    self.cmds_sel = (self.cmds_sel + 1).min(n.saturating_sub(1));
+                }
+                "backspace" => {
+                    self.cmds_query.pop();
+                    self.cmds_sel = 0;
+                }
+                _ => {
+                    if let (true, Some(t)) = (plain, typed) {
+                        self.cmds_query.push_str(&t);
+                        self.cmds_sel = 0;
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        if self.fonts_open {
+            match key {
+                "escape" => self.fonts_open = false,
+                "enter" => {
+                    let items = self.fonts_filtered(window);
+                    if let Some(name) = items.get(self.fonts_sel.min(items.len().saturating_sub(1)))
+                    {
+                        self.set_font(name.clone());
+                    }
+                    self.fonts_open = false;
+                }
+                "up" => self.fonts_sel = self.fonts_sel.saturating_sub(1),
+                "down" => {
+                    let n = self.fonts_filtered(window).len();
+                    self.fonts_sel = (self.fonts_sel + 1).min(n.saturating_sub(1));
+                }
+                "backspace" => {
+                    self.fonts_query.pop();
+                    self.fonts_sel = 0;
+                }
+                "a" if ks.modifiers.control => {
+                    self.fonts_all = !self.fonts_all;
+                    self.fonts_sel = 0;
+                }
+                _ => {
+                    if let (true, Some(t)) = (plain, typed) {
+                        self.fonts_query.push_str(&t);
+                        self.fonts_sel = 0;
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        if self.settings_open {
+            let sel = self.settings_sel.min(Setting::ALL.len() - 1);
+            let setting = Setting::ALL[sel];
+            match key {
+                "escape" => self.settings_open = false,
+                "up" | "k" => self.settings_sel = sel.saturating_sub(1),
+                "down" | "j" => self.settings_sel = (sel + 1).min(Setting::ALL.len() - 1),
+                "left" | "-" => self.adjust_setting(setting, -1),
+                "right" | "=" | "+" => self.adjust_setting(setting, 1),
+                "enter" | " " | "space" => {
+                    if setting == Setting::Font {
+                        self.fonts_open = true;
+                        self.fonts_query.clear();
+                        self.fonts_sel = 0;
+                    } else if setting.is_toggle() {
+                        self.adjust_setting(setting, 1);
+                    }
+                }
+                "s" => {
+                    self.session.save_config();
+                    self.status = "settings saved".into();
+                }
+                "r" => {
+                    self.session.reset_config();
+                    self.advance = None;
+                    self.status = "settings reset".into();
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
+
+        if self.recent_open {
+            match key {
+                "escape" => self.recent_open = false,
+                "enter" => {
+                    if self.session.recent_accept() {
+                        self.session.watch_workspace_start();
+                        self.scroll = 0;
+                    }
+                    self.recent_open = false;
+                }
+                "up" => self.session.recent_move(-1),
+                "down" => self.session.recent_move(1),
+                "backspace" => self.session.recent_backspace(),
+                _ => {
+                    if let (true, Some(t)) = (plain, typed) {
+                        self.session.recent_input(&t);
+                    }
+                }
+            }
+            cx.notify();
+            return;
+        }
+
         // A workspace file-operation prompt owns the keyboard while it is up.
         if self.prompt_key(key, typed.clone(), plain) {
             cx.notify();
@@ -1440,7 +2556,10 @@ impl WaveView {
         if self.session.bufsearch_active() {
             match key {
                 "escape" => self.session.bufsearch_cancel(),
-                "enter" => self.session.bufsearch_accept(),
+                "enter" => {
+                    self.session.bufsearch_accept();
+                    self.center_cursor();
+                }
                 "backspace" => self.session.bufsearch_backspace(),
                 _ => {
                     if let (true, Some(t)) = (plain, typed) {
@@ -1495,7 +2614,7 @@ impl WaveView {
                     };
                     if opened {
                         self.scroll = 0;
-                        self.follow_cursor();
+                        self.center_cursor();
                     }
                 }
                 "up" => {
@@ -1547,9 +2666,34 @@ impl WaveView {
                     self.session.undo();
                 }
                 "c" => {
-                    if let Some(text) = self.session.selection_text() {
+                    // Copy from whichever surface owns the selection.
+                    let text = if self.session.term_active() {
+                        self.session.term_copy_selection()
+                    } else if self.session.git_active() {
+                        self.session.git_copy_selection()
+                    } else {
+                        self.session.selection_text()
+                    };
+                    if let Some(text) = text {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                         self.status = "copied".into();
+                    }
+                }
+                "v" => {
+                    let Some(text) = cx
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .filter(|t| !t.is_empty())
+                    else {
+                        return;
+                    };
+                    if self.session.term_active() {
+                        // Bracketed paste is the pty's business; hand it the
+                        // bytes and let the shell decide.
+                        self.session.term_write(&text);
+                    } else {
+                        self.session.paste(&text);
+                        self.follow_cursor();
                     }
                 }
                 "w" => {
@@ -1558,6 +2702,11 @@ impl WaveView {
                 }
                 "]" => self.session.tab_goto(1),
                 "[" => self.session.tab_goto(-1),
+                "p" if ks.modifiers.shift => {
+                    self.cmds_open = true;
+                    self.cmds_query.clear();
+                    self.cmds_sel = 0;
+                }
                 "p" => {
                     self.session.palette_open();
                 }
@@ -1597,6 +2746,10 @@ impl WaveView {
                 }
                 "b" => {
                     self.session.toggle_sidebar();
+                }
+                "," => {
+                    self.settings_open = true;
+                    self.settings_sel = 0;
                 }
                 "=" | "+" => {
                     self.session.zoom(1);
@@ -1792,7 +2945,12 @@ impl WaveView {
 }
 
 /// Shared chrome for the centered Cmd-P / Cmd-Shift-F panels.
-fn overlay_panel(header: String, rows: Vec<gpui::Stateful<gpui::Div>>, footer: String) -> gpui::Div {
+fn overlay_panel(
+    header: String,
+    rows: Vec<gpui::Stateful<gpui::Div>>,
+    footer: String,
+    caret_h: f32,
+) -> gpui::Div {
     div()
         .absolute()
         .top_0()
@@ -1822,7 +2980,8 @@ fn overlay_panel(header: String, rows: Vec<gpui::Stateful<gpui::Div>>, footer: S
                         .border_b_1()
                         .border_color(rgb(BORDER))
                         .text_color(rgb(DEFAULT_FG))
-                        .child(header),
+                        .child(header)
+                        .child(caret(caret_h)),
                 )
                 .children(rows)
                 .child(
@@ -1861,6 +3020,7 @@ impl Render for WaveView {
         }
 
         let viewport = window.viewport_size();
+        self.viewport_height = f32::from(viewport.height);
         let has_tabs = self.session.tab_count() > 0;
         let chrome = TITLEBAR_HEIGHT + STATUS_HEIGHT + if has_tabs { TAB_HEIGHT } else { 0.0 };
         let usable = f32::from(viewport.height) - chrome;
@@ -1879,6 +3039,19 @@ impl Render for WaveView {
 
         // Keep the pty's idea of its size in step with the pane.
         let adv = self.advance(window);
+
+        // Rebuild the wrap index for the current text width. wrap_build() is a
+        // no-op when the column count and buffer are unchanged, so this is
+        // cheap to call every frame. The C side honours the config flag.
+        let text_width = f32::from(viewport.width)
+            - if self.session.has_workspace() && self.session.show_sidebar() {
+                SIDEBAR_WIDTH
+            } else {
+                0.0
+            }
+            - GUTTER_WIDTH;
+        let wrap_cols = (text_width / adv.max(1.0)).floor().max(20.0) as usize;
+        self.session.wrap_set_cols(wrap_cols);
         if self.session.term_active() {
             let cols = ((f32::from(viewport.width)
                 - if self.session.has_workspace() {
@@ -1900,7 +3073,7 @@ impl Render for WaveView {
 
         let empty = !has_workspace && self.session.tab_count() == 0;
         let content = if empty {
-            self.render_recent(cx).into_any_element()
+            self.render_recent_empty(cx).into_any_element()
         } else {
             match kind {
                 TabKind::Terminal => self.render_terminal(cx).into_any_element(),
@@ -1954,6 +3127,10 @@ impl Render for WaveView {
         let sidebar = (has_workspace && self.session.show_sidebar())
             .then(|| self.render_sidebar(side_rows, cx));
         let palette = self.session.palette_active().then(|| self.render_palette(cx));
+        let cmds = self.cmds_open.then(|| self.render_cmds(cx));
+        let recent_overlay = self.recent_open.then(|| self.render_recent_overlay(cx));
+        let settings = self.settings_open.then(|| self.render_settings(cx));
+        let fonts = self.fonts_open.then(|| self.render_fonts(window, cx));
         let search = self.session.search_active().then(|| self.render_search(cx));
         let completion = (self.session.complete_active() && self.session.complete_count() > 0)
             .then(|| self.render_completion(cx));
@@ -1975,7 +3152,7 @@ impl Render for WaveView {
             .flex()
             .flex_col()
             .bg(bg)
-            .font_family(FONT)
+            .font_family(self.fe_config.font.clone())
             .text_size(px(self.text_size))
             .line_height(px(self.line_height))
             .child(self.render_titlebar(cx))
@@ -2004,22 +3181,30 @@ impl Render for WaveView {
                 div()
                     .h(px(STATUS_HEIGHT))
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .px(px(8.))
                     .bg(rgb(STATUS_BG))
                     .text_color(rgb(0xe6c07b))
                     .child(prompt)
+                    .child(caret(self.line_height - 6.0))
             } else if cmd_active || search_active {
                 div()
                     .h(px(STATUS_HEIGHT))
                     .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .px(px(8.))
                     .bg(rgb(STATUS_BG))
                     .text_color(rgb(DEFAULT_FG))
                     .child(if cmd_active {
-                        format!(":{cmd_text}_")
+                        format!(":{cmd_text}")
                     } else {
-                        format!("/{search_text}_")
+                        format!("/{search_text}")
                     })
+                    .child(caret(self.line_height - 6.0))
             } else {
                 div()
                     .h(px(STATUS_HEIGHT))
@@ -2052,6 +3237,10 @@ impl Render for WaveView {
             .children(palette)
             .children(search)
             .children(completion)
+            .children(cmds)
+            .children(recent_overlay)
+            .children(settings)
+            .children(fonts)
     }
 }
 
@@ -2060,6 +3249,15 @@ impl Render for WaveView {
 /// window, so "the terminal doesn't work" is answerable without a GUI.
 fn selftest(root: &str) {
     use ffi::term_key as tk;
+
+    // Config commands persist to $HOME/.config/wave/config, and every Session
+    // loads it. Redirect HOME before *anything* is constructed so no part of
+    // the run can read or write the user's real settings.
+    let home = std::env::temp_dir().join("wave-selftest-home");
+    let _ = std::fs::create_dir_all(home.join(".config/wave"));
+    std::env::set_var("HOME", &home);
+    println!("(isolated HOME={})", home.display());
+
     let mut s = Session::new();
     println!("open {root}: {:?}", s.open(std::path::Path::new(root)));
     println!(
@@ -2228,11 +3426,7 @@ fn selftest(root: &str) {
         // $HOME/.config/wave/config. Point HOME at a scratch dir so the test
         // cannot scribble on real settings.
         println!("\n=== config ===");
-        let home = std::env::temp_dir().join("wave-selftest-home");
-        let _ = std::fs::create_dir_all(home.join(".config/wave"));
-        std::env::set_var("HOME", &home);
         let mut e = Session::new();
-        println!("(isolated HOME={})", home.display());
         let run = |e: &mut Session, text: &str| {
             e.cmd_open();
             for ch in text.chars() {
@@ -2272,12 +3466,208 @@ fn selftest(root: &str) {
         let w0 = e.wrap();
         e.toggle_wrap();
         println!("toggle wrap: {w0} -> {}", e.wrap());
+
+        // ---- command palette filtering ----
+        println!("\n=== command palette ===");
+        for q in ["", "open", "of", "zoom", "tab", "git", "xyzzy"] {
+            let hits: Vec<&str> = Cmd::ALL
+                .into_iter()
+                .filter(|c| c.matches(q))
+                .map(|c| c.label())
+                .collect();
+            println!("  {:8} -> {} {:?}", format!("{q:?}"), hits.len(), &hits[..hits.len().min(4)]);
+        }
+
+        // ---- paste ----
+        println!("\n=== paste ===");
+        let mut p = Session::new();
+        if p.open(std::path::Path::new("src/piece_table.c")).is_ok() {
+            p.click_at(0, 0);
+            let before = p.line_text(0);
+            p.paste("PASTED-");
+            println!("line 0: {:?}", p.line_text(0));
+            println!("  (was {:?})", before);
+            // Paste over a selection replaces it.
+            p.click_at(1, 0);
+            p.drag_to(1, 8);
+            let sel = p.selection_text().unwrap_or_default();
+            p.paste("XX");
+            println!("replaced {sel:?} -> line 1 now {:?}", p.line_text(1));
+        }
+
+        // ---- soft wrap ----
+        println!("\n=== soft wrap ===");
+        let mut w = Session::new();
+        if w.open(std::path::Path::new("src/piece_table.c")).is_ok() {
+            w.wrap_set_cols(0); // wrapping off
+            let unwrapped = w.visual_rows();
+            w.wrap_set_cols(40);
+            let wrapped = w.visual_rows();
+            println!(
+                "lines={} visual rows: nowrap={} wrapped@40={}",
+                w.line_count(),
+                unwrapped,
+                wrapped
+            );
+            for vrow in 20..24 {
+                if let Some(r) = w.visual_row(vrow) {
+                    let text = w.line_text(r.line);
+                    let slice = &text[r.start_byte.min(text.len())..r.end_byte.min(text.len())];
+                    println!("  vrow {vrow} -> line {} [{}..{}] {:?}", r.line, r.start_byte, r.end_byte, slice);
+                }
+            }
+            println!("cursor_visual at start: {:?}", w.cursor_visual());
+
+            // The bug the completion menu hit: once anything above the cursor
+            // wraps, the logical line and the visual row diverge.
+            w.click_at(60, 4);
+            println!(
+                "at logical line 60: cursor()={:?} cursor_visual()={:?}",
+                w.cursor(),
+                w.cursor_visual()
+            );
+        }
     }
+}
+
+/// Geist Mono, compiled into the binary so a fresh clone ships with a real
+/// monospace font and no install step. SIL Open Font License; see
+/// `assets/fonts/OFL.txt`.
+const BUNDLED_FONTS: [&[u8]; 4] = [
+    include_bytes!("../assets/fonts/GeistMono-Regular.otf"),
+    include_bytes!("../assets/fonts/GeistMono-Italic.otf"),
+    include_bytes!("../assets/fonts/GeistMono-Bold.otf"),
+    include_bytes!("../assets/fonts/GeistMono-BoldItalic.otf"),
+];
+
+fn load_bundled_fonts(text_system: &std::sync::Arc<gpui::TextSystem>) {
+    let blobs = BUNDLED_FONTS
+        .iter()
+        .map(|b| std::borrow::Cow::Borrowed(*b))
+        .collect();
+    match text_system.add_fonts(blobs) {
+        Ok(()) => dbg("bundled Geist Mono registered"),
+        // A missing bundled font is not fatal: resolve_font falls back, and the
+        // picker still lists whatever the system has.
+        Err(e) => dbg(format_args!("bundled fonts failed: {e}")),
+    }
+}
+
+/// Load any fonts dropped into `~/.config/wave/fonts` so they can be selected
+/// without installing them system-wide.
+///
+/// GPUI can register fonts from memory, which is how a font like Geist Mono
+/// gets used without going through Font Book: drop the `.otf`/`.ttf` files in
+/// that directory and they join the picker on next launch.
+fn load_user_fonts(text_system: &std::sync::Arc<gpui::TextSystem>) -> usize {
+    let Some(home) = std::env::var_os("HOME") else {
+        return 0;
+    };
+    let dir = PathBuf::from(home).join(".config/wave/fonts");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0;
+    };
+
+    let mut blobs: Vec<std::borrow::Cow<'static, [u8]>> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase);
+        if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc")) {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => blobs.push(std::borrow::Cow::Owned(bytes)),
+            Err(e) => dbg(format_args!("font {}: {e}", path.display())),
+        }
+    }
+
+    let count = blobs.len();
+    if count > 0 {
+        match text_system.add_fonts(blobs) {
+            Ok(()) => dbg(format_args!("loaded {count} font file(s) from {}", dir.display())),
+            Err(e) => {
+                dbg(format_args!("add_fonts failed: {e}"));
+                return 0;
+            }
+        }
+    }
+    count
+}
+
+/// List the monospace families the picker will offer, without opening a window.
+fn list_fonts() {
+    Application::new().run(|cx: &mut App| {
+        let ts = cx.text_system();
+        load_bundled_fonts(&ts);
+        let loaded = load_user_fonts(&ts);
+        let size = px(TEXT_SIZE_DEFAULT);
+        let all = ts.all_font_names();
+        if loaded > 0 {
+            println!("loaded {loaded} font file(s) from ~/.config/wave/fonts");
+        }
+        let mut mono: Vec<String> = all
+            .iter()
+            .filter(|name| is_monospace(&ts, size, name))
+            .cloned()
+            .collect();
+        mono.sort_by_key(|n| n.to_lowercase());
+        mono.dedup();
+        println!("{} families installed, {} monospace", all.len(), mono.len());
+
+        // Bold/italic must advance identically to regular, or mixing them in a
+        // shaped line changes its width and the text shifts.
+        println!("\nbold/italic advance parity (emphasis shifts text if these differ):");
+        for family in &mono {
+            let widths: Vec<f32> = [
+                (gpui::FontWeight::NORMAL, gpui::FontStyle::Normal),
+                (gpui::FontWeight::BOLD, gpui::FontStyle::Normal),
+                (gpui::FontWeight::NORMAL, gpui::FontStyle::Italic),
+            ]
+            .into_iter()
+            .map(|(w, st)| {
+                let mut f = gpui::font(family.clone());
+                f.weight = w;
+                f.style = st;
+                let id = ts.resolve_font(&f);
+                ts.advance(id, size, 'M').map(|s| f32::from(s.width)).unwrap_or(-1.0)
+            })
+            .collect();
+            let ok = widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
+            println!("  {:14} {:?} {}", family, widths, if ok { "ok" } else { "MISMATCH" });
+        }
+
+        let family = frontend_config::FrontendConfig::load().font;
+        println!("\nadvance check for {family:?}:");
+        for (label, weight, style) in [
+            ("regular", gpui::FontWeight::NORMAL, gpui::FontStyle::Normal),
+            ("bold", gpui::FontWeight::BOLD, gpui::FontStyle::Normal),
+            ("italic", gpui::FontWeight::NORMAL, gpui::FontStyle::Italic),
+            ("bolditalic", gpui::FontWeight::BOLD, gpui::FontStyle::Italic),
+        ] {
+            let mut f = gpui::font(family.clone());
+            f.weight = weight;
+            f.style = style;
+            let id = ts.resolve_font(&f);
+            let w = ts.advance(id, size, 'M').map(|s| f32::from(s.width)).unwrap_or(-1.0);
+            println!("  {label:11} advance = {w}");
+        }
+        for name in mono.iter().take(20) {
+            println!("  {name}");
+        }
+        cx.quit();
+    });
 }
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let first = args.next();
+    if first.as_deref() == Some("--fonts") {
+        list_fonts();
+        return;
+    }
     if first.as_deref() == Some("--selftest") {
         selftest(&args.next().unwrap_or_else(|| ".".into()));
         return;
@@ -2285,6 +3675,11 @@ fn main() {
     let path = first.map(PathBuf::from);
 
     Application::new().run(move |cx: &mut App| {
+        // Register fonts before any window measures text.
+        let ts = cx.text_system();
+        load_bundled_fonts(&ts);
+        load_user_fonts(&ts);
+
         // Without a registered menu + keybinding, macOS has no Quit item and
         // Cmd-Q does nothing — GPUI installs no default app menu.
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());

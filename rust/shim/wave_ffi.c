@@ -11,6 +11,7 @@
  * editor_apply_insert_key in INSERT and editor_apply_motion_key otherwise. */
 
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,7 @@ typedef struct WaveSession WaveSession;
 static void comp_after_insert(WaveSession *s, Editor *e,
                               unsigned int trigger_character);
 static int comp_drain_lsp(WaveSession *s, Editor *e);
+int wave_signature_request(WaveSession *s, unsigned int trigger, int retrigger);
 static void bufsearch_open(WaveSession *s);
 static void bufsearch_repeat(WaveSession *s, int reverse);
 static void bufsearch_word(WaveSession *s);
@@ -477,6 +479,10 @@ int wave_lsp_poll(WaveSession *s) {
         popover_show_hover(&s->pop, plan.hover);
         changed = 1;
     }
+    if (plan.show_signature && plan.signature[0]) {
+        popover_show_signature(&s->pop, plan.signature);
+        changed = 1;
+    }
     if (comp_drain_lsp(s, e)) changed = 1;
 
     size_t before = s->ndiags;
@@ -601,6 +607,12 @@ unsigned wave_text_input(WaveSession *s, unsigned int cp) {
         editor_update_highlighter(e);
         lsp_manager_push_change(&s->lsp, e);
         comp_after_insert(s, e, cp);
+        /* `(` opens signature help, `,` moves to the next parameter, `)` ends
+         * it — the same triggers main.c uses. */
+        if (cp == '(' || cp == ',')
+            wave_signature_request(s, cp, cp == ',');
+        else if (cp == ')')
+            popover_close(&s->pop);
         refresh_diags(s);
         return 0;
     }
@@ -1200,7 +1212,12 @@ void wave_complete_close(WaveSession *s) {
     if (s) complete_close(&s->comp);
 }
 
-/* Apply the selection, keeping the server's additional edits (auto-imports). */
+/* Apply the selection, keeping the server's additional edits (auto-imports).
+ *
+ * TypeScript marks cross-module suggestions with a `detail` and a resolve id,
+ * and only attaches the auto-import edit on resolve. Resolving synchronously
+ * here keeps accept a single user action; main.c defers it and re-enters, but
+ * that needs an accept-pending state machine this front-end does not have. */
 int wave_complete_accept(WaveSession *s) {
     Editor *e = cur(s);
     if (!e || !s->comp.active || s->comp.nfiltered == 0) return 0;
@@ -1210,10 +1227,24 @@ int wave_complete_accept(WaveSession *s) {
         return 0;
     }
     int raw = s->comp.filtered[s->comp.sel];
-    const LspCompletionItem *item = NULL;
+    LspCompletionItem *item = NULL;
     if (g_comp_lsp_generation == s->comp.generation && raw >= 0 &&
         (size_t)raw < g_comp_lsp_count)
         item = &g_comp_lsp[raw];
+
+    if (item && item->resolve_id > 0 && item->detail[0] && !item->resolved &&
+        lsp_manager_resolve_completion(&s->lsp, e, item)) {
+        /* Give the server a brief window to answer; fall through with the
+         * unresolved item if it does not. */
+        for (int i = 0; i < 40; i++) {
+            LspCompletionItem resolved;
+            if (lsp_manager_take_resolved_completion(&s->lsp, e, &resolved)) {
+                *item = resolved;
+                break;
+            }
+            usleep(5000);
+        }
+    }
 
     lsp_manager_apply_completion(e, edit.start, edit.end, edit.text, item);
     complete_close(&s->comp);
@@ -1722,4 +1753,308 @@ int wave_watch_poll(WaveSession *s, double now, char *message, size_t cap) {
 
 void wave_watch_workspace_start(WaveSession *s) {
     if (s && s->ws) watch_workspace_start(&s->watch, ws_root(s->ws));
+}
+
+/* ==========================================================================
+ * Clipboard paste
+ * ========================================================================== */
+
+/* Paste `text` at the cursor, replacing a selection when one is live.
+ * Returns 1 if the caller should switch to INSERT (editor_paste_enters_insert
+ * decides, mirroring what main.c does after a paste). */
+int wave_paste(WaveSession *s, const char *text) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !text || !*text) return 0;
+
+    int replace = wave_has_selection(s);
+    EditorPasteResult r = editor_paste_text(e, text, replace);
+    if (r == EDITOR_PASTE_NONE) return 0;
+
+    s->mouse_selecting = 0;
+    if (s->modal.mode == MODE_VISUAL) modal_enter_normal(&s->modal);
+    editor_update_highlighter(e);
+    lsp_manager_push_change(&s->lsp, e);
+    refresh_diags(s);
+
+    if (editor_paste_enters_insert(r)) {
+        modal_enter_insert(&s->modal);
+        return 1;
+    }
+    return 0;
+}
+
+/* editor_center_cursor()/editor_scroll_y() are deliberately not exposed: they
+ * drive e->scroll_y in pixels, and this front-end owns scrolling itself in
+ * visual rows. Centring is done on the Rust side instead. */
+
+/* ==========================================================================
+ * Terminal selection
+ * ========================================================================== */
+
+void wave_term_sel_begin(WaveSession *s, size_t row, int col) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_selection_begin(t, row, col);
+}
+
+void wave_term_sel_update(WaveSession *s, size_t row, int col) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_selection_update(t, row, col);
+}
+
+void wave_term_sel_end(WaveSession *s) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_selection_end(t);
+}
+
+void wave_term_sel_clear(WaveSession *s) {
+    Terminal *t = cur_term(s);
+    if (t) terminal_selection_clear(t);
+}
+
+/* Selected columns on terminal row `row`, or 0 if none. */
+int wave_term_sel_span(const WaveSession *s, size_t row, int *start, int *end) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    if (!t) return 0;
+    return terminal_selection_span(t, row, start, end);
+}
+
+/* Caller frees with wave_string_free(). */
+char *wave_term_copy_selection(const WaveSession *s) {
+    const Terminal *t = s ? tabs_current_terminal_const(&s->tabs) : NULL;
+    return t ? terminal_copy_selection(t) : NULL;
+}
+
+/* ==========================================================================
+ * Git diff selection
+ * ========================================================================== */
+
+void wave_git_sel_begin(WaveSession *s, int line, int col) {
+    GitView *g = cur_git(s);
+    if (g) git_view_diff_selection_begin(g, line, col);
+}
+
+void wave_git_sel_update(WaveSession *s, int line, int col) {
+    GitView *g = cur_git(s);
+    if (g) git_view_diff_selection_update(g, line, col);
+}
+
+void wave_git_sel_end(WaveSession *s) {
+    GitView *g = cur_git(s);
+    if (g) git_view_diff_selection_end(g);
+}
+
+void wave_git_sel_clear(WaveSession *s) {
+    GitView *g = cur_git(s);
+    if (g) git_view_diff_selection_clear(g);
+}
+
+int wave_git_sel_span(const WaveSession *s, int line, int *start, int *end) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    if (!g) return 0;
+    return git_view_diff_selection_span(g, line, start, end);
+}
+
+char *wave_git_copy_selection(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? git_view_copy_diff_selection(g) : NULL;
+}
+
+int wave_git_diff_scroll_pos(const WaveSession *s) {
+    const GitView *g = s ? tabs_current_git_const(&s->tabs) : NULL;
+    return g ? g->diff_scroll : 0;
+}
+
+/* ==========================================================================
+ * Signature help
+ * ========================================================================== */
+
+/* Ask for signature help at the cursor. `trigger` is '(' or ',' when a
+ * character prompted it, 0 for an explicit request. */
+int wave_signature_request(WaveSession *s, unsigned int trigger, int retrigger) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return 0;
+    size_t row = 0, col = 0;
+    pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &col);
+    return lsp_manager_request_signature_help(&s->lsp, e, (int)row, (int)col,
+                                              (char)trigger, retrigger);
+}
+
+/* ==========================================================================
+ * Soft wrap
+ *
+ * wrap_build() fills e->vstart[i] with the first *visual* row of logical line
+ * i (and vstart[lines] with the total), so the view can scroll and paint in
+ * visual rows once wrapping is on. cols <= 0 means "no wrapping".
+ * ========================================================================== */
+
+typedef struct {
+    size_t line;       /* logical line */
+    size_t start_byte; /* byte range within that line */
+    size_t end_byte;
+} WaveVisualRow;
+
+void wave_wrap_set_cols(WaveSession *s, int cols) {
+    Editor *e = cur(s);
+    if (!e || !e->buf) return;
+    int want = (s->config.wrap && cols > 0) ? cols : WRAP_NOWRAP_COLS;
+    wrap_build(e, want);
+}
+
+size_t wave_visual_rows(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !e->vstart || e->vstart_n == 0) return 0;
+    return (size_t)e->vstart[e->vstart_n - 1];
+}
+
+/* Resolve a visual row to its logical line and byte span. */
+int wave_visual_row(WaveSession *s, size_t vrow, WaveVisualRow *out) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !e->vstart || !out) return 0;
+
+    int line = line_at_vrow(e, (int)vrow);
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t lines = pt_line_count(pt);
+    if (line < 0 || (size_t)line >= lines) return 0;
+
+    size_t start, end;
+    if (!line_bounds(e, (size_t)line, &start, &end)) return 0;
+    size_t llen = end - start;
+
+    out->line = (size_t)line;
+    out->start_byte = 0;
+    out->end_byte = llen;
+
+    if (e->wrap_cols >= WRAP_NOWRAP_COLS) return 1; /* one row per line */
+
+    int sub = (int)vrow - e->vstart[line];
+    if (sub < 0) sub = 0;
+
+    static char buf[WRAP_MAXLINE];
+    static int brk[WRAP_MAXBRK];
+    size_t n = llen > WRAP_MAXLINE ? WRAP_MAXLINE : llen;
+    pt_read(pt, start, n, buf);
+    int nb = wrap_line(buf, n, e->wrap_cols, brk, WRAP_MAXBRK);
+    if (nb <= 0) return 1;
+    if (sub >= nb) sub = nb - 1;
+
+    out->start_byte = (size_t)brk[sub];
+    out->end_byte = (sub + 1 < nb) ? (size_t)brk[sub + 1] : n;
+    return 1;
+}
+
+/* Visual row containing the cursor, and its column within that row. */
+int wave_cursor_visual(WaveSession *s, size_t *vrow, size_t *col) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !e->vstart) return 0;
+
+    size_t row = 0, c = 0;
+    pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &c);
+    if (row >= (size_t)e->vstart_n - 1) return 0;
+
+    if (e->wrap_cols >= WRAP_NOWRAP_COLS) {
+        if (vrow) *vrow = (size_t)e->vstart[row];
+        if (col) *col = c;
+        return 1;
+    }
+
+    size_t start, end;
+    if (!line_bounds(e, row, &start, &end)) return 0;
+    size_t llen = end - start;
+
+    static char buf[WRAP_MAXLINE];
+    static int brk[WRAP_MAXBRK];
+    size_t n = llen > WRAP_MAXLINE ? WRAP_MAXLINE : llen;
+    pt_read(buffer_pt(e->buf), start, n, buf);
+    int nb = wrap_line(buf, n, e->wrap_cols, brk, WRAP_MAXBRK);
+
+    int sub = 0;
+    for (int i = 0; i < nb; i++)
+        if ((size_t)brk[i] <= c) sub = i;
+    if (vrow) *vrow = (size_t)(e->vstart[row] + sub);
+    if (col) *col = c - (size_t)brk[sub];
+    return 1;
+}
+
+/* Close the workspace and every tab, returning to the empty state. */
+void wave_close_workspace(WaveSession *s) {
+    if (!s) return;
+    for (int i = tabs_count(&s->tabs) - 1; i >= 0; i--) tabs_close(&s->tabs, i);
+    overlay_close(&s->overlay);
+    complete_close(&s->comp);
+    popover_close(&s->pop);
+    command_close(&s->cmd);
+    watch_workspace_stop(&s->watch);
+    if (s->ws) {
+        ws_free(s->ws);
+        s->ws = NULL;
+    }
+    s->ndiags = 0;
+    s->info[0] = '\0';
+    modal_enter_normal(&s->modal);
+}
+
+/* Record a project in the recents list (and persist it). */
+void wave_recent_add(WaveSession *s, const char *path) {
+    if (!s || !path || !*path) return;
+    if (recent_projects_add(&s->recent, path)) recent_projects_save(&s->recent);
+}
+
+/* Reset every setting to config.c's defaults and persist. There is no `:`
+ * command for this — command_parse() has no such verb — so it is exposed
+ * directly for the front-end's command palette. */
+int wave_cfg_defaults(WaveSession *s) {
+    if (!s) return 0;
+    wave_config_defaults(&s->config);
+    snprintf(s->info, sizeof s->info, "settings reset to defaults");
+    return wave_config_save(&s->config);
+}
+
+/* Direct setters for the settings screen. The clamps mirror command.c's, so
+ * `:opacity 0.8` and the settings screen accept exactly the same range. */
+
+void wave_cfg_set_opacity(WaveSession *s, float v) {
+    if (!s) return;
+    if (v < 0.2f) v = 0.2f;
+    if (v > 1.0f) v = 1.0f;
+    s->config.opacity = v;
+}
+
+void wave_cfg_set_radius(WaveSession *s, float v) {
+    if (!s) return;
+    if (v < 0.0f) v = 0.0f;
+    if (v > 40.0f) v = 40.0f;
+    s->config.radius = v;
+}
+
+void wave_cfg_set_base_pt(WaveSession *s, float v) {
+    if (!s) return;
+    if (v < 8.0f) v = 8.0f;
+    if (v > 48.0f) v = 48.0f;
+    s->config.base_pt = v;
+}
+
+void wave_cfg_set_side_cells(WaveSession *s, int v) {
+    if (!s) return;
+    if (v < 10) v = 10;
+    if (v > 80) v = 80;
+    s->config.side_cells = v;
+}
+
+int wave_cfg_side_cells(const WaveSession *s) { return s ? s->config.side_cells : 26; }
+
+int wave_cfg_toggle_blur(WaveSession *s) {
+    if (!s) return 0;
+    s->config.blur = !s->config.blur;
+    return s->config.blur;
+}
+
+int wave_cfg_toggle_titlebar(WaveSession *s) {
+    if (!s) return 0;
+    s->config.native_titlebar = !s->config.native_titlebar;
+    return s->config.native_titlebar;
+}
+
+/* ui_scale as a percentage, for display alongside base_pt. */
+int wave_cfg_scale_pct(const WaveSession *s) {
+    return s ? (int)(s->config.ui_scale * 100.0f + 0.5f) : 100;
 }

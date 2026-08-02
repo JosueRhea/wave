@@ -210,6 +210,15 @@ unsafe extern "C" {
     fn wave_cfg_toggle_wrap(s: *mut c_void) -> c_int;
     fn wave_cfg_zoom(s: *mut c_void, dir: c_int) -> c_int;
     fn wave_cfg_save(s: *mut c_void) -> c_int;
+    fn wave_cfg_defaults(s: *mut c_void) -> c_int;
+    fn wave_cfg_set_opacity(s: *mut c_void, v: f32);
+    fn wave_cfg_set_radius(s: *mut c_void, v: f32);
+    fn wave_cfg_set_base_pt(s: *mut c_void, v: f32);
+    fn wave_cfg_set_side_cells(s: *mut c_void, v: c_int);
+    fn wave_cfg_side_cells(s: *const c_void) -> c_int;
+    fn wave_cfg_toggle_blur(s: *mut c_void) -> c_int;
+    fn wave_cfg_toggle_titlebar(s: *mut c_void) -> c_int;
+    fn wave_cfg_scale_pct(s: *const c_void) -> c_int;
 
     // buffer search
     fn wave_bufsearch_active(s: *const c_void) -> c_int;
@@ -247,10 +256,41 @@ unsafe extern "C" {
     fn wave_recent_backspace(s: *mut c_void);
     fn wave_recent_query(s: *const c_void) -> *const c_char;
     fn wave_recent_accept(s: *mut c_void) -> c_int;
+    fn wave_recent_add(s: *mut c_void, path: *const c_char);
+    fn wave_close_workspace(s: *mut c_void);
 
     // file watching
     fn wave_watch_poll(s: *mut c_void, now: f64, message: *mut c_char, cap: usize) -> c_int;
     fn wave_watch_workspace_start(s: *mut c_void);
+
+    // paste / centre
+    fn wave_paste(s: *mut c_void, text: *const c_char) -> c_int;
+
+    // terminal selection
+    fn wave_term_sel_begin(s: *mut c_void, row: usize, col: c_int);
+    fn wave_term_sel_update(s: *mut c_void, row: usize, col: c_int);
+    fn wave_term_sel_end(s: *mut c_void);
+    fn wave_term_sel_clear(s: *mut c_void);
+    fn wave_term_sel_span(s: *const c_void, row: usize, a: *mut c_int, b: *mut c_int) -> c_int;
+    fn wave_term_copy_selection(s: *const c_void) -> *mut c_char;
+
+    // git diff selection
+    fn wave_git_sel_begin(s: *mut c_void, line: c_int, col: c_int);
+    fn wave_git_sel_update(s: *mut c_void, line: c_int, col: c_int);
+    fn wave_git_sel_end(s: *mut c_void);
+    fn wave_git_sel_clear(s: *mut c_void);
+    fn wave_git_sel_span(s: *const c_void, line: c_int, a: *mut c_int, b: *mut c_int) -> c_int;
+    fn wave_git_copy_selection(s: *const c_void) -> *mut c_char;
+    fn wave_git_diff_scroll_pos(s: *const c_void) -> c_int;
+
+    // signature help
+    fn wave_signature_request(s: *mut c_void, trigger: c_uint, retrigger: c_int) -> c_int;
+
+    // soft wrap
+    fn wave_wrap_set_cols(s: *mut c_void, cols: c_int);
+    fn wave_visual_rows(s: *mut c_void) -> usize;
+    fn wave_visual_row(s: *mut c_void, vrow: usize, out: *mut WaveVisualRowRaw) -> c_int;
+    fn wave_cursor_visual(s: *mut c_void, vrow: *mut usize, col: *mut usize) -> c_int;
 
     // popover
     fn wave_popover_active(s: *const c_void) -> c_int;
@@ -272,6 +312,23 @@ struct WaveCellStyleRaw {
 
 /// Sentinel for "use the default foreground/background".
 pub const COLOR_DEFAULT: u32 = 0xFFFF_FFFF;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct WaveVisualRowRaw {
+    line: usize,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+/// One rendered row: a byte slice of a logical line. With wrapping off there
+/// is exactly one row per line.
+#[derive(Clone, Copy)]
+pub struct VisualRow {
+    pub line: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
 
 /// GLFW key codes, which is the vocabulary `terminal_key_sequence` speaks.
 /// These are deliberately *not* [`Key`]/`EditorKey` values — the terminal and
@@ -1152,6 +1209,44 @@ impl Session {
         unsafe { wave_cfg_save(self.raw) != 0 }
     }
 
+    /// Reset every setting to `config.c`'s defaults and persist.
+    pub fn reset_config(&mut self) -> bool {
+        unsafe { wave_cfg_defaults(self.raw) != 0 }
+    }
+
+    pub fn set_opacity(&mut self, v: f32) {
+        unsafe { wave_cfg_set_opacity(self.raw, v) }
+    }
+
+    pub fn set_radius(&mut self, v: f32) {
+        unsafe { wave_cfg_set_radius(self.raw, v) }
+    }
+
+    pub fn set_base_pt(&mut self, v: f32) {
+        unsafe { wave_cfg_set_base_pt(self.raw, v) }
+    }
+
+    pub fn set_side_cells(&mut self, v: usize) {
+        unsafe { wave_cfg_set_side_cells(self.raw, v as c_int) }
+    }
+
+    pub fn side_cells(&self) -> usize {
+        unsafe { wave_cfg_side_cells(self.raw).max(0) as usize }
+    }
+
+    pub fn toggle_blur(&mut self) -> bool {
+        unsafe { wave_cfg_toggle_blur(self.raw) != 0 }
+    }
+
+    pub fn toggle_titlebar(&mut self) -> bool {
+        unsafe { wave_cfg_toggle_titlebar(self.raw) != 0 }
+    }
+
+    /// `ui_scale` as a percentage; the effective size is base_pt x this.
+    pub fn scale_pct(&self) -> u32 {
+        unsafe { wave_cfg_scale_pct(self.raw).max(0) as u32 }
+    }
+
     // ---- buffer search ----
 
     pub fn bufsearch_active(&self) -> bool {
@@ -1268,6 +1363,16 @@ impl Session {
         unsafe { wave_recent_accept(self.raw) != 0 }
     }
 
+    pub fn recent_add(&mut self, path: &str) {
+        let Ok(c) = CString::new(path) else { return };
+        unsafe { wave_recent_add(self.raw, c.as_ptr()) }
+    }
+
+    /// Close the workspace and all tabs, back to the empty state.
+    pub fn close_workspace(&mut self) {
+        unsafe { wave_close_workspace(self.raw) }
+    }
+
     // ---- file watching ----
 
     pub fn watch_poll(&mut self, now: f64) -> Option<String> {
@@ -1283,6 +1388,132 @@ impl Session {
 
     pub fn watch_workspace_start(&mut self) {
         unsafe { wave_watch_workspace_start(self.raw) }
+    }
+
+    // ---- paste / centre ----
+
+    /// Paste at the cursor, replacing a live selection. True if the editor
+    /// switched to insert mode as a result.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Ok(c) = CString::new(text) else {
+            return false;
+        };
+        unsafe { wave_paste(self.raw, c.as_ptr()) != 0 }
+    }
+
+    // ---- terminal selection ----
+
+    pub fn term_sel_begin(&mut self, row: usize, col: usize) {
+        unsafe { wave_term_sel_begin(self.raw, row, col as c_int) }
+    }
+
+    pub fn term_sel_update(&mut self, row: usize, col: usize) {
+        unsafe { wave_term_sel_update(self.raw, row, col as c_int) }
+    }
+
+    pub fn term_sel_end(&mut self) {
+        unsafe { wave_term_sel_end(self.raw) }
+    }
+
+    pub fn term_sel_clear(&mut self) {
+        unsafe { wave_term_sel_clear(self.raw) }
+    }
+
+    pub fn term_sel_span(&self, row: usize) -> Option<(usize, usize)> {
+        let (mut a, mut b) = (0, 0);
+        if unsafe { wave_term_sel_span(self.raw, row, &mut a, &mut b) } == 0 {
+            return None;
+        }
+        Some((a.max(0) as usize, b.max(0) as usize))
+    }
+
+    pub fn term_copy_selection(&self) -> Option<String> {
+        let p = unsafe { wave_term_copy_selection(self.raw) };
+        if p.is_null() {
+            return None;
+        }
+        let text = cstr(p);
+        unsafe { wave_string_free(p) };
+        Some(text)
+    }
+
+    // ---- git diff selection ----
+
+    pub fn git_sel_begin(&mut self, line: usize, col: usize) {
+        unsafe { wave_git_sel_begin(self.raw, line as c_int, col as c_int) }
+    }
+
+    pub fn git_sel_update(&mut self, line: usize, col: usize) {
+        unsafe { wave_git_sel_update(self.raw, line as c_int, col as c_int) }
+    }
+
+    pub fn git_sel_end(&mut self) {
+        unsafe { wave_git_sel_end(self.raw) }
+    }
+
+    pub fn git_sel_clear(&mut self) {
+        unsafe { wave_git_sel_clear(self.raw) }
+    }
+
+    pub fn git_sel_span(&self, line: usize) -> Option<(usize, usize)> {
+        let (mut a, mut b) = (0, 0);
+        if unsafe { wave_git_sel_span(self.raw, line as c_int, &mut a, &mut b) } == 0 {
+            return None;
+        }
+        Some((a.max(0) as usize, b.max(0) as usize))
+    }
+
+    pub fn git_copy_selection(&self) -> Option<String> {
+        let p = unsafe { wave_git_copy_selection(self.raw) };
+        if p.is_null() {
+            return None;
+        }
+        let text = cstr(p);
+        unsafe { wave_string_free(p) };
+        Some(text)
+    }
+
+    pub fn git_diff_scroll_pos(&self) -> usize {
+        unsafe { wave_git_diff_scroll_pos(self.raw).max(0) as usize }
+    }
+
+    // ---- signature help ----
+
+    pub fn signature_request(&mut self, trigger: char, retrigger: bool) -> bool {
+        unsafe { wave_signature_request(self.raw, trigger as c_uint, retrigger as c_int) != 0 }
+    }
+
+    // ---- soft wrap ----
+
+    /// Rebuild the wrap index for a viewport `cols` wide. Honours the config
+    /// flag; pass 0 to disable wrapping outright.
+    pub fn wrap_set_cols(&mut self, cols: usize) {
+        unsafe { wave_wrap_set_cols(self.raw, cols as c_int) }
+    }
+
+    pub fn visual_rows(&mut self) -> usize {
+        unsafe { wave_visual_rows(self.raw) }
+    }
+
+    pub fn visual_row(&mut self, vrow: usize) -> Option<VisualRow> {
+        let mut raw = WaveVisualRowRaw::default();
+        if unsafe { wave_visual_row(self.raw, vrow, &mut raw) } == 0 {
+            return None;
+        }
+        Some(VisualRow {
+            line: raw.line,
+            start_byte: raw.start_byte,
+            end_byte: raw.end_byte,
+        })
+    }
+
+    /// Visual row containing the cursor, and its column within that row.
+    pub fn cursor_visual(&mut self) -> Option<(usize, usize)> {
+        let (mut vrow, mut col) = (0usize, 0usize);
+        if unsafe { wave_cursor_visual(self.raw, &mut vrow, &mut col) } == 0 {
+            return None;
+        }
+        Some((vrow, col))
     }
 
     // ---- popover ----
