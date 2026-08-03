@@ -9,6 +9,8 @@ int main(void) {
     CHECK_EQ(cfg.show_sidebar, 1);
     CHECK_EQ(cfg.side_cells, 26);
     CHECK_EQ(cfg.wrap, 1);
+    /* Vim editing is the default; standard editing is opt-in. */
+    CHECK_EQ(cfg.vim, 1);
     CHECK_EQ((int)(cfg.ui_scale * 100.0f + 0.5f), 100);
     CHECK_EQ((int)(cfg.radius * 10.0f + 0.5f), 70);
 
@@ -37,6 +39,12 @@ int main(void) {
     CHECK_EQ(wave_config_toggle_wrap(&cfg), 1);
     CHECK(wave_config_wrap_text(&cfg, info, sizeof info));
     CHECK_STR(info, "word wrap on");
+
+    CHECK_EQ(wave_config_toggle_vim(&cfg), 0);
+    CHECK_EQ(cfg.vim, 0);
+    CHECK_EQ(wave_config_toggle_vim(&cfg), 1);
+    CHECK_EQ(cfg.vim, 1);
+    CHECK_EQ(wave_config_toggle_vim(NULL), 0);
 
     TEST_REPORT();
 }

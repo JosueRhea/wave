@@ -32,7 +32,9 @@
 #include "popover.h"
 #include "recent.h"
 #include "runtime.h"
+#include "standard.h"
 #include "tabs.h"
+#include "view.h"
 #include "terminal.h"
 #include "theme.h"
 #include "updater.h"
@@ -69,6 +71,20 @@ typedef struct WaveSession {
     char hover[LSP_MANAGER_HOVER_CAP];
     int has_hover;
     char info[256];
+
+    /* Jump list, for going back after a go-to-definition. A jump can land in
+     * another file, so a position alone is not enough — each entry carries the
+     * path it belongs to and is reopened on the way back.
+     *
+     * `pos` is the index of the *next* slot, so back/forward is a walk through
+     * `jumps`. A new jump made after going back truncates the forward tail, the
+     * way browser history does. */
+    struct {
+        char path[1024];
+        size_t offset;
+    } jumps[64];
+    int njumps;
+    int jump_pos;
 } WaveSession;
 
 /* The LSP completion pool, kept file-static exactly as main.c keeps it on its
@@ -115,6 +131,9 @@ WaveSession *wave_new(void) {
     popover_init(&s->pop);
     wave_config_defaults(&s->config);
     wave_config_load(&s->config);
+    /* After the load, so a config with vim=0 comes up already non-modal rather
+     * than eating the first keystroke as a NORMAL-mode command. */
+    standard_set_enabled(NULL, &s->modal, !s->config.vim);
     watch_service_init(&s->watch);
     recent_projects_init(&s->recent);
     recent_projects_load(&s->recent);
@@ -135,6 +154,21 @@ void wave_free(WaveSession *s) {
 
 static Editor *cur(WaveSession *s) {
     return s ? tabs_current(&s->tabs) : NULL;
+}
+
+/* The mode the editor rests in once something else finishes — a command line
+ * closing, a project closing, a paste landing. Under vim that is NORMAL; under
+ * standard editing there is no such state, and dropping into NORMAL would make
+ * the next keystroke a vim command instead of text. Every "back to normal" in
+ * this file goes through here for that reason. */
+/* Defined with the rest of the jump list below; declared here because both
+ * go-to-definition paths (vim's `gd` and ⌘-click) record a jump before moving. */
+void wave_jump_push(WaveSession *s);
+
+static void enter_rest_mode(WaveSession *s) {
+    if (!s) return;
+    if (s->config.vim) modal_enter_normal(&s->modal);
+    else modal_enter_insert(&s->modal);
 }
 
 /* Merged tree-sitter + server diagnostics for the active editor. Cached so the
@@ -533,7 +567,11 @@ int wave_mode(const WaveSession *s) {
     return s ? (int)s->modal.mode : (int)MODE_NORMAL;
 }
 
+/* The status-bar mode chip. Standard editing has no modes to report — NORMAL /
+ * INSERT / VISUAL are vim vocabulary — so it reports an empty string and the
+ * front-end drops the chip entirely. */
 const char *wave_mode_name(const WaveSession *s) {
+    if (s && !s->config.vim) return "";
     return mode_name(s ? s->modal.mode : MODE_NORMAL);
 }
 
@@ -558,7 +596,8 @@ void wave_click_at(WaveSession *s, int line, int col) {
     if (!e || !e->buf) return;
     editor_move_to_line_col(e, line + 1, col + 1);
     e->anchor = e->cursor; /* a bare click collapses any selection */
-    modal_enter_normal(&s->modal);
+    standard_clear_carets(e);
+    enter_rest_mode(s);
 }
 
 /* A drag enters VISUAL mode, exactly as main.c does after
@@ -633,6 +672,25 @@ unsigned wave_text_input(WaveSession *s, unsigned int cp) {
         return 0;
     }
 
+    /* Standard editing never leaves "insert": every printable key is text, and
+     * a selection is replaced by it. In particular `:` types a colon rather
+     * than opening the command line — everything the command line offers is on
+     * the ⇧⌘P palette, which is how a non-vim user reaches it. (The no-buffer
+     * branch above still takes `:`, since with nothing open it cannot be text.) */
+    if (!s->config.vim) {
+        /* The multi- path is the single-caret one when there are no extras. */
+        standard_multi_text_input(e, &s->modal, cp);
+        editor_update_highlighter(e);
+        lsp_manager_push_change(&s->lsp, e);
+        comp_after_insert(s, e, cp);
+        if (cp == '(' || cp == ',')
+            wave_signature_request(s, cp, cp == ',');
+        else if (cp == ')')
+            popover_close(&s->pop);
+        refresh_diags(s);
+        return 0;
+    }
+
     if (s->modal.mode == MODE_INSERT) {
         editor_apply_text_input(e, cp);
         editor_update_highlighter(e);
@@ -655,6 +713,8 @@ unsigned wave_text_input(WaveSession *s, unsigned int cp) {
      * server, request_definition_at_cursor falls back to the tree-sitter
      * heuristic and moves the cursor synchronously. */
     if (res.flags & EDIT_COMMAND_GOTO_DEFINITION) {
+        /* Recorded here too, so vim's `gd` is as recoverable as ⌘-click. */
+        wave_jump_push(s);
         char message[256];
         if (!lsp_manager_request_definition_at_cursor(&s->lsp, e, message,
                                                       sizeof message))
@@ -687,7 +747,9 @@ int wave_special_key(WaveSession *s, int key) {
     Editor *e = cur(s);
     if (!e || !e->buf) return 0;
     int handled;
-    if (s->modal.mode == MODE_INSERT)
+    if (!s->config.vim)
+        handled = standard_multi_editor_key(e, &s->modal, (EditorKey)key);
+    else if (s->modal.mode == MODE_INSERT)
         handled = editor_apply_insert_key(e, (EditorKey)key);
     else
         handled = editor_apply_motion_key(e, (EditorKey)key);
@@ -697,9 +759,312 @@ int wave_special_key(WaveSession *s, int key) {
     return handled;
 }
 
+/* Arrow keys and their ⌥/⌘/Home/End relatives, in standard editing. Kept apart
+ * from wave_special_key because a motion carries `extend` (the shift key) and
+ * must not be mistaken for text. Returns non-zero if anything moved. */
+int wave_motion(WaveSession *s, int motion, int extend) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    /* A motion collapses to one caret, which is what every editor with
+     * multiple carets does — the alternative is N carets drifting apart. */
+    standard_clear_carets(e);
+    int moved = standard_motion(e, &s->modal, (StdMotion)motion, extend);
+    if (moved) popover_close(&s->pop);
+    return moved;
+}
+
+int wave_select_all(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    return standard_select_all(e, &s->modal);
+}
+
+int wave_select_word(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    return standard_select_word(e, &s->modal);
+}
+
+/* After any command that rewrites the buffer: re-highlight, tell the server,
+ * refresh diagnostics. Every line command needs the same three, so they say so
+ * once here rather than each remembering. */
+static void after_edit(WaveSession *s, Editor *e) {
+    editor_update_highlighter(e);
+    lsp_manager_push_change(&s->lsp, e);
+    refresh_diags(s);
+}
+
+/* ⌘C / ⌘X. Both return malloc'd text for the caller to put on the clipboard
+ * (freed with wave_string_free), or NULL when there is nothing to take. With no
+ * selection they act on the whole line, as a standard editor does. */
+char *wave_standard_copy(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return NULL;
+    return standard_copy(e, &s->modal);
+}
+
+char *wave_standard_cut(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return NULL;
+    char *text = standard_cut(e, &s->modal);
+    if (text) after_edit(s, e);
+    return text;
+}
+
+int wave_delete_line(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_delete_line(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_duplicate_line(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_duplicate_line(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_move_line(WaveSession *s, int dir) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_move_line(e, &s->modal, dir);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_delete_to_line_start(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_delete_to_line_start(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_toggle_comment(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_toggle_comment(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+/* Tab / ⇧Tab. Returns 0 when it was not a block operation, so the front-end
+ * knows to fall back to inserting a plain tab. */
+int wave_indent(WaveSession *s, int outdent) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_indent(e, &s->modal, outdent);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_delete_word_left(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_delete_word_left(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_delete_word_right(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_delete_word_right(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_delete_to_line_end(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_delete_to_line_end(e, &s->modal);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+int wave_select_line(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    return standard_select_line(e, &s->modal);
+}
+
+int wave_insert_line(WaveSession *s, int below) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    int ok = standard_insert_line(e, &s->modal, below);
+    if (ok) after_edit(s, e);
+    return ok;
+}
+
+/* ---- multiple carets ---- */
+
+int wave_select_next_occurrence(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    return standard_select_next_occurrence(e, &s->modal);
+}
+
+int wave_add_caret_at(WaveSession *s, int line, int col) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return 0;
+    /* Resolve the click through the editor, then put the caret back: this is
+     * the same trick wave_drag_to uses, since move_to_line_col owns the
+     * row/column arithmetic and resets the anchor as a side effect. */
+    size_t keep_cursor = e->cursor, keep_anchor = e->anchor;
+    editor_move_to_line_col(e, line + 1, col + 1);
+    size_t at = e->cursor;
+    e->cursor = keep_cursor;
+    e->anchor = keep_anchor;
+    return standard_add_caret(e, at, at);
+}
+
+size_t wave_caret_count(const WaveSession *s) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    return e ? standard_caret_count(e) : 0;
+}
+
+void wave_clear_carets(WaveSession *s) {
+    Editor *e = cur(s);
+    if (e) standard_clear_carets(e);
+}
+
+/* Extra caret i, as byte offsets. For painting the additional carets and their
+ * selections; the primary one is already on e->cursor/e->anchor. */
+int wave_caret_at(const WaveSession *s, size_t i, size_t *anchor,
+                  size_t *cursor) {
+    const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
+    return e ? standard_caret_at(e, i, anchor, cursor) : 0;
+}
+
+/* ---- jump list ----
+ *
+ * Record where the caret is before a jump, so ⌃- (and vim's `gd`) can come
+ * back. Anything that moves the caret a long way should call this first. */
+void wave_jump_push(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf || !e->path) return;
+    /* A jump made after going back drops whatever was ahead, like a browser. */
+    if (s->jump_pos < s->njumps) s->njumps = s->jump_pos;
+    if (s->njumps == (int)(sizeof s->jumps / sizeof s->jumps[0])) {
+        /* Full: drop the oldest and slide down, so the most recent history is
+         * what survives. */
+        memmove(&s->jumps[0], &s->jumps[1], sizeof s->jumps - sizeof s->jumps[0]);
+        s->njumps--;
+    }
+    snprintf(s->jumps[s->njumps].path, sizeof s->jumps[s->njumps].path, "%s",
+             e->path);
+    s->jumps[s->njumps].offset = e->cursor;
+    s->njumps++;
+    s->jump_pos = s->njumps;
+}
+
+/* Walk the jump list. `dir` < 0 goes back, > 0 forward. Returns 1 if it moved.
+ *
+ * Going back from the newest entry has to record where we are first, otherwise
+ * there would be nothing to go forward *to*. */
+int wave_jump_go(WaveSession *s, int dir) {
+    Editor *e = cur(s);
+    if (!s || dir == 0) return 0;
+    if (dir < 0) {
+        if (s->jump_pos <= 0) return 0;
+        if (s->jump_pos == s->njumps && e && e->buf && e->path) {
+            if (s->njumps < (int)(sizeof s->jumps / sizeof s->jumps[0])) {
+                snprintf(s->jumps[s->njumps].path, sizeof s->jumps[s->njumps].path,
+                         "%s", e->path);
+                s->jumps[s->njumps].offset = e->cursor;
+                s->njumps++;
+            }
+        }
+        s->jump_pos--;
+    } else {
+        if (s->jump_pos + 1 >= s->njumps) return 0;
+        s->jump_pos++;
+    }
+    const char *path = s->jumps[s->jump_pos].path;
+    size_t off = s->jumps[s->jump_pos].offset;
+    if (!path[0]) return 0;
+
+    /* Reopen if the jump belongs to another file; tabs_open_file is what the
+     * file finder uses, so an already-open file is switched to, not duplicated. */
+    Editor *target = cur(s);
+    if (!target || !target->path || strcmp(target->path, path) != 0) {
+        if (wave_open_path(s, path) != 0) return 0;
+        target = cur(s);
+    }
+    if (!target || !target->buf) return 0;
+    size_t len = pt_length(buffer_pt(target->buf));
+    target->cursor = off < len ? off : len;
+    target->anchor = target->cursor;
+    standard_clear_carets(target);
+    enter_rest_mode(s);
+    return 1;
+}
+
+/* Go to the definition under the caret — the `gd` path, reachable without vim
+ * so ⌘-click and ⌃-click can use it. Async when a server is up: the reply lands
+ * in wave_lsp_poll(). Without one, the tree-sitter fallback moves the caret
+ * synchronously, exactly as wave_text_input's `gd` branch does.
+ *
+ * The jump is recorded first either way, so ⌃- comes back whether the answer
+ * arrived from the server or the local heuristic. */
+void wave_goto_definition(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return;
+    wave_jump_push(s);
+    char message[256];
+    if (!lsp_manager_request_definition_at_cursor(&s->lsp, e, message,
+                                                  sizeof message))
+        editor_goto_local_definition(e, message, sizeof message);
+}
+
+/* Caret blink phase, shared with the GLFW front-end rather than reimplemented:
+ * both draw the same 1 Hz blink that holds solid for half a second after the
+ * last keystroke, so the caret never strobes while you type. `blink` is the
+ * runtime's opt-out (snapshot mode renders a solid caret). */
+int wave_cursor_visible(int blink, double now, double last_activity) {
+    return view_cursor_visible(blink, now, last_activity);
+}
+
+int wave_vim_enabled(const WaveSession *s) { return s ? s->config.vim : 1; }
+
+/* Flip modal editing at runtime. Applied immediately — waiting for a restart
+ * would leave the editor in whichever mode it was already in, which for vim=0
+ * means a NORMAL mode the user just asked not to have.
+ *
+ * Persisted immediately too, like wave_theme_set() and unlike the rest of the
+ * settings screen (which waits for `s`). This one decides what every keystroke
+ * does: someone who turns vim off, quits, and finds it back on next launch will
+ * reasonably conclude the setting does not work. */
+int wave_set_vim_enabled(WaveSession *s, int on) {
+    if (!s) return 0;
+    s->config.vim = on != 0;
+    standard_set_enabled(cur(s), &s->modal, !s->config.vim);
+    wave_config_save(&s->config);
+    snprintf(s->info, sizeof s->info, "vim mode %s", s->config.vim ? "on" : "off");
+    return s->config.vim;
+}
+
+int wave_toggle_vim(WaveSession *s) {
+    return s ? wave_set_vim_enabled(s, !s->config.vim) : 0;
+}
+
 void wave_escape(WaveSession *s) {
     Editor *e = cur(s);
     if (!s) return;
+    /* Standard editing has nowhere to escape *to*: Escape drops the selection
+     * and leaves the caret where it is, rather than entering NORMAL. */
+    if (!s->config.vim) {
+        if (e) {
+            /* Escape drops the extra carets first — that is what a user reaches
+             * for to get out of a multi-caret edit. */
+            standard_clear_carets(e);
+            standard_escape(e, &s->modal);
+        }
+        return;
+    }
     modal_enter_normal(&s->modal);
     if (e) editor_cancel_group(e);
 }
@@ -1644,6 +2009,22 @@ int wave_bufsearch_active(const WaveSession *s) {
     return s ? s->buf_search.active : 0;
 }
 
+/* Open it without going through vim's `/`, so ⌘F can reach it in standard
+ * editing. Same entry point the `/` command uses. */
+void wave_bufsearch_open(WaveSession *s) {
+    if (!s) return;
+    bufsearch_open(s);
+}
+
+/* Find next / previous, for ⌘G and ⇧⌘G — the `n` / `N` commands without vim.
+ * Records a jump first, so a search that throws you across the file is as
+ * recoverable as a go-to-definition. */
+void wave_bufsearch_repeat(WaveSession *s, int reverse) {
+    if (!s) return;
+    wave_jump_push(s);
+    bufsearch_repeat(s, reverse);
+}
+
 const char *wave_bufsearch_text(const WaveSession *s) {
     return s ? command_text((CommandLine *)&s->buf_search) : "";
 }
@@ -1655,7 +2036,7 @@ static void bufsearch_open(WaveSession *s) {
     s->buf_search_editor = e;
     s->buf_search_origin = e->cursor;
     s->info[0] = '\0';
-    modal_enter_normal(&s->modal);
+    enter_rest_mode(s);
 }
 
 static void bufsearch_close(WaveSession *s) {
@@ -1870,7 +2251,7 @@ int wave_watch_poll(WaveSession *s, double now, char *message, size_t cap) {
         if (message && cap) snprintf(message, cap, "%s", effect.message);
         snprintf(s->info, sizeof s->info, "%s", effect.message);
     }
-    if (effect.reset_mode) modal_enter_normal(&s->modal);
+    if (effect.reset_mode) enter_rest_mode(s);
 
     /* The workspace tree itself may have changed on disk. */
     if (s->ws) {
@@ -1902,7 +2283,9 @@ int wave_paste(WaveSession *s, const char *text) {
     EditorPasteResult r = editor_paste_text(e, text, replace);
     if (r == EDITOR_PASTE_NONE) return 0;
 
-    if (s->modal.mode == MODE_VISUAL) modal_enter_normal(&s->modal);
+    /* The selection is consumed by the paste either way; under standard editing
+     * that lands back in insert with the caret after the pasted text. */
+    if (s->modal.mode == MODE_VISUAL) enter_rest_mode(s);
     editor_update_highlighter(e);
     lsp_manager_push_change(&s->lsp, e);
     refresh_diags(s);
@@ -2074,12 +2457,15 @@ int wave_visual_row(WaveSession *s, size_t vrow, WaveVisualRow *out) {
 }
 
 /* Visual row containing the cursor, and its column within that row. */
-int wave_cursor_visual(WaveSession *s, size_t *vrow, size_t *col) {
+/* Visual (wrapped) row and column of an arbitrary byte offset. Split out of
+ * wave_cursor_visual so the extra carets can be placed with the same wrap
+ * arithmetic rather than a second, subtly different copy of it. */
+int wave_offset_visual(WaveSession *s, size_t offset, size_t *vrow, size_t *col) {
     Editor *e = cur(s);
     if (!e || !e->buf || !e->vstart) return 0;
 
     size_t row = 0, c = 0;
-    pt_offset_to_rowcol(buffer_pt(e->buf), e->cursor, &row, &c);
+    pt_offset_to_rowcol(buffer_pt(e->buf), offset, &row, &c);
     if (row >= (size_t)e->vstart_n - 1) return 0;
 
     if (e->wrap_cols >= WRAP_NOWRAP_COLS) {
@@ -2106,6 +2492,59 @@ int wave_cursor_visual(WaveSession *s, size_t *vrow, size_t *col) {
     return 1;
 }
 
+int wave_cursor_visual(WaveSession *s, size_t *vrow, size_t *col) {
+    Editor *e = cur(s);
+    if (!e) return 0;
+    return wave_offset_visual(s, e->cursor, vrow, col);
+}
+
+/* Visual position of extra caret i, for painting it. */
+int wave_caret_visual(WaveSession *s, size_t i, size_t *vrow, size_t *col) {
+    Editor *e = cur(s);
+    size_t anchor = 0, cursor = 0;
+    if (!e || !standard_caret_at(e, i, &anchor, &cursor)) return 0;
+    return wave_offset_visual(s, cursor, vrow, col);
+}
+
+/* Every selection on `line`, primary and extra carets alike, as byte columns.
+ * Returns how many were written (capped at `max`). The renderer needs all of
+ * them: with ⌘D the matches are usually on different lines, but nothing stops
+ * two carets sharing one. */
+size_t wave_line_selections(WaveSession *s, size_t line, size_t *starts,
+                            size_t *ends, size_t max) {
+    Editor *e = cur(s);
+    if (!e || !e->buf || !starts || !ends || max == 0) return 0;
+    if (s->modal.mode != MODE_VISUAL) return 0;
+    size_t line_a, line_b;
+    if (!line_bounds(e, line, &line_a, &line_b)) return 0;
+
+    size_t n = 0;
+    size_t keep_cursor = e->cursor, keep_anchor = e->anchor;
+    size_t total = standard_caret_count(e) + 1;
+    for (size_t i = 0; i < total && n < max; i++) {
+        if (i > 0) {
+            size_t a, c;
+            if (!standard_caret_at(e, i - 1, &a, &c)) break;
+            e->anchor = a;
+            e->cursor = c;
+        } else {
+            e->cursor = keep_cursor;
+            e->anchor = keep_anchor;
+        }
+        EditorRange sel;
+        if (!editor_visual_range(e, &sel)) continue;
+        if (sel.end <= line_a || sel.start > line_b) continue;
+        size_t lo = sel.start < line_a ? line_a : sel.start;
+        size_t hi = sel.end > line_b ? line_b : sel.end;
+        starts[n] = lo - line_a;
+        ends[n] = hi - line_a;
+        n++;
+    }
+    e->cursor = keep_cursor;
+    e->anchor = keep_anchor;
+    return n;
+}
+
 /* Close the workspace and every tab, returning to the empty state. */
 void wave_close_workspace(WaveSession *s) {
     if (!s) return;
@@ -2121,7 +2560,7 @@ void wave_close_workspace(WaveSession *s) {
     }
     s->ndiags = 0;
     s->info[0] = '\0';
-    modal_enter_normal(&s->modal);
+    enter_rest_mode(s);
 }
 
 /* Record a project in the recents list (and persist it). */
@@ -2136,6 +2575,9 @@ void wave_recent_add(WaveSession *s, const char *path) {
 int wave_cfg_defaults(WaveSession *s) {
     if (!s) return 0;
     wave_config_defaults(&s->config);
+    /* Applied, not just recorded — the defaults put vim back on, and the editor
+     * has to actually return to NORMAL for that to mean anything. */
+    standard_set_enabled(cur(s), &s->modal, !s->config.vim);
     snprintf(s->info, sizeof s->info, "settings reset to defaults");
     return wave_config_save(&s->config);
 }

@@ -81,6 +81,14 @@ unsafe extern "C" {
         max: usize,
     ) -> usize;
     fn wave_line_selection(s: *mut c_void, line: usize, a: *mut usize, b: *mut usize) -> c_int;
+    fn wave_line_selections(
+        s: *mut c_void,
+        line: usize,
+        starts: *mut usize,
+        ends: *mut usize,
+        max: usize,
+    ) -> usize;
+    fn wave_caret_visual(s: *mut c_void, i: usize, vrow: *mut usize, col: *mut usize) -> c_int;
     fn wave_click_at(s: *mut c_void, line: c_int, col: c_int);
     fn wave_drag_to(s: *mut c_void, line: c_int, col: c_int);
     fn wave_has_selection(s: *const c_void) -> c_int;
@@ -117,6 +125,34 @@ unsafe extern "C" {
     fn wave_text_input(s: *mut c_void, cp: c_uint) -> c_uint;
     fn wave_special_key(s: *mut c_void, key: c_int) -> c_int;
     fn wave_escape(s: *mut c_void);
+    fn wave_motion(s: *mut c_void, motion: c_int, extend: c_int) -> c_int;
+    fn wave_select_all(s: *mut c_void) -> c_int;
+    fn wave_select_word(s: *mut c_void) -> c_int;
+    fn wave_standard_copy(s: *mut c_void) -> *mut c_char;
+    fn wave_standard_cut(s: *mut c_void) -> *mut c_char;
+    fn wave_delete_line(s: *mut c_void) -> c_int;
+    fn wave_duplicate_line(s: *mut c_void) -> c_int;
+    fn wave_move_line(s: *mut c_void, dir: c_int) -> c_int;
+    fn wave_delete_to_line_start(s: *mut c_void) -> c_int;
+    fn wave_toggle_comment(s: *mut c_void) -> c_int;
+    fn wave_goto_definition(s: *mut c_void);
+    fn wave_indent(s: *mut c_void, outdent: c_int) -> c_int;
+    fn wave_delete_word_left(s: *mut c_void) -> c_int;
+    fn wave_delete_word_right(s: *mut c_void) -> c_int;
+    fn wave_delete_to_line_end(s: *mut c_void) -> c_int;
+    fn wave_select_line(s: *mut c_void) -> c_int;
+    fn wave_insert_line(s: *mut c_void, below: c_int) -> c_int;
+    fn wave_select_next_occurrence(s: *mut c_void) -> c_int;
+    fn wave_add_caret_at(s: *mut c_void, line: c_int, col: c_int) -> c_int;
+    fn wave_caret_count(s: *const c_void) -> usize;
+    fn wave_clear_carets(s: *mut c_void);
+    fn wave_caret_at(s: *const c_void, i: usize, anchor: *mut usize, cursor: *mut usize) -> c_int;
+    fn wave_jump_push(s: *mut c_void);
+    fn wave_jump_go(s: *mut c_void, dir: c_int) -> c_int;
+    fn wave_cursor_visible(blink: c_int, now: f64, last_activity: f64) -> c_int;
+    fn wave_vim_enabled(s: *const c_void) -> c_int;
+    fn wave_set_vim_enabled(s: *mut c_void, on: c_int) -> c_int;
+    fn wave_toggle_vim(s: *mut c_void) -> c_int;
     fn wave_undo(s: *mut c_void) -> c_int;
     fn wave_redo(s: *mut c_void) -> c_int;
     fn wave_save(s: *mut c_void) -> c_int;
@@ -246,6 +282,8 @@ unsafe extern "C" {
 
     // buffer search
     fn wave_bufsearch_active(s: *const c_void) -> c_int;
+    fn wave_bufsearch_open(s: *mut c_void);
+    fn wave_bufsearch_repeat(s: *mut c_void, reverse: c_int);
     fn wave_bufsearch_text(s: *const c_void) -> *const c_char;
     fn wave_bufsearch_input(s: *mut c_void, text: *const c_char);
     fn wave_bufsearch_backspace(s: *mut c_void);
@@ -436,6 +474,23 @@ pub enum Key {
     Right = 6,
     Up = 7,
     Down = 8,
+}
+
+/// Mirrors `StdMotion` in `src/standard.h` — caret movement for standard
+/// (non-vim) editing, where the shift key turns any of these into a selection.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(i32)]
+pub enum Motion {
+    Left = 1,
+    Right = 2,
+    Up = 3,
+    Down = 4,
+    WordLeft = 5,
+    WordRight = 6,
+    LineStart = 7,
+    LineEnd = 8,
+    DocStart = 9,
+    DocEnd = 10,
 }
 
 /// Mirrors `Mode` in `src/mode.h`.
@@ -710,6 +765,28 @@ impl Session {
         }
     }
 
+    /// Every selection on `line` — the primary plus any extra carets sharing
+    /// it. `line_selection` only ever reports the primary one.
+    pub fn line_selections(&mut self, line: usize) -> Vec<(usize, usize)> {
+        const MAX: usize = 64;
+        let mut starts = [0usize; MAX];
+        let mut ends = [0usize; MAX];
+        let n = unsafe {
+            wave_line_selections(self.raw, line, starts.as_mut_ptr(), ends.as_mut_ptr(), MAX)
+        };
+        (0..n).map(|i| (starts[i], ends[i])).collect()
+    }
+
+    /// Visual (wrapped) position of extra caret `i`.
+    pub fn caret_visual(&mut self, i: usize) -> Option<(usize, usize)> {
+        let (mut r, mut c) = (0usize, 0usize);
+        if unsafe { wave_caret_visual(self.raw, i, &mut r, &mut c) } != 0 {
+            Some((r, c))
+        } else {
+            None
+        }
+    }
+
     /// Place the cursor at a buffer position, collapsing any selection.
     pub fn click_at(&mut self, line: usize, col: usize) {
         unsafe { wave_click_at(self.raw, line as c_int, col as c_int) }
@@ -791,6 +868,149 @@ impl Session {
 
     pub fn special_key(&mut self, key: Key) -> bool {
         unsafe { wave_special_key(self.raw, key as c_int) != 0 }
+    }
+
+    /// Move the caret in standard editing. `extend` is the shift key.
+    pub fn motion(&mut self, motion: Motion, extend: bool) -> bool {
+        unsafe { wave_motion(self.raw, motion as c_int, extend as c_int) != 0 }
+    }
+
+    pub fn select_all(&mut self) -> bool {
+        unsafe { wave_select_all(self.raw) != 0 }
+    }
+
+    /// Select the word under the caret (double-click).
+    pub fn select_word(&mut self) -> bool {
+        unsafe { wave_select_word(self.raw) != 0 }
+    }
+
+    /// ⌘C in standard editing: the selection, or the whole line when there is
+    /// none. `None` when there is nothing to copy.
+    pub fn standard_copy(&mut self) -> Option<String> {
+        let p = unsafe { wave_standard_copy(self.raw) };
+        if p.is_null() {
+            return None;
+        }
+        let text = cstr(p);
+        unsafe { wave_string_free(p) };
+        Some(text)
+    }
+
+    /// ⌘X: same text as `standard_copy`, and removes it.
+    pub fn standard_cut(&mut self) -> Option<String> {
+        let p = unsafe { wave_standard_cut(self.raw) };
+        if p.is_null() {
+            return None;
+        }
+        let text = cstr(p);
+        unsafe { wave_string_free(p) };
+        Some(text)
+    }
+
+    pub fn delete_line(&mut self) -> bool {
+        unsafe { wave_delete_line(self.raw) != 0 }
+    }
+
+    pub fn duplicate_line(&mut self) -> bool {
+        unsafe { wave_duplicate_line(self.raw) != 0 }
+    }
+
+    /// Move the selected lines up (`-1`) or down (`+1`).
+    pub fn move_line(&mut self, dir: i32) -> bool {
+        unsafe { wave_move_line(self.raw, dir as c_int) != 0 }
+    }
+
+    pub fn delete_to_line_start(&mut self) -> bool {
+        unsafe { wave_delete_to_line_start(self.raw) != 0 }
+    }
+
+    pub fn toggle_comment(&mut self) -> bool {
+        unsafe { wave_toggle_comment(self.raw) != 0 }
+    }
+
+    /// Go to the definition under the caret (the `gd` path), for ⌘/⌃-click.
+    /// Records a jump, so `jump_go(-1)` comes back.
+    pub fn goto_definition(&mut self) {
+        unsafe { wave_goto_definition(self.raw) }
+    }
+
+    /// Tab / ⇧Tab block indent. False when it was not a block operation and the
+    /// caller should insert a plain tab instead.
+    pub fn indent(&mut self, outdent: bool) -> bool {
+        unsafe { wave_indent(self.raw, outdent as c_int) != 0 }
+    }
+
+    pub fn delete_word_left(&mut self) -> bool {
+        unsafe { wave_delete_word_left(self.raw) != 0 }
+    }
+
+    pub fn delete_word_right(&mut self) -> bool {
+        unsafe { wave_delete_word_right(self.raw) != 0 }
+    }
+
+    pub fn delete_to_line_end(&mut self) -> bool {
+        unsafe { wave_delete_to_line_end(self.raw) != 0 }
+    }
+
+    pub fn select_line(&mut self) -> bool {
+        unsafe { wave_select_line(self.raw) != 0 }
+    }
+
+    pub fn insert_line(&mut self, below: bool) -> bool {
+        unsafe { wave_insert_line(self.raw, below as c_int) != 0 }
+    }
+
+    /// ⌘D — select the word, then each next occurrence, adding a caret.
+    pub fn select_next_occurrence(&mut self) -> bool {
+        unsafe { wave_select_next_occurrence(self.raw) != 0 }
+    }
+
+    /// ⌥-click — add a caret at a screen position.
+    pub fn add_caret_at(&mut self, line: usize, col: usize) -> bool {
+        unsafe { wave_add_caret_at(self.raw, line as c_int, col as c_int) != 0 }
+    }
+
+    /// Number of *extra* carets, beyond the primary one.
+    pub fn caret_count(&self) -> usize {
+        unsafe { wave_caret_count(self.raw) }
+    }
+
+    pub fn clear_carets(&mut self) {
+        unsafe { wave_clear_carets(self.raw) }
+    }
+
+    /// Extra caret `i` as `(anchor, cursor)` byte offsets, for painting.
+    pub fn caret_at(&self, i: usize) -> Option<(usize, usize)> {
+        let (mut a, mut c) = (0usize, 0usize);
+        if unsafe { wave_caret_at(self.raw, i, &mut a, &mut c) } != 0 {
+            Some((a, c))
+        } else {
+            None
+        }
+    }
+
+    /// Record the caret's position, so a later `jump_go(-1)` returns here.
+    pub fn jump_push(&mut self) {
+        unsafe { wave_jump_push(self.raw) }
+    }
+
+    /// Walk the jump list: `-1` back, `+1` forward. False if there was nowhere
+    /// to go.
+    pub fn jump_go(&mut self, dir: i32) -> bool {
+        unsafe { wave_jump_go(self.raw, dir as c_int) != 0 }
+    }
+
+    /// Whether modal (vim) editing is on. False selects standard editing.
+    pub fn vim_enabled(&self) -> bool {
+        unsafe { wave_vim_enabled(self.raw) != 0 }
+    }
+
+    pub fn set_vim_enabled(&mut self, on: bool) -> bool {
+        unsafe { wave_set_vim_enabled(self.raw, on as c_int) != 0 }
+    }
+
+    pub fn toggle_vim(&mut self) -> bool {
+        unsafe { wave_toggle_vim(self.raw) != 0 }
     }
 
     pub fn escape(&mut self) {
@@ -1279,6 +1499,16 @@ impl Session {
         unsafe { wave_bufsearch_active(self.raw) != 0 }
     }
 
+    /// Open find-in-file without vim's `/`, for ⌘F.
+    pub fn buffer_search_open(&mut self) {
+        unsafe { wave_bufsearch_open(self.raw) }
+    }
+
+    /// ⌘G / ⇧⌘G — jump to the next (or previous) match of the last search.
+    pub fn bufsearch_repeat(&mut self, reverse: bool) {
+        unsafe { wave_bufsearch_repeat(self.raw, reverse as c_int) }
+    }
+
     pub fn bufsearch_text(&self) -> String {
         cstr(unsafe { wave_bufsearch_text(self.raw) })
     }
@@ -1725,6 +1955,13 @@ pub fn version() -> String {
 /// the main run loop itself, so nothing outside `--selftest` should call this.
 pub fn pump_main_queue(seconds: f64) {
     unsafe { wave_pump_main_queue(seconds) }
+}
+
+/// Whether the caret is in the visible half of its blink cycle. Shared with the
+/// GLFW front-end (`view_cursor_visible`), so both blink identically: solid for
+/// half a second after `last_activity`, then 1 Hz.
+pub fn cursor_visible(now: f64, last_activity: f64) -> bool {
+    unsafe { wave_cursor_visible(1, now, last_activity) != 0 }
 }
 
 impl Session {

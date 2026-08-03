@@ -13,6 +13,10 @@ typedef struct {
     float radius;
     int blur;
     int native_titlebar;
+    /* Modal (vim) editing. On by default — it is how Wave has always behaved,
+     * and turning it off for existing users on upgrade would be a far ruder
+     * surprise than the reverse. 0 selects standard editing (see standard.h). */
+    int vim;
     /* A theme *name* (see theme.h), not an index, so reordering the built-in
      * list cannot silently repaint everyone's editor. */
     char theme[32];
@@ -25,6 +29,7 @@ int wave_config_save(const WaveConfig *cfg);
 int wave_config_zoom(WaveConfig *cfg, int dir);
 int wave_config_toggle_sidebar(WaveConfig *cfg);
 int wave_config_toggle_wrap(WaveConfig *cfg);
+int wave_config_toggle_vim(WaveConfig *cfg);
 int wave_config_zoom_text(const WaveConfig *cfg, char *out, size_t cap);
 int wave_config_wrap_text(const WaveConfig *cfg, char *out, size_t cap);
 

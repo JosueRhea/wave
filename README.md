@@ -25,7 +25,8 @@ batched OpenGL renderer, and (next) LuaJIT extensions.
 - **Tabs** — every opened file gets a tab; click to switch, click its `x` (or
   `:q`) to close, `gt`/`gT` or Cmd-]/Cmd-[ to cycle.
 - **Vim-style modal editing** — normal / insert / visual modes with the common
-  motions and operators (see Keys).
+  motions and operators (see Keys). Not compulsory: **Settings → Vim mode → off**
+  (or "Toggle Vim Mode" in ⇧⌘P) switches to standard, non-modal editing.
 - **`gd` go to definition / `gh` info** — works with or without a server: when
   one is running `gd`/`gh` use real LSP results, otherwise they fall back to a
   tree-sitter heuristic (nearest in-file definition / node + diagnostic). `gh`
@@ -48,12 +49,18 @@ batched OpenGL renderer, and (next) LuaJIT extensions.
 
 ## Download
 
-Prebuilt macOS builds are on the [Releases](../../releases) page —
-**Apple Silicon (arm64), macOS 11+**.
+Prebuilt macOS builds are on the [Releases](../../releases) page, **macOS 11+**,
+for both **Apple Silicon (arm64)** and **Intel (x86_64)**.
 
-1. Download `Wave-<version>-macos.zip` and unzip it.
+1. Download the image for your Mac and unzip it:
+   - Apple Silicon — `Wave-<version>-macos.zip`
+   - Intel — `Wave-<version>-x86_64.zip`
 2. Move `Wave.app` to `/Applications`.
 3. Launch Wave. Release builds are signed and notarized for macOS Gatekeeper.
+
+Not sure which you have?  → About This Mac, or run `uname -m` (`arm64` vs
+`x86_64`). Picking the wrong one is not subtle: an arm64 build will not launch
+at all on an Intel Mac. The updater keeps you on the architecture you installed.
 
 To build from source instead, see [Build & run](#build--run). Packaging targets:
 `make bundle` assembles `Wave.app`; `make dist VERSION=x.y.z` produces the
@@ -198,6 +205,30 @@ requires GLFW (`brew install glfw`) and, for the TS/JS server at runtime, `bun`
 or `node` on `PATH`. The font path is SF Mono
 (`/System/Library/Fonts/SFNSMono.ttf`).
 
+### Cross-compiling for Intel
+
+`ARCH` selects the target; it defaults to the host, so a plain `make` is
+unchanged. From an Apple Silicon machine:
+
+```sh
+make release-macos ARCH=x86_64   # signed + notarized Intel .dmg and .zip
+make test ARCH=x86_64            # the suite, cross-built (runs under Rosetta)
+```
+
+A cross build keeps everything single-arch and separate from the host's: objects
+and artifacts under `build/x86_64/`, `libghostty-vt` at
+`vendor/ghostty/zig-out-x86_64/`, an Intel `rg` in `vendor/rg-x86_64/`, and the
+cargo target triple `x86_64-apple-darwin` (`rustup target add
+x86_64-apple-darwin` once). The two never overwrite each other.
+
+Two constraints worth knowing:
+
+- **Zig 0.15.2 specifically.** The vendored Ghostty rejects anything else,
+  0.16 included. Point `ZIG` at it if it is not what is on `PATH`.
+- **`FRONTEND=c` does not cross-compile.** Homebrew's static GLFW is host-arch
+  only, so the GLFW front-end has no Intel slice to link. The default GPUI
+  front-end — the one releases ship — has no such dependency.
+
 ### Keys
 
 Window:
@@ -223,6 +254,39 @@ Vim modal editing (starts in **NORMAL**):
   (scroll it with `j`/`k` or ↑/↓; `Esc` closes), `gt` / `gT` next / previous tab
 - Command line: `:w` `:q` `:wq` `:q!` `:qa`
 
+Standard editing (**Settings → Vim mode → off**, or "Toggle Vim Mode" in ⇧⌘P) —
+non-modal, for people who don't use vim. The setting persists as `vim=0` and
+applies immediately; vim remains the default:
+
+- Every key types. There is no NORMAL mode to escape from and the status bar
+  drops its mode chip.
+- Move: arrows · **⌥←/→** by word · **⌘←/→** line ends (also Home/End) ·
+  **⌘↑/↓** top/bottom of file · **PageUp/PageDown**
+- Select: **⇧** with any motion · **⌘A** all · **⌘L** line (repeat to extend) ·
+  double-click a word · drag
+- Edit: **⌘X** cut · **⌘C** copy · **⌘V** paste · **⌘Z**/**⇧⌘Z** undo/redo ·
+  **⌘/** toggle `//` comment · **⇧⌘K** delete line · **⌥↑/↓** move line ·
+  **⇧⌥↓** duplicate line · **⌘⏎**/**⇧⌘⏎** open a line below/above
+- Delete: **⌥⌫**/**⌥⌦** by word · **⌘⌫** to line start · **⌘⌦** to line end
+- Indent: **Tab**/**⇧Tab** shift a selected block; with a caret, Tab is a tab
+- Multiple carets: **⌘D** adds one on the next occurrence of the selection
+  (first press selects the word) · **⌥-click** places one · any motion, click
+  or **Esc** collapses back to one
+- **⌘X** and **⌘C** take the whole line when nothing is selected, as they do
+  elsewhere. Typing, Enter, Tab, Backspace and Delete replace a selection.
+- Navigate: **⌘F** find in file · **⌘G**/**⇧⌘G** next/previous match ·
+  **⌘⇧F** project search · **⌘P** files · **⌃G** go to line ·
+  **⌘-click** or **⌃-click** goes to the definition (`gd` still works too)
+- **⌃-** goes back to where you jumped from, **⌃⇧-** forward. This works in vim
+  mode too — `gd` used to be a one-way trip.
+- **Esc** drops the selection and never leaves insert, so `:` types a colon.
+  The `:` command line is vim-only — everything it does (`:w`, `:q`, `:term`,
+  `:git`, …) is on the ⇧⌘P palette, which is where a non-vim user reaches it.
+- Two bindings deliberately differ from vim mode, because the standard meaning
+  would otherwise be destructive or unreachable: **⌘⌫** deletes to the line
+  start rather than offering to delete the file, and **⇧⌘G** is find-previous
+  rather than the git view (still on ⇧⌘P).
+
 ### Config
 
 UI preferences persist in `~/.config/wave/config` (a flat `key=value` file),
@@ -238,6 +302,7 @@ opacity=1.000  # window opacity 0.2..1.0 (:opacity 0.85)
 radius=7.0     # UI corner radius 0..24 px (:radius 10)
 blur=0         # macOS background blur behind the window (:blur)
 titlebar=1     # macOS native traffic lights floating over our header (:titlebar)
+vim=1          # modal (vim) editing; 0 = standard non-modal editing
 theme=wave     # color theme (⇧⌘P → "Change Theme…")
 ```
 

@@ -14,7 +14,7 @@
 mod ffi;
 mod frontend_config;
 
-use ffi::{flags, CloseAction, GitMode, Key, Mode, Session, TabKind, COLOR_DEFAULT};
+use ffi::{flags, CloseAction, GitMode, Key, Mode, Motion, Session, TabKind, COLOR_DEFAULT};
 use frontend_config::FrontendConfig;
 use gpui::{
     actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, ClickEvent,
@@ -173,6 +173,7 @@ enum Cmd {
     PrevTab,
     ToggleSidebar,
     ToggleWrap,
+    ToggleVim,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -182,7 +183,7 @@ enum Cmd {
 }
 
 impl Cmd {
-    const ALL: [Cmd; 28] = [
+    const ALL: [Cmd; 29] = [
         Cmd::OpenFolder,
         Cmd::OpenFile,
         Cmd::Settings,
@@ -203,6 +204,7 @@ impl Cmd {
         Cmd::PrevTab,
         Cmd::ToggleSidebar,
         Cmd::ToggleWrap,
+        Cmd::ToggleVim,
         Cmd::ZoomIn,
         Cmd::ZoomOut,
         Cmd::ZoomReset,
@@ -237,6 +239,7 @@ impl Cmd {
             Cmd::PrevTab => "Previous Tab",
             Cmd::ToggleSidebar => "Toggle Sidebar",
             Cmd::ToggleWrap => "Toggle Soft Wrap",
+            Cmd::ToggleVim => "Toggle Vim Mode",
             Cmd::ZoomIn => "Zoom In",
             Cmd::ZoomOut => "Zoom Out",
             Cmd::ZoomReset => "Reset Zoom",
@@ -296,10 +299,11 @@ enum Setting {
     SidebarWidth,
     Wrap,
     NativeTitlebar,
+    VimMode,
 }
 
 impl Setting {
-    const ALL: [Setting; 10] = [
+    const ALL: [Setting; 11] = [
         Setting::Font,
         Setting::Opacity,
         Setting::Blur,
@@ -310,6 +314,7 @@ impl Setting {
         Setting::SidebarWidth,
         Setting::Wrap,
         Setting::NativeTitlebar,
+        Setting::VimMode,
     ];
 
     fn label(self) -> &'static str {
@@ -324,6 +329,7 @@ impl Setting {
             Setting::SidebarWidth => "Sidebar width",
             Setting::Wrap => "Soft wrap",
             Setting::NativeTitlebar => "Native titlebar",
+            Setting::VimMode => "Vim mode",
         }
     }
 
@@ -331,7 +337,11 @@ impl Setting {
     fn is_toggle(self) -> bool {
         matches!(
             self,
-            Setting::Blur | Setting::Sidebar | Setting::Wrap | Setting::NativeTitlebar
+            Setting::Blur
+                | Setting::Sidebar
+                | Setting::Wrap
+                | Setting::NativeTitlebar
+                | Setting::VimMode
         )
     }
 
@@ -343,6 +353,7 @@ impl Setting {
             Setting::NativeTitlebar => "not applied — this build always draws its own",
             Setting::Zoom => "multiplies the font size",
             Setting::Font => "monospace families only · ⏎ to choose",
+            Setting::VimMode => "off = standard editing (⇧ to select, ⌥/⌘ to jump)",
             _ => "",
         }
     }
@@ -355,6 +366,9 @@ enum Prompt {
     NewFile { dir: String, text: String },
     NewDir { dir: String, text: String },
     Delete { rel: String },
+    /// ⌃G. Vim reaches the same place with `:123`, which standard editing
+    /// cannot use — `:` is a colon there.
+    GotoLine { text: String },
 }
 
 struct WaveView {
@@ -374,6 +388,13 @@ struct WaveView {
     /// Last cursor position seen by `render`, so free scrolling is only
     /// interrupted when the cursor genuinely moves.
     last_cursor: (usize, usize),
+    /// When the user last typed, clicked or moved the caret. The blink holds the
+    /// caret solid for half a second after this, so it does not strobe mid-word.
+    last_activity: f64,
+    /// Blink phase as of the last repaint, so the poll loop can notice the flip
+    /// and ask for a frame. Without it the caret would only change state when
+    /// something else happened to repaint the window.
+    caret_on: bool,
     /// Leftover sub-line scroll. A trackpad delivers many small pixel deltas;
     /// rounding each one independently discards everything under a line and
     /// makes the gesture feel stuck.
@@ -645,6 +666,8 @@ impl WaveView {
             advance: None,
             dragging: false,
             last_cursor: (0, 0),
+            last_activity: now_secs(),
+            caret_on: true,
             scroll_accum: 0.0,
             side_accum: 0.0,
             term_accum: 0.0,
@@ -741,13 +764,33 @@ impl WaveView {
         cx: &mut Context<Self>,
     ) {
         let (line, col) = self.point_to_position(ev.position, window);
+        // Placing the caret counts as activity, same as typing.
+        self.last_activity = now_secs();
+        self.caret_on = true;
+        let vim = self.session.vim_enabled();
         if ev.click_count >= 2 {
-            // Double click selects the word under the cursor, via the same
-            // motion the editor uses for `*`.
             self.session.click_at(line, col);
-            self.session.text_input('v');
-            self.session.text_input('i');
-            self.session.text_input('w');
+            if vim {
+                // Double click selects the word under the cursor, via the same
+                // motion the editor uses for `*`.
+                self.session.text_input('v');
+                self.session.text_input('i');
+                self.session.text_input('w');
+            } else {
+                // `viw` is three characters of *text* in standard editing —
+                // sending it here would type "viw" into the buffer.
+                self.session.select_word();
+            }
+        } else if ev.modifiers.alt && !vim {
+            // ⌥-click drops an extra caret instead of moving the one you have.
+            self.session.add_caret_at(line, col);
+        } else if ev.modifiers.platform || ev.modifiers.control {
+            // ⌘-click / ⌃-click jumps to the definition, the way every
+            // standard editor does it. Vim gets here with `gd`, which is still
+            // bound; this just makes the mouse work too.
+            self.session.click_at(line, col);
+            self.session.goto_definition();
+            self.follow_cursor();
         } else {
             self.session.click_at(line, col);
             self.dragging = true;
@@ -903,11 +946,22 @@ impl WaveView {
                         let (_, msg) = self.session.ws_delete(&rel);
                         self.status = msg;
                     }
+                    Prompt::GotoLine { text } => {
+                        // Record where we were, so ⌃- comes back from a jump
+                        // the same way it does from a go-to-definition.
+                        if let Ok(line) = text.trim().parse::<usize>() {
+                            self.session.jump_push();
+                            self.session.goto_line(line.max(1), 1);
+                            self.follow_cursor();
+                        }
+                    }
                     _ => {}
                 }
             }
             "backspace" => match &mut self.prompt {
-                Prompt::NewFile { text, .. } | Prompt::NewDir { text, .. } => {
+                Prompt::NewFile { text, .. }
+                | Prompt::NewDir { text, .. }
+                | Prompt::GotoLine { text } => {
                     text.pop();
                 }
                 _ => {}
@@ -917,6 +971,13 @@ impl WaveView {
                     match &mut self.prompt {
                         Prompt::NewFile { text, .. } | Prompt::NewDir { text, .. } => {
                             text.push_str(&t)
+                        }
+                        // Digits only: the prompt takes a line number, and
+                        // letting letters in just builds an unparseable string.
+                        Prompt::GotoLine { text } => {
+                            if t.chars().all(|c| c.is_ascii_digit()) {
+                                text.push_str(&t)
+                            }
                         }
                         _ => {}
                     }
@@ -940,6 +1001,7 @@ impl WaveView {
                 if dir.is_empty() { "" } else { "/" }
             )),
             Prompt::Delete { rel } => Some(format!("delete {rel}? (Enter / Esc)")),
+            Prompt::GotoLine { text } => Some(format!("go to line: {text}")),
         }
     }
 
@@ -956,6 +1018,7 @@ impl WaveView {
             Setting::SidebarWidth => format!("{} cols", self.session.side_cells()),
             Setting::Wrap => on_off(self.session.wrap()),
             Setting::NativeTitlebar => on_off(self.session.native_titlebar()),
+            Setting::VimMode => on_off(self.session.vim_enabled()),
         }
     }
 
@@ -996,6 +1059,9 @@ impl WaveView {
             }
             Setting::NativeTitlebar => {
                 self.session.toggle_titlebar();
+            }
+            Setting::VimMode => {
+                self.session.toggle_vim();
             }
         }
         // Type metrics may have moved; re-measure the advance.
@@ -1439,6 +1505,9 @@ impl WaveView {
             Cmd::ToggleWrap => {
                 self.session.toggle_wrap();
             }
+            Cmd::ToggleVim => {
+                self.session.toggle_vim();
+            }
             Cmd::ZoomIn => {
                 self.session.zoom(1);
             }
@@ -1634,7 +1703,9 @@ impl WaveView {
         let spans = self.session.line_spans(line);
         let diags = self.session.line_diagnostics(line);
         let matches = self.session.line_matches(line);
-        let selection = self.session.line_selection(line);
+        // Every selection on the line, not just the primary one: with ⌘D each
+        // extra caret carries its own.
+        let selections = self.session.line_selections(line);
 
         // One extra cell so a cursor parked past the last character has a slot.
         let mut cells = vec![Cell::default(); text.len() + 1];
@@ -1658,7 +1729,7 @@ impl WaveView {
                 cell.bg = Some(palette::match_bg());
             }
         }
-        if let Some((a, b)) = selection {
+        for &(a, b) in &selections {
             let end = b.min(text.len());
             for cell in cells.iter_mut().take(end).skip(a) {
                 cell.bg = Some(palette::selection_bg());
@@ -1739,7 +1810,12 @@ impl WaveView {
     fn render_editor(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let total = self.session.visual_rows();
         let (cur_row, cur_col) = self.session.cursor();
-        let insert_mode = self.session.mode() == Mode::Insert;
+        // Bar caret rather than a block. Standard editing always draws one: it
+        // is never "on" a character the way vim's NORMAL is, and it reports
+        // VISUAL while selecting, which would otherwise flip the caret to a
+        // block for the duration of every selection.
+        let insert_mode =
+            self.session.mode() == Mode::Insert || !self.session.vim_enabled();
         let last = (self.scroll + self.rows).min(total);
         let has_buffer = self.session.has_buffer();
 
@@ -1785,8 +1861,12 @@ impl WaveView {
             })
             .collect();
 
-        // Insert-mode caret, placed in the pane's own coordinate space.
-        let insert_caret = insert_mode.then(|| {
+        // Insert-mode caret, placed in the pane's own coordinate space. Drawn
+        // only on the visible half of the blink; `caret_on` is recomputed here
+        // rather than in the poll loop so a repaint for any other reason still
+        // shows the right phase.
+        self.caret_on = ffi::cursor_visible(now_secs(), self.last_activity);
+        let insert_caret = (insert_mode && self.caret_on).then(|| {
             let (vrow, vcol) = self.session.cursor_visual().unwrap_or((0, 0));
             let adv = self.advance.unwrap_or(ADVANCE_FALLBACK);
             let y = vrow.saturating_sub(self.scroll) as f32 * self.line_height;
@@ -1796,6 +1876,27 @@ impl WaveView {
                 .top(px(y + 2.0))
                 .child(caret(self.line_height - 4.0))
         });
+
+        // The ⌘D / ⌥-click carets. They blink with the primary one — carets
+        // out of phase with each other would read as a rendering fault.
+        let extra_carets: Vec<_> = if insert_mode && self.caret_on {
+            let adv = self.advance.unwrap_or(ADVANCE_FALLBACK);
+            let n = self.session.caret_count();
+            (0..n)
+                .filter_map(|i| self.session.caret_visual(i))
+                .filter(|(vrow, _)| *vrow >= self.scroll && *vrow < self.scroll + self.rows)
+                .map(|(vrow, vcol)| {
+                    let y = vrow.saturating_sub(self.scroll) as f32 * self.line_height;
+                    div()
+                        .absolute()
+                        .left(px(GUTTER_WIDTH + vcol as f32 * adv))
+                        .top(px(y + 2.0))
+                        .child(caret(self.line_height - 4.0))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         div()
             .flex()
@@ -1815,6 +1916,7 @@ impl WaveView {
             })
             .children(lines)
             .children(insert_caret)
+            .children(extra_carets)
     }
 
     // ---- terminal surface ----
@@ -2624,6 +2726,29 @@ impl WaveView {
         })
     }
 
+    /// Caret movement for standard (non-vim) editing, from the key plus its
+    /// modifiers. macOS conventions: ⌥ moves by word, ⌘ to the line or document
+    /// edge, Home/End to the line edge. Shift is not consulted here — it only
+    /// decides whether the motion extends the selection, which is the caller's
+    /// `extend` argument, so every binding works with and without it.
+    fn standard_motion(key: &str, m: &gpui::Modifiers) -> Option<Motion> {
+        Some(match key {
+            "left" if m.platform => Motion::LineStart,
+            "right" if m.platform => Motion::LineEnd,
+            "up" if m.platform => Motion::DocStart,
+            "down" if m.platform => Motion::DocEnd,
+            "left" if m.alt => Motion::WordLeft,
+            "right" if m.alt => Motion::WordRight,
+            "left" => Motion::Left,
+            "right" => Motion::Right,
+            "up" => Motion::Up,
+            "down" => Motion::Down,
+            "home" => Motion::LineStart,
+            "end" => Motion::LineEnd,
+            _ => return None,
+        })
+    }
+
     fn special_key(key: &str) -> Option<Key> {
         Some(match key {
             "backspace" => Key::Backspace,
@@ -2643,6 +2768,11 @@ impl WaveView {
         let key = ks.key.as_str();
         let typed = ks.key_char.clone();
         let plain = !ks.modifiers.platform && !ks.modifiers.control;
+        // Any key holds the caret solid, so it never blinks out mid-word. Set
+        // for every key, not just the ones that edit: arrowing around is just
+        // as much "the user is here" as typing is.
+        self.last_activity = now_secs();
+        self.caret_on = true;
 
         dbg(format_args!(
             "key={key:?} char={typed:?} cmd={} ctrl={} shift={} | tabs={} active={} kind={:?} term_active={}",
@@ -2950,6 +3080,10 @@ impl WaveView {
                         self.session.term_copy_selection()
                     } else if self.session.git_active() {
                         self.session.git_copy_selection()
+                    } else if !self.session.vim_enabled() {
+                        // Standard editing copies the whole line when nothing
+                        // is selected, rather than doing nothing.
+                        self.session.standard_copy()
                     } else {
                         self.session.selection_text()
                     };
@@ -2957,6 +3091,44 @@ impl WaveView {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
                         self.status = "copied".into();
                     }
+                }
+                // Cut. Vim has no ⌘X (`d`/`x` are the operators), so this is
+                // standard-editing only; like ⌘C it takes the line when there
+                // is no selection.
+                "x" if !self.session.vim_enabled() => {
+                    if let Some(text) = self.session.standard_cut() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        self.status = "cut".into();
+                    }
+                }
+                // Find in file. Vim reaches this with `/`, which in standard
+                // editing is just a slash.
+                "f" if !self.session.vim_enabled() => {
+                    self.session.buffer_search_open();
+                }
+                "/" if !self.session.vim_enabled() => {
+                    self.session.toggle_comment();
+                }
+                "k" if ks.modifiers.shift && !self.session.vim_enabled() => {
+                    self.session.delete_line();
+                }
+                // ⌘D adds a caret on the next occurrence; ⌘L takes whole lines.
+                "d" if !self.session.vim_enabled() => {
+                    self.session.select_next_occurrence();
+                }
+                "l" if !self.session.vim_enabled() => {
+                    self.session.select_line();
+                }
+                "enter" if !self.session.vim_enabled() => {
+                    self.session.insert_line(!ks.modifiers.shift);
+                }
+                "delete" if !self.session.vim_enabled() => {
+                    self.session.delete_to_line_end();
+                }
+                // Find next / previous. ⇧⌘G is Git view under vim, so this only
+                // claims it when vim is off — Git stays on the ⇧⌘P palette.
+                "g" if !self.session.vim_enabled() => {
+                    self.session.bufsearch_repeat(ks.modifiers.shift);
                 }
                 "v" => {
                     let Some(text) = cx
@@ -3017,6 +3189,14 @@ impl WaveView {
                         text: String::new(),
                     };
                 }
+                // ⌘⌫ deletes to the start of the line in a standard editor.
+                // In vim mode it keeps its existing meaning (delete the file),
+                // but taking that binding in standard editing would be actively
+                // dangerous: the muscle memory says "erase this line" and the
+                // app would offer to erase the file.
+                "backspace" if !self.session.vim_enabled() => {
+                    self.session.delete_to_line_start();
+                }
                 "backspace" => {
                     let rel = self.current_rel();
                     if !rel.is_empty() {
@@ -3041,6 +3221,19 @@ impl WaveView {
                 }
                 // Cmd-Shift-Tab / Cmd-Tab also cycle, for muscle memory.
                 "tab" => self.session.tab_goto(if ks.modifiers.shift { -1 } else { 1 }),
+                // Standard editing only: ⌘A selects the buffer and ⌘-arrows jump
+                // to the line/document edges. Under vim these stay unbound —
+                // `ggVG`, `0`, `$`, `gg` and `G` already do all of it, and
+                // claiming them would shadow nothing but muscle memory.
+                "a" if !self.session.vim_enabled() => {
+                    self.session.select_all();
+                }
+                _ if !self.session.vim_enabled()
+                    && Self::standard_motion(key, &ks.modifiers).is_some() =>
+                {
+                    let motion = Self::standard_motion(key, &ks.modifiers).unwrap();
+                    self.session.motion(motion, ks.modifiers.shift);
+                }
                 _ => return,
             }
             self.follow_cursor();
@@ -3171,6 +3364,77 @@ impl WaveView {
             }
         }
 
+        // Standard editing: keys that are not motions but must still be claimed
+        // before the plain special_key path below.
+        if !self.session.vim_enabled() && !ks.modifiers.platform && !ks.modifiers.control {
+            let handled = match key {
+                // Tab / ⇧Tab indent a selected block; otherwise they fall
+                // through to inserting a tab (and ⇧Tab does nothing).
+                "tab" => self.session.indent(ks.modifiers.shift),
+                // macOS word deletes.
+                "backspace" if ks.modifiers.alt => self.session.delete_word_left(),
+                "delete" if ks.modifiers.alt => self.session.delete_word_right(),
+                // Paging. The editor never handled these — only the terminal
+                // did — so a non-vim user had no way to page at all.
+                "pageup" | "pagedown" => {
+                    let dir = if key == "pageup" { -1 } else { 1 };
+                    let page = self.rows.saturating_sub(2).max(1);
+                    for _ in 0..page {
+                        self.session.motion(
+                            if dir < 0 { Motion::Up } else { Motion::Down },
+                            ks.modifiers.shift,
+                        );
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                self.follow_cursor();
+                cx.notify();
+                return;
+            }
+        }
+
+        // ⌥↑/↓ move the line, ⇧⌥↓ duplicates it. Claimed before the motion
+        // block below, which would otherwise read the ⌥ as a word motion.
+        if !self.session.vim_enabled() && ks.modifiers.alt && !ks.modifiers.platform {
+            match key {
+                "up" if ks.modifiers.shift => {
+                    self.session.duplicate_line();
+                    self.session.move_line(-1);
+                }
+                "down" if ks.modifiers.shift => {
+                    self.session.duplicate_line();
+                }
+                "up" => {
+                    self.session.move_line(-1);
+                }
+                "down" => {
+                    self.session.move_line(1);
+                }
+                _ => {}
+            }
+            if matches!(key, "up" | "down") {
+                self.follow_cursor();
+                cx.notify();
+                return;
+            }
+        }
+
+        // Standard editing: arrows (and their ⌥/Home/End relatives) are caret
+        // motions that shift turns into a selection. This has to come before
+        // the plain special_key path below, which has no notion of extending a
+        // selection and would drop the shift.
+        if !self.session.vim_enabled() && !ks.modifiers.control {
+            if let Some(motion) = Self::standard_motion(key, &ks.modifiers) {
+                self.session.motion(motion, ks.modifiers.shift);
+                self.follow_cursor();
+                cx.notify();
+                return;
+            }
+        }
+
         // Control-modified normal-mode keys. key_char is None with ctrl held,
         // so these never reach the codepoint path below.
         if ks.modifiers.control {
@@ -3191,6 +3455,23 @@ impl WaveView {
                         self.session.special_key(Key::Up);
                     }
                 }
+                // Go to line. Bound in both modes — vim's `:123` still works,
+                // but there is no reason ⌃G should not.
+                "g" => {
+                    self.prompt = Prompt::GotoLine { text: String::new() };
+                }
+                // Back / forward through the jump list. Until now a
+                // go-to-definition was a one-way trip in *either* mode.
+                "-" | "_" => {
+                    let dir = if ks.modifiers.shift { 1 } else { -1 };
+                    if !self.session.jump_go(dir) {
+                        self.status = if dir < 0 {
+                            "no earlier position".into()
+                        } else {
+                            "no later position".into()
+                        };
+                    }
+                }
                 _ => return,
             }
             self.follow_cursor();
@@ -3200,7 +3481,16 @@ impl WaveView {
 
         // Shift-Tab cycles tabs backwards outside insert mode, where Tab is
         // still an indent. Ctrl-Tab (above) works in every mode.
-        if key == "tab" && ks.modifiers.shift && self.session.mode() != Mode::Insert {
+        //
+        // Standard editing is excluded outright: it reports VISUAL whenever a
+        // selection is up, which is not "outside insert mode" in any sense the
+        // user would recognise — it would make Shift-Tab jump tabs only while
+        // text happened to be selected.
+        if key == "tab"
+            && ks.modifiers.shift
+            && self.session.vim_enabled()
+            && self.session.mode() != Mode::Insert
+        {
             self.session.tab_goto(-1);
             cx.notify();
             return;
@@ -3432,6 +3722,7 @@ impl Render for WaveView {
             TabKind::Git => ("GIT".to_string(), palette::accent()),
             TabKind::Editor => (self.session.mode_name(), mode_color),
         };
+        let has_mode_label = !mode_label.is_empty();
         let cursor_diag = self.session.cursor_diagnostic();
         let info = self.session.info();
         let detail = match kind {
@@ -3545,12 +3836,18 @@ impl Render for WaveView {
                     .gap(px(12.))
                     .bg(rgb(palette::status_bg()))
                     .text_color(rgb(palette::dim_fg()))
-                    .child(
-                        div()
-                            .pl(px(8.))
-                            .text_color(rgb(mode_color))
-                            .child(mode_label),
-                    )
+                    // Standard editing reports an empty mode name (there are no
+                    // modes to report); drop the chip rather than leave a gap,
+                    // and carry its left padding over to the detail text.
+                    .when(!has_mode_label, |d| d.pl(px(8.)))
+                    .when(has_mode_label, |d| {
+                        d.child(
+                            div()
+                                .pl(px(8.))
+                                .text_color(rgb(mode_color))
+                                .child(mode_label),
+                        )
+                    })
                     .child(div().child(detail))
                     .when(!info.is_empty(), |d| {
                         d.child(div().text_color(rgb(palette::default_fg())).child(info))
@@ -4476,6 +4773,16 @@ fn main() {
                                 // wrong in the field replaces the app and
                                 // relaunches it, taking the status bar with it.
                                 dbg(format_args!("update: {update:?}"));
+                                dirty = true;
+                            }
+                            // Caret blink. Repaint only on the half-second the
+                            // phase actually flips — this loop runs at 50 ms (8
+                            // with a live terminal), and notifying every tick
+                            // would redraw the whole window 125×/s to animate
+                            // two pixels.
+                            if ffi::cursor_visible(now_secs(), this.last_activity)
+                                != this.caret_on
+                            {
                                 dirty = true;
                             }
                             if dirty {

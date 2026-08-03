@@ -371,12 +371,29 @@ int editor_insert_encoded_text(Editor *e, const char *text) {
     return inserted;
 }
 
+/* How cursor/anchor become a range. Vim's VISUAL is *inclusive* — it always
+ * covers the character under the cursor, so `v` alone selects one character.
+ * Standard (non-vim) editors select caret-to-caret, so an unmoved caret selects
+ * nothing and a one-cell drag selects exactly one character.
+ *
+ * This is app-wide rather than per-Editor on purpose: it follows the `vim`
+ * setting, and a per-tab copy would have to be re-synced every time a tab is
+ * opened, split or restored — one missed spot and that tab silently selects an
+ * extra character. Same shape as theme_set(). */
+static int g_selection_exclusive = 0;
+
+void editor_set_selection_exclusive(int exclusive) {
+    g_selection_exclusive = exclusive != 0;
+}
+
+int editor_selection_exclusive(void) { return g_selection_exclusive; }
+
 int editor_visual_range(Editor *e, EditorRange *out) {
     if (!e || !e->buf || !out) return 0;
     const PieceTable *pt = buffer_pt(e->buf);
     size_t a = e->cursor < e->anchor ? e->cursor : e->anchor;
     size_t b = e->cursor < e->anchor ? e->anchor : e->cursor;
-    b = next_boundary(pt, b);
+    if (!g_selection_exclusive) b = next_boundary(pt, b);
     if (b <= a) return 0;
     out->start = a;
     out->end = b;

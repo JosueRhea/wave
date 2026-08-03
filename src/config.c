@@ -18,6 +18,7 @@ void wave_config_defaults(WaveConfig *cfg) {
     cfg->radius = 7.0f;
     cfg->blur = 0;
     cfg->native_titlebar = 1;
+    cfg->vim = 1;
     /* Applied, not just recorded: "Reset Settings to Defaults" has to repaint,
      * the same way loading a config with a theme= line does. */
     snprintf(cfg->theme, sizeof cfg->theme, "%s", theme_name(0));
@@ -52,6 +53,7 @@ int wave_config_save(const WaveConfig *cfg) {
     fprintf(f, "radius=%.1f\n", cfg->radius);
     fprintf(f, "blur=%d\n", cfg->blur);
     fprintf(f, "titlebar=%d\n", cfg->native_titlebar);
+    fprintf(f, "vim=%d\n", cfg->vim);
     fprintf(f, "theme=%s\n", cfg->theme);
     fclose(f);
     return 0;
@@ -76,6 +78,12 @@ int wave_config_toggle_wrap(WaveConfig *cfg) {
     if (!cfg) return 0;
     cfg->wrap = !cfg->wrap;
     return cfg->wrap;
+}
+
+int wave_config_toggle_vim(WaveConfig *cfg) {
+    if (!cfg) return 0;
+    cfg->vim = !cfg->vim;
+    return cfg->vim;
 }
 
 int wave_config_zoom_text(const WaveConfig *cfg, char *out, size_t cap) {
@@ -124,6 +132,7 @@ void wave_config_load(WaveConfig *cfg) {
             if (v >= 0.0f && v <= 24.0f) cfg->radius = v;
         } else if (!strcmp(key, "blur")) cfg->blur = atoi(val) != 0;
         else if (!strcmp(key, "titlebar")) cfg->native_titlebar = atoi(val) != 0;
+        else if (!strcmp(key, "vim")) cfg->vim = atoi(val) != 0;
         else if (!strcmp(key, "theme")) {
             /* Only a name the build actually has, so an old or hand-edited
              * config falls back to the default rather than to no colors. */

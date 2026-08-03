@@ -176,19 +176,61 @@ static void updater_emit(WaveUpdateCallback cb, int state, NSString *version,
     });
 }
 
+/* Release assets are named Wave-<version>-macos.dmg for Apple Silicon and
+ * Wave-<version>-x86_64.dmg for Intel. The Apple Silicon name is the historical
+ * one and holds the only "macos" — every Wave shipped before this function grew
+ * an architecture takes the first .dmg whose name contains "macos", so keeping
+ * that substring unique to arm64 is what stops those clients from ever choosing
+ * an Intel image. See the naming block in the Makefile. */
+static BOOL asset_is_intel(NSString *name) {
+    return [name containsString:@"x86_64"] || [name containsString:@"intel"];
+}
+
+static BOOL asset_is_arm(NSString *name) {
+    return [name containsString:@"arm64"] || [name containsString:@"aarch64"];
+}
+
+/* Pick the disk image built for *this* binary's architecture.
+ *
+ * The arch is taken at compile time on purpose: it describes the executable
+ * that is running, which is exactly what has to be replaced. Installing the
+ * wrong slice is not a degraded update but a broken one — an arm64 app will not
+ * launch at all on an Intel Mac — so a missing match returns nil (no update
+ * offered) rather than falling back to the other architecture.
+ *
+ * A consequence worth knowing: an Intel build running under Rosetta on Apple
+ * Silicon keeps updating to Intel builds instead of migrating to native arm64.
+ * That is the safe direction to be wrong in, and re-downloading moves them. */
 static NSURL *release_dmg_asset_url(NSDictionary *release) {
     NSArray *assets = release[@"assets"];
     if (![assets isKindOfClass:[NSArray class]]) return nil;
+#if defined(__x86_64__)
+    const BOOL want_intel = YES;
+#else
+    const BOOL want_intel = NO;
+#endif
+    NSURL *fallback = nil;
     for (NSDictionary *asset in assets) {
         if (![asset isKindOfClass:[NSDictionary class]]) continue;
         NSString *name = asset[@"name"];
         NSString *url = asset[@"browser_download_url"];
         if (![name isKindOfClass:[NSString class]] ||
             ![url isKindOfClass:[NSString class]]) continue;
-        if ([name hasSuffix:@".dmg"] && [name containsString:@"macos"])
-            return [NSURL URLWithString:url];
+        if (![name hasSuffix:@".dmg"]) continue;
+        if (want_intel) {
+            /* Not gated on "macos": the Intel asset deliberately does not carry
+             * that substring, so that older clients cannot match it. */
+            if (asset_is_intel(name)) return [NSURL URLWithString:url];
+        } else {
+            if (asset_is_arm(name)) return [NSURL URLWithString:url];
+            /* The plain "macos" image is the Apple Silicon one. Keep looking for
+             * an explicitly tagged arm64 asset in case a release adds one. */
+            if (!asset_is_intel(name) && [name containsString:@"macos"] &&
+                !fallback)
+                fallback = [NSURL URLWithString:url];
+        }
     }
-    return nil;
+    return fallback;
 }
 
 static void start_update_download(NSURL *url, NSString *version,

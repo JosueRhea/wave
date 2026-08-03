@@ -13,6 +13,24 @@ ZIG     ?= zig
 CFLAGS  ?= -std=c11 -O2 -g -Wall -Wextra -Wno-unused-parameter
 CFLAGS  += -Isrc -Ivendor -Ivendor/tree-sitter/lib/include -Ivendor/tree-sitter/lib/src
 
+# --- target architecture -------------------------------------------------------
+# Builds are per-arch. The default is the host, so a plain `make` is unchanged;
+# an Intel release is cross-compiled from Apple Silicon with:
+#   make release-macos ARCH=x86_64
+# Everything arch-dependent keys off ARCH: the object/output tree, the vendored
+# ripgrep, libghostty-vt, and the cargo target triple. A cross build never
+# touches the host build's artifacts, so both can sit in build/ side by side.
+HOST_ARCH := $(shell uname -m)
+ARCH      ?= $(HOST_ARCH)
+ifeq ($(ARCH),arm64)
+RUST_TARGET := aarch64-apple-darwin
+ZIG_TARGET  := aarch64-macos
+else
+RUST_TARGET := $(ARCH)-apple-darwin
+ZIG_TARGET  := $(ARCH)-macos
+endif
+CFLAGS += -arch $(ARCH)
+
 # GLFW via Homebrew; OpenGL + Cocoa frameworks for the window/context.
 # Link GLFW *statically* (the .a, by full path) so the shipped binary carries no
 # dependency on a Homebrew dylib — the .app must run on machines without brew,
@@ -33,11 +51,17 @@ LSP_STAMP     := $(LSP_DIR)/node_modules/typescript-language-server/lib/cli.mjs
 # Bundled ripgrep — vendored so project-wide content search (Cmd-Shift-F) works
 # out of the box. The prebuilt release for the host platform is downloaded and
 # its `rg` binary dropped into vendor/rg/.
+# Kept per-arch: `rg` is a native binary, and an arm64 one shipped inside an
+# Intel bundle does not run at all — project search would just be dead. The
+# host's copy stays at vendor/rg so an existing tree is not re-downloaded.
+ifeq ($(ARCH),$(HOST_ARCH))
 RG_DIR        := $(VENDOR)/rg
+else
+RG_DIR        := $(VENDOR)/rg-$(ARCH)
+endif
 RG_BIN        := $(RG_DIR)/rg
 RG_VERSION    := 14.1.1
-RG_ARCH       := $(shell uname -m)
-ifeq ($(RG_ARCH),arm64)
+ifeq ($(ARCH),arm64)
 RG_TARGET     := aarch64-apple-darwin
 else
 RG_TARGET     := x86_64-apple-darwin
@@ -57,14 +81,30 @@ TS_C_TAG      := v0.21.4
 TS_JS_TAG     := v0.21.4
 TS_TS_TAG     := v0.21.2
 
+# The host build keeps build/ to itself; a cross build nests under it, so the
+# two sets of single-arch objects cannot be mistaken for each other and `make
+# clean` still takes out both.
+ifeq ($(ARCH),$(HOST_ARCH))
 BUILD   := build
+else
+BUILD   := build/$(ARCH)
+endif
 BUILD_CONFIG := $(BUILD)/.config
 QUERY_DIR := queries
 USE_GHOSTTY_VT ?= 1
 USE_GHOSTTY_INTERNAL ?= 0
 GHOSTTY_DIR ?= $(VENDOR)/ghostty
 GHOSTTY_REPO ?= https://github.com/ghostty-org/ghostty.git
+# Per-arch, for the same reason the objects are: a static lib is single-arch and
+# the host's is already built at zig-out. A cross build gets its own prefix and
+# its own -Dtarget, and the two never overwrite each other.
+ifeq ($(ARCH),$(HOST_ARCH))
 GHOSTTY_VT_PREFIX ?= $(GHOSTTY_DIR)/zig-out
+GHOSTTY_VT_TARGET_ARG :=
+else
+GHOSTTY_VT_PREFIX ?= $(GHOSTTY_DIR)/zig-out-$(ARCH)
+GHOSTTY_VT_TARGET_ARG := -Dtarget=$(ZIG_TARGET)
+endif
 GHOSTTY_VT_LIB := $(GHOSTTY_VT_PREFIX)/lib/libghostty-vt.a
 GHOSTTY_VT_ARGS ?= -Demit-lib-vt -Dsimd=false -Doptimize=ReleaseFast
 GHOSTTY_INTERNAL_PREFIX ?= $(GHOSTTY_DIR)/macos/GhosttyKit.xcframework/macos-arm64
@@ -77,7 +117,7 @@ GHOSTTY_INTERNAL_FRAMEWORKS := -framework Metal -framework QuartzCore \
                                -framework Foundation -framework IOSurface \
                                -framework GameController -framework Carbon -lc++
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
-CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/complete.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
+CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/complete.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/standard.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
 # The updater's I/O half is Objective-C (NSURLSession + NSTask), so it is listed
 # separately from CORE_SRC's .c files — but it *is* core: both front-ends link it
@@ -110,7 +150,7 @@ GHOSTTY_GUI_LIBS += -Wl,-force_load,$(GHOSTTY_INTERNAL_LIB)
 GUI_LIBS += $(GHOSTTY_INTERNAL_FRAMEWORKS)
 endif
 
-TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view test_theme
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_standard test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view test_theme
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
 .PHONY: all app gpui test clean vendor lsp rg distclean icon bundle dist \
@@ -124,15 +164,44 @@ VERSION  ?= 0.1.20-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources
-DIST      := $(BUILD)/Wave-$(VERSION)-macos.zip
-DMG       := $(BUILD)/Wave-$(VERSION)-macos.dmg
+# Asset names, and the one rule that must not be broken: *only the Apple Silicon
+# image may contain the substring "macos"*.
+#
+# Every copy of Wave shipped before the arch-aware updater picks its download by
+# scanning for the first asset that ends in .dmg and contains "macos" — see
+# release_dmg_asset_url() in src/updater_mac.m. Those clients are already out
+# there and cannot be fixed retroactively, so the naming has to make the wrong
+# answer unreachable for them: keep "macos" out of every other arch's name and
+# they structurally cannot select it.
+#
+# Ordering is deliberately not part of the scheme. GitHub lists release assets
+# sorted by *name*, not upload order, and "-" (0x2D) sorts before "." (0x2E) —
+# so a Wave-<v>-macos-x86_64.dmg would list ahead of Wave-<v>-macos.dmg and be
+# the one every legacy client grabbed. Excluding "macos" is what makes the
+# result independent of that.
+ifeq ($(ARCH),arm64)
+ASSET     := Wave-$(VERSION)-macos
+else
+ASSET     := Wave-$(VERSION)-$(ARCH)
+endif
+DIST      := $(BUILD)/$(ASSET).zip
+DMG       := $(BUILD)/$(ASSET).dmg
 
 # Which front-end goes into Wave.app: the GPUI/Rust one (`gpui`, default) or the
 # original GLFW/C binary (`c`, i.e. `make bundle FRONTEND=c`). Both link the same
 # libwave.a and resolve queries/ + vendor/ relative to the executable, so the
 # bundle layout below is the same either way and only the copied binary differs.
 FRONTEND ?= gpui
+# cargo puts a --target'd build under target/<triple>/, and an untargeted one
+# straight in target/. The host build stays untargeted so its incremental cache
+# is untouched by a cross build.
+ifeq ($(ARCH),$(HOST_ARCH))
+CARGO_TARGET_ARG :=
 GPUI_BIN := rust/target/release/wave-gpui
+else
+CARGO_TARGET_ARG := --target $(RUST_TARGET)
+GPUI_BIN := rust/target/$(RUST_TARGET)/release/wave-gpui
+endif
 ifeq ($(FRONTEND),gpui)
 BUNDLE_BIN := $(GPUI_BIN)
 BUNDLE_DEP := gpui lsp rg
@@ -167,8 +236,11 @@ app: lsp rg $(BUILD)/wave
 # the shim (rust/shim/wave_ffi.c) is compiled by build.rs, which links the
 # libwave.a made here — so that has to exist first.
 gpui: $(BUILD)/libwave.a $(GHOSTTY_DEP)
-	@echo "  CARGO wave-gpui (release)"
-	@cd rust && WAVE_VERSION=$(VERSION) cargo build --release
+	@echo "  CARGO wave-gpui (release, $(ARCH))"
+	@cd rust && WAVE_VERSION=$(VERSION) \
+	    WAVE_LIB_DIR=$(abspath $(BUILD)) \
+	    WAVE_GHOSTTY_PREFIX=$(abspath $(GHOSTTY_VT_PREFIX)) \
+	    cargo build --release $(CARGO_TARGET_ARG)
 
 # Install the bundled TS/JS language server into vendor/lsp (prefers bun, the
 # project's standard runtime; falls back to npm). Idempotent.
@@ -211,8 +283,9 @@ $(GHOSTTY_DIR)/build.zig:
 $(GHOSTTY_VT_LIB): $(GHOSTTY_DIR)/build.zig
 	@command -v $(ZIG) >/dev/null 2>&1 || \
 	    (echo "zig is required to build libghostty-vt; install Zig 0.15.2+"; exit 1)
-	@echo "  GHOSTTY-VT libghostty-vt"
-	@cd $(GHOSTTY_DIR) && $(ZIG) build $(GHOSTTY_VT_ARGS)
+	@echo "  GHOSTTY-VT libghostty-vt ($(ARCH))"
+	@cd $(GHOSTTY_DIR) && $(ZIG) build $(GHOSTTY_VT_ARGS) \
+	    $(GHOSTTY_VT_TARGET_ARG) --prefix $(abspath $(GHOSTTY_VT_PREFIX))
 
 $(TS_DIR)/lib/src/lib.c:
 	@echo "  GIT   tree-sitter $(TS_TAG)"
@@ -407,7 +480,7 @@ zip-app:
 
 # Build the bundle, then zip it, for a GitHub release asset.
 dist: bundle
-	@$(MAKE) zip-app
+	@$(MAKE) zip-app ARCH=$(ARCH)
 
 # Submit the (Developer ID-signed) app to Apple's notary service and staple the
 # ticket onto Wave.app, so a downloaded copy opens with no Gatekeeper warning —
@@ -461,9 +534,9 @@ dmg:
 # .dmg that is itself notarized + stapled. Two submissions, because the app and
 # the disk image are assessed separately — the result opens offline, no warnings.
 release-macos:
-	@$(MAKE) bundle
-	@$(MAKE) notarize
-	@$(MAKE) dmg
-	@$(MAKE) notarize-dmg
-	@$(MAKE) zip-app
-	@echo "  DONE  $(DMG) + $(DIST) (notarized + stapled)"
+	@$(MAKE) bundle ARCH=$(ARCH)
+	@$(MAKE) notarize ARCH=$(ARCH)
+	@$(MAKE) dmg ARCH=$(ARCH)
+	@$(MAKE) notarize-dmg ARCH=$(ARCH)
+	@$(MAKE) zip-app ARCH=$(ARCH)
+	@echo "  DONE  $(DMG) + $(DIST) (notarized + stapled, $(ARCH))"

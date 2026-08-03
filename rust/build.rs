@@ -13,6 +13,19 @@ fn main() {
         .expect("crate lives one level under the repo root")
         .to_path_buf();
 
+    // Where the C half of this build put its single-arch artifacts. The Makefile
+    // overrides both when cross-compiling (build/<arch>, zig-out-<arch>); a bare
+    // `cargo build` keeps the host layout. Getting these wrong does not fail the
+    // build — it links the *other* architecture's archive and ld reports an
+    // undefined-symbol wall, so they are read from the environment rather than
+    // guessed from TARGET.
+    let lib_dir = std::env::var("WAVE_LIB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| root.join("build"));
+    let ghostty_prefix = std::env::var("WAVE_GHOSTTY_PREFIX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| root.join("vendor/ghostty/zig-out"));
+
     // The version this build reports to the updater. The Makefile passes its own
     // VERSION so the release binary and the bundle's Info.plist agree; a bare
     // `cargo build` falls back to the crate version. Either way an installed
@@ -28,7 +41,7 @@ fn main() {
         .include(root.join("src"))
         .include(root.join("vendor"))
         .include(root.join("vendor/tree-sitter/lib/include"))
-        .include(root.join("vendor/ghostty/zig-out/include"))
+        .include(ghostty_prefix.join("include"))
         .define("WAVE_USE_GHOSTTY_VT", None)
         .define("GHOSTTY_STATIC", None)
         .define("WAVE_VERSION", format!("\"{version}\"").as_str())
@@ -44,11 +57,11 @@ fn main() {
     // launch with "no LC_RPATH's found".
     println!(
         "cargo:rustc-link-arg={}",
-        root.join("build/libwave.a").display()
+        lib_dir.join("libwave.a").display()
     );
     println!(
         "cargo:rustc-link-arg={}",
-        root.join("vendor/ghostty/zig-out/lib/libghostty-vt.a").display()
+        ghostty_prefix.join("lib/libghostty-vt.a").display()
     );
 
     // What the Makefile's TEST_LIBS links for the headless core.
@@ -74,9 +87,11 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=WAVE_VERSION");
+    println!("cargo:rerun-if-env-changed=WAVE_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=WAVE_GHOSTTY_PREFIX");
     println!("cargo:rerun-if-changed=shim/wave_ffi.c");
     println!(
         "cargo:rerun-if-changed={}",
-        root.join("build/libwave.a").display()
+        lib_dir.join("libwave.a").display()
     );
 }

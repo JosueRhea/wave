@@ -18,12 +18,20 @@ typedef struct {
 } EditOp;
 typedef struct { EditOp *v; int n, cap; } OpStack;
 
+/* Extra carets beyond the editor's own `cursor`/`anchor` — see standard.h. The
+ * storage lives here because it is per-buffer state that has to survive a tab
+ * switch, but only standard.c reads or writes it. */
+#define EDITOR_MAX_EXTRA_CARETS 64
+
 typedef struct {
     Buffer *buf;
     Highlighter *hl;
     char *path;
     size_t cursor;
     size_t anchor;
+    size_t extra_anchor[EDITOR_MAX_EXTRA_CARETS];
+    size_t extra_cursor[EDITOR_MAX_EXTRA_CARETS];
+    size_t extra_n;
     float scroll_y;
     size_t seen_cursor;
     int dirty;
@@ -116,6 +124,9 @@ void ed_insert(Editor *e, const char *s, size_t n);
 void ed_insert_at(Editor *e, size_t pos, const char *text, size_t len);
 void ed_delete_range(Editor *e, size_t a, size_t b);
 int editor_insert_encoded_text(Editor *e, const char *text);
+/* Caret-to-caret (standard) vs vim's inclusive VISUAL. App-wide; see editor.c. */
+void editor_set_selection_exclusive(int exclusive);
+int editor_selection_exclusive(void);
 int editor_visual_range(Editor *e, EditorRange *out);
 int editor_line_range(Editor *e, EditorRange *out);
 char *editor_copy_text(Editor *e, int visual_mode);
