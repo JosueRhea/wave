@@ -147,6 +147,31 @@ Also: lines are truncated at 4 KiB on read, and the completion menu is the one
 thing positioned with a hard-coded character advance (`ADVANCE`), since it has
 to track a text position rather than flow in the layout.
 
+### Menus
+
+GPUI installs no default app menu — the whole bar comes from `set_menus` in
+`main`, and before 0.1.19 the only item registered was Quit. Items dispatch
+[`actions!`](https://docs.rs/gpui) types down the focus chain, which `WaveView`
+picks up in the `menu_actions!` block; each one runs the palette `Cmd` of the
+same name, so the two lists cannot drift.
+
+None of them carry key bindings. The Cmd- shortcuts are read straight off the
+key event in `on_key`, and a `KeyBinding` would dispatch the action *as well* —
+two open panels, two closed tabs. macOS therefore shows the menu items without
+shortcut hints; the palette is where shortcuts are advertised.
+
+The menu bar can be read back without a screenshot, which is how it is checked:
+
+```sh
+osascript -e 'tell application "System Events" to tell process "wave-gpui" \
+  to get name of every menu bar item of menu bar 1'
+# Apple, wave-gpui, File, Find, View, Window
+```
+
+Clicking one only dispatches if the app is frontmost (`set frontmost … to true`
+first, or the action goes nowhere) — true for any real click, easy to trip over
+when driving it from a script.
+
 ### One constraint worth knowing
 
 `Diagnostic.message` is a non-owning `const char *`, so `diagnostic_from_lsp()`

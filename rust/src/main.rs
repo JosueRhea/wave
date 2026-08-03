@@ -19,7 +19,7 @@ use frontend_config::FrontendConfig;
 use gpui::{
     actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, ClickEvent,
     ClipboardItem, Context, CursorStyle, FocusHandle, HighlightStyle, KeyBinding, KeyDownEvent,
-    Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
+    Div, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
     FontStyle, FontWeight, ScrollWheelEvent, StyledText, SystemMenuType, Timer, TitlebarOptions,
     UnderlineStyle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions,
@@ -30,7 +30,45 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-actions!(wave, [Quit]);
+// Menu-bar actions. Each one runs the `Cmd` of the same name, wired up by the
+// `menu_actions!` block further down.
+//
+// Deliberately *not* given key bindings. The Cmd- shortcuts are handled in
+// `WaveView::on_key`, straight from the key event; binding them here as well
+// would dispatch the action too and run everything twice — two open panels,
+// two closed tabs. The shortcuts still work; the ⇧⌘P palette is where they
+// are advertised.
+actions!(
+    wave,
+    [
+        Quit,
+        CheckUpdates,
+        InstallCli,
+        Settings,
+        OpenFile,
+        OpenFolder,
+        RecentProjects,
+        CloseProject,
+        NewFile,
+        NewFolder,
+        SaveFile,
+        CloseTab,
+        FindFile,
+        ProjectSearch,
+        BufferSearch,
+        NewTerminal,
+        GitView,
+        ChooseTheme,
+        ChooseFont,
+        ToggleSidebar,
+        ToggleWrap,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        NextTab,
+        PrevTab,
+    ]
+);
 
 /// How often to drain async work (server replies, pty output, ripgrep).
 const POLL: Duration = Duration::from_millis(50);
@@ -3195,6 +3233,54 @@ fn overlay_panel(
         )
 }
 
+/// Attach one `on_action` handler per menu-bar action, each running the palette
+/// command of the same name. Written as a macro so the pairing is one readable
+/// line per item instead of a five-line closure — and so a menu item that names
+/// a command the palette does not have will not compile.
+macro_rules! menu_actions {
+    ($($action:ident -> $cmd:ident),* $(,)?) => {
+        impl WaveView {
+            fn bind_menu_actions(el: Div, cx: &mut Context<Self>) -> Div {
+                el $(
+                    .on_action(cx.listener(|this: &mut Self, _: &$action, window, cx| {
+                        this.run_cmd(Cmd::$cmd, window, cx);
+                    }))
+                )*
+            }
+        }
+    };
+}
+
+// Quit is missing on purpose: it is registered globally in `main`, so it still
+// works with no window focused, which is exactly when you need it.
+menu_actions! {
+    CheckUpdates -> CheckUpdates,
+    InstallCli -> InstallCli,
+    Settings -> Settings,
+    OpenFile -> OpenFile,
+    OpenFolder -> OpenFolder,
+    RecentProjects -> RecentProjects,
+    CloseProject -> CloseProject,
+    NewFile -> NewFile,
+    NewFolder -> NewFolder,
+    SaveFile -> SaveFile,
+    CloseTab -> CloseTab,
+    FindFile -> FindFile,
+    ProjectSearch -> ProjectSearch,
+    BufferSearch -> BufferSearch,
+    NewTerminal -> NewTerminal,
+    GitView -> GitView,
+    ChooseTheme -> ChooseTheme,
+    ChooseFont -> ChooseFont,
+    ToggleSidebar -> ToggleSidebar,
+    ToggleWrap -> ToggleWrap,
+    ZoomIn -> ZoomIn,
+    ZoomOut -> ZoomOut,
+    ZoomReset -> ZoomReset,
+    NextTab -> NextTab,
+    PrevTab -> PrevTab,
+}
+
 impl Render for WaveView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // `window.focus()` at construction can be lost if the window was not yet
@@ -3349,6 +3435,9 @@ impl Render for WaveView {
             .key_context("Wave")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            // Menu actions dispatch down the focus chain, and this is the
+            // focused element, so the whole menu bar lands here.
+            .map(|el| Self::bind_menu_actions(el, cx))
             .size_full()
             .relative()
             .flex()
@@ -4157,18 +4246,77 @@ fn main() {
         load_bundled_fonts(&ts);
         load_user_fonts(&ts);
 
-        // Without a registered menu + keybinding, macOS has no Quit item and
-        // Cmd-Q does nothing — GPUI installs no default app menu.
+        // GPUI installs no default app menu at all: without this the menu bar
+        // is an empty "Wave" title and Cmd-Q does nothing. The GLFW front-end
+        // builds its menus in mac.m, which this build does not link.
+        //
+        // Only Quit is bound to a key here. The rest of the Cmd- shortcuts are
+        // handled in `WaveView::on_key`; see the note on `actions!`.
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-        cx.set_menus(vec![Menu {
-            name: "Wave".into(),
-            items: vec![
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit Wave", Quit),
-            ],
-        }]);
+        cx.set_menus(vec![
+            Menu {
+                name: "Wave".into(),
+                items: vec![
+                    MenuItem::action("Check for Updates…", CheckUpdates),
+                    MenuItem::separator(),
+                    MenuItem::action("Settings…", Settings),
+                    MenuItem::action("Install wave Command in PATH", InstallCli),
+                    MenuItem::separator(),
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Wave", Quit),
+                ],
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("Open File…", OpenFile),
+                    MenuItem::action("Open Folder…", OpenFolder),
+                    MenuItem::action("Recent Projects", RecentProjects),
+                    MenuItem::separator(),
+                    MenuItem::action("New File", NewFile),
+                    MenuItem::action("New Folder", NewFolder),
+                    MenuItem::separator(),
+                    MenuItem::action("Save File", SaveFile),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Tab", CloseTab),
+                    MenuItem::action("Close Project", CloseProject),
+                ],
+            },
+            Menu {
+                name: "Find".into(),
+                items: vec![
+                    MenuItem::action("Find File", FindFile),
+                    MenuItem::action("Find in File", BufferSearch),
+                    MenuItem::action("Search in Project", ProjectSearch),
+                ],
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::action("Toggle Soft Wrap", ToggleWrap),
+                    MenuItem::separator(),
+                    MenuItem::action("Change Theme…", ChooseTheme),
+                    MenuItem::action("Change Font…", ChooseFont),
+                    MenuItem::separator(),
+                    MenuItem::action("Zoom In", ZoomIn),
+                    MenuItem::action("Zoom Out", ZoomOut),
+                    MenuItem::action("Reset Zoom", ZoomReset),
+                ],
+            },
+            Menu {
+                name: "Window".into(),
+                items: vec![
+                    MenuItem::action("Next Tab", NextTab),
+                    MenuItem::action("Previous Tab", PrevTab),
+                    MenuItem::separator(),
+                    MenuItem::action("New Terminal", NewTerminal),
+                    MenuItem::action("Git Changes", GitView),
+                ],
+            },
+        ]);
 
         let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
         cx.open_window(
@@ -4215,6 +4363,10 @@ fn main() {
                             }
                             if let Some(update) = ffi::update_poll() {
                                 this.status = update_status_line(&update);
+                                // Traced as well as shown: an update that goes
+                                // wrong in the field replaces the app and
+                                // relaunches it, taking the status bar with it.
+                                dbg(format_args!("update: {update:?}"));
                                 dirty = true;
                             }
                             if dirty {
