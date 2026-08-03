@@ -171,6 +171,31 @@ Clicking one only dispatches if the app is frontmost (`set frontmost … to true
 first, or the action goes nowhere) — true for any real click, easy to trip over
 when driving it from a script.
 
+### Terminal cost
+
+A live terminal is polled at `POLL_TERM` (8 ms), everything else at `POLL`
+(50 ms). LSP replies and ripgrep hits can wait; a TUI cannot — at 50 ms every
+character it draws waits up to a frame and a half before Wave even reads it,
+on top of whatever the program took.
+
+That is affordable only because the C side stopped rebuilding the screen per
+read. `terminal_poll` drains the pty in 4 KiB chunks, and each chunk used to
+trigger a full sweep of every visible cell; a burst of output meant hundreds of
+rebuilds, all but the last thrown away unseen. It now feeds the VT in the loop
+and rebuilds once at the end. Style runs are also coalesced in `terminal.c`, so
+a line arrives as a handful of entries rather than one per column — 4800 cells
+came back as 79 runs in a 40x120 measurement, and that is what this front-end
+walks for every visible line on every frame.
+
+Flooding a terminal with `yes` and sampling the process:
+
+```
+before:  84-99 % CPU   (saturating a core)
+after:   28-32 % CPU
+```
+
+The remainder is Ghostty parsing the stream, which is real work.
+
 ### Wheel handling
 
 Every scrolling surface folds pixel deltas into a `*_accum` and acts on whole

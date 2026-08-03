@@ -213,5 +213,42 @@ int main(void) {
     poll_terminal_until_done(&t);
     terminal_free(&t);
 
+    /* Cells with the same colours collapse into one style run.
+     *
+     * One entry per cell is what the front-end walks on every frame, and the
+     * FFI only carries 256 of them — so an uncoalesced 300-column terminal lost
+     * its styling partway across. A uniformly coloured line must come back as
+     * a couple of runs, not one per column. */
+    terminal_init(&t);
+    terminal_resize(&t, 10, 300);
+    const char *wide_argv[] = {
+        "/bin/sh", "-lc", "printf '\\033[31m'; printf 'y%.0s' $(seq 1 280); printf '\\033[0m\\n'",
+        NULL
+    };
+    CHECK(terminal_spawn(&t, "wide", ".", wide_argv));
+    poll_terminal_until_done(&t);
+    for (size_t i = 0; i < t.nlines; i++) {
+        const char *line = terminal_line(&t, i);
+        if (strncmp(line, "yyy", 3) != 0) continue;
+        const TerminalLineStyle *style = terminal_line_style(&t, i);
+        CHECK(style != NULL);
+        /* 280 identical cells, and the trailing blanks: a handful of runs. */
+        CHECK(style->ncells < 8);
+        /* Still red past column 256, which is what used to be dropped. */
+        CHECK(terminal_contains_red_style(&t, "yyy"));
+        /* A column *inside* a run still maps to the right byte. Selection is
+         * what does that mapping, and it used to be able to assume one entry
+         * per column — coalescing means it has to index into a run instead. */
+        terminal_selection_begin(&t, i, 100);
+        terminal_selection_update(&t, i, 200);
+        terminal_selection_end(&t);
+        char *mid = terminal_copy_selection(&t);
+        CHECK(mid != NULL);
+        CHECK_EQ((int)strlen(mid), 100);
+        free(mid);
+        break;
+    }
+    terminal_free(&t);
+
     TEST_REPORT();
 }

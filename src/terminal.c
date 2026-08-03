@@ -34,11 +34,42 @@ static void terminal_line_style_free(TerminalLineStyle *style) {
     style->cap_cells = 0;
 }
 
+static int terminal_color_eq(TerminalColor a, TerminalColor b) {
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
 static int terminal_line_style_push(TerminalLineStyle *style, size_t col_start,
                                     size_t col_len, size_t byte_start,
                                     size_t byte_len, TerminalColor fg,
                                     TerminalColor bg, int has_fg, int has_bg) {
     if (!style || col_len == 0) return 1;
+    /* Extend the run in progress when this cell looks the same as the last.
+     *
+     * The caller pushes cell by cell, and a terminal line is a handful of runs
+     * wearing 120 cells' worth of entries otherwise. That cost is paid on every
+     * rebuild and again by the front-end on every frame — and the FFI hands the
+     * front-end at most 256 entries, so without this a terminal wider than 256
+     * columns silently lost all styling past that column.
+     *
+     * Only runs of one byte per column are merged. The entries are also how a
+     * display column is turned back into a byte offset (terminal_byte_for_col,
+     * for the cursor and for selections), and that is only recoverable inside a
+     * run when the two advance together — so a multi-byte cell stays its own
+     * entry rather than hiding its width inside a longer run. */
+    if (style->ncells && byte_len == col_len) {
+        TerminalCellStyle *last = &style->cells[style->ncells - 1];
+        if (last->byte_len == last->col_len &&
+            (int)last->has_fg == (has_fg ? 1 : 0) &&
+            (int)last->has_bg == (has_bg ? 1 : 0) &&
+            (!has_fg || terminal_color_eq(last->fg, fg)) &&
+            (!has_bg || terminal_color_eq(last->bg, bg)) &&
+            last->col_start + last->col_len == col_start &&
+            last->byte_start + last->byte_len == byte_start) {
+            last->col_len += col_len;
+            last->byte_len += byte_len;
+            return 1;
+        }
+    }
     if (style->ncells == style->cap_cells) {
         size_t nc = style->cap_cells ? style->cap_cells * 2 : 64;
         TerminalCellStyle *next = realloc(style->cells, nc * sizeof *next);
@@ -196,10 +227,13 @@ static void terminal_append_line_styled(Terminal *t, const char *line,
     }
 }
 
+/* Hand bytes to the VT. Deliberately does *not* rebuild the rendered lines:
+ * that is a full sweep of every visible cell, and a poll can feed dozens of
+ * chunks before it returns. terminal_poll syncs once at the end instead, when
+ * the VT state is final — every intermediate rebuild was thrown away unseen. */
 static void terminal_feed(Terminal *t, const char *s, size_t n) {
     if (!t || !t->ghostty_enabled || !t->ghostty_terminal) return;
     ghostty_terminal_vt_write(t->ghostty_terminal, (const uint8_t *)s, n);
-    terminal_ghostty_sync_cells(t);
 }
 
 static int terminal_argc(const char *const argv[], int max_args) {
@@ -309,10 +343,12 @@ void terminal_stop(Terminal *t) {
 void terminal_poll(Terminal *t) {
     if (!t || t->fd < 0) return;
     char buf[4096];
+    int fed = 0;
     for (;;) {
         ssize_t n = read(t->fd, buf, sizeof buf);
         if (n > 0) {
             terminal_feed(t, buf, (size_t)n);
+            fed = 1;
             continue;
         }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
@@ -322,6 +358,8 @@ void terminal_poll(Terminal *t) {
             break;
         }
     }
+    /* One rebuild for everything read, however many chunks that took. */
+    if (fed) terminal_ghostty_sync_cells(t);
     if (t->pid > 0) {
         int status = 0;
         pid_t got = waitpid(t->pid, &status, WNOHANG);
@@ -565,6 +603,11 @@ static size_t terminal_byte_for_col(const Terminal *t, size_t row, int col) {
         size_t best = len;
         for (size_t i = 0; i < style->ncells; i++) {
             const TerminalCellStyle *cell = &style->cells[i];
+            /* A column inside a run, which coalescing made possible. Runs only
+             * ever cover single-byte cells, so the offset is exact. */
+            if ((size_t)col > cell->col_start &&
+                (size_t)col < cell->col_start + cell->col_len)
+                return cell->byte_start + ((size_t)col - cell->col_start);
             if ((int)cell->col_start >= col) {
                 if (cell->byte_start < best) best = cell->byte_start;
             }
@@ -815,6 +858,14 @@ static void terminal_ghostty_cell_style(Terminal *t, TerminalLineStyle *style,
                                    byte_len, fg, bg, has_fg, has_bg);
 }
 
+/* Blank the leading "?" of Claude Code's "? for shortcuts" hint.
+ *
+ * The exact-offset lookup only finds the marker when it begins a style run,
+ * which is the case that matters: a "?" styled differently from its neighbours
+ * starts one. When it is styled the same as the text around it the run now
+ * covers all of them (see terminal_line_style_push), and leaving it alone is
+ * the better answer anyway — clearing one cell mid-run would punch a hole in a
+ * shared background. */
 static void terminal_suppress_shortcuts_marker(char *line,
                                                TerminalLineStyle *style) {
     if (!line || !strstr(line, "for shortcuts")) return;

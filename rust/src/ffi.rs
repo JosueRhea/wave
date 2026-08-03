@@ -856,19 +856,21 @@ impl Session {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
+    /// Style runs for a terminal line. Called for every visible line on every
+    /// frame, so the staging buffer is on the stack — a heap allocation per
+    /// line per frame is pure churn, and `terminal.c` coalesces adjacent cells
+    /// with the same colours so `n` is a handful of runs, not one per column.
     pub fn term_line_styles(&self, index: usize) -> Vec<CellStyle> {
-        let mut raw = vec![
-            WaveCellStyleRaw {
-                start_byte: 0,
-                end_byte: 0,
-                fg: COLOR_DEFAULT,
-                bg: COLOR_DEFAULT,
-            };
-            256
-        ];
-        let n = unsafe { wave_term_line_styles(self.raw, index, raw.as_mut_ptr(), raw.len()) };
-        raw.truncate(n);
-        raw.into_iter()
+        const CAP: usize = 256;
+        let mut raw = [WaveCellStyleRaw {
+            start_byte: 0,
+            end_byte: 0,
+            fg: COLOR_DEFAULT,
+            bg: COLOR_DEFAULT,
+        }; CAP];
+        let n = unsafe { wave_term_line_styles(self.raw, index, raw.as_mut_ptr(), CAP) };
+        raw[..n]
+            .iter()
             .map(|c| CellStyle {
                 start_byte: c.start_byte,
                 end_byte: c.end_byte,

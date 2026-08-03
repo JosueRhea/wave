@@ -71,7 +71,14 @@ actions!(
 );
 
 /// How often to drain async work (server replies, pty output, ripgrep).
+///
+/// A language server reply or a ripgrep hit can wait; a terminal cannot. At
+/// 50 ms every character a TUI draws waits up to a frame and a half before it
+/// is even read, and that latency is on top of whatever the program took —
+/// which is what "the terminal feels slow" is. So a live terminal gets polled
+/// at roughly display rate and everything else stays lazy.
 const POLL: Duration = Duration::from_millis(50);
+const POLL_TERM: Duration = Duration::from_millis(8);
 
 /// Fallbacks until the config is read; the live values live on WaveView.
 const TEXT_SIZE_DEFAULT: f32 = 13.0;
@@ -4432,9 +4439,20 @@ fn main() {
                     // paths Finder asks for, which is why the open-URL handler
                     // can be a plain queue instead of holding a window handle.
                     let opened = opened.clone();
-                    cx.spawn(async move |this, cx| loop {
-                        Timer::after(POLL).await;
+                    cx.spawn(async move |this, cx| {
+                        let mut interval = POLL;
+                        loop {
+                        Timer::after(interval).await;
                         let polled = this.update(cx, |this: &mut WaveView, cx| {
+                            // Set from what is on screen, not from what was
+                            // read: a TUI waiting on input produces nothing for
+                            // seconds at a time and still has to answer the
+                            // next keystroke promptly.
+                            interval = if this.session.term_running() {
+                                POLL_TERM
+                            } else {
+                                POLL
+                            };
                             for path in opened.borrow_mut().drain(..) {
                                 dbg(format_args!("open from Finder: {path:?}"));
                                 this.open_path(&path, cx);
@@ -4466,6 +4484,7 @@ fn main() {
                         });
                         if polled.is_err() {
                             break;
+                        }
                         }
                     })
                     .detach();
