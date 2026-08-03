@@ -140,7 +140,6 @@ contiguous ranges just before rendering.
 |---|---|
 | Sidebar rename | `ws_paste_path_into` is bound but has no UI |
 | Signature help | `lsp_manager_request_signature_help` unbound |
-| Terminal / git-diff selection + copy | `terminal_copy_selection`, `git_view_copy_diff_selection` |
 | Finder / `open -a` file opening | GPUI exposes `on_open_urls` only; `mac.m`'s `application:openFiles:` has no equivalent here, so the CLI shim execs the binary rather than going through `open` |
 
 Also: lines are truncated at 4 KiB on read, and the completion menu is the one
@@ -171,6 +170,30 @@ osascript -e 'tell application "System Events" to tell process "wave-gpui" \
 Clicking one only dispatches if the app is frontmost (`set frontmost … to true`
 first, or the action goes nowhere) — true for any real click, easy to trip over
 when driving it from a script.
+
+### Wheel handling
+
+Every scrolling surface folds pixel deltas into a `*_accum` and acts on whole
+lines (`take_lines`). A trackpad delivers many sub-line deltas; rounding each
+one on its own throws away everything under a line and the gesture feels stuck.
+The terminal and the git diff were missing this and were visibly janky.
+
+The terminal also counts the other way. `take_lines` returns the editor's
+convention — positive means "show later content", the first-visible-line index
+going up — but `terminal_scroll` takes lines *back* into scrollback, so the
+terminal handler negates it. Passing the editor's sign straight through is what
+made the terminal wheel run backwards.
+
+With the Ghostty backend the viewport lives inside the VT, so
+`term_visible_start` stays 0 and nothing about the scroll position is visible
+from the outside. `WAVE_DEBUG=1` logs the top visible line on each wheel event,
+which is the only way to see which way it actually went:
+
+```
+term wheel -3 -> top line "169"   # scrolling up, into earlier output
+term wheel -3 -> top line "166"
+term wheel +3 -> top line "169"   # and back down
+```
 
 ### One constraint worth knowing
 

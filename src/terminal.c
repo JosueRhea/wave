@@ -98,7 +98,16 @@ void terminal_init(Terminal *t) {
     }
 }
 
-static void terminal_clear_lines(Terminal *t) {
+/* Drop the rendered lines and nothing else.
+ *
+ * The Ghostty path rebuilds every visible row from the viewport on each sync,
+ * which happens on every poll that saw output — so anything torn down here is
+ * torn down many times a second. That is why the selection is *not* touched:
+ * clearing it here meant a drag over a redrawing TUI (Claude Code, codex) was
+ * wiped before it could be seen, which read as "the terminal is not
+ * selectable". Scroll does get reset, because with Ghostty the viewport lives
+ * inside the VT and `t->scroll` has to stay 0 for terminal_visible_start. */
+static void terminal_free_lines(Terminal *t) {
     if (!t) return;
     for (size_t i = 0; i < t->nlines; i++) free(t->lines[i]);
     for (size_t i = 0; i < t->nlines; i++)
@@ -112,6 +121,14 @@ static void terminal_clear_lines(Terminal *t) {
     t->scroll = 0;
     t->current_len = 0;
     t->current[0] = '\0';
+}
+
+/* Full teardown: the lines *and* the state that refers to them. For freeing a
+ * terminal or respawning into a new one, where a selection over the old
+ * contents would be meaningless. */
+static void terminal_clear_lines(Terminal *t) {
+    if (!t) return;
+    terminal_free_lines(t);
     terminal_selection_clear(t);
 }
 
@@ -862,7 +879,7 @@ static void terminal_ghostty_sync_cells(Terminal *t) {
                                  &t->ghostty_row_iter) != GHOSTTY_SUCCESS)
         return;
 
-    terminal_clear_lines(t);
+    terminal_free_lines(t);
     while (ghostty_render_state_row_iterator_next(t->ghostty_row_iter)) {
         if (ghostty_render_state_row_get(
                 t->ghostty_row_iter, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS,

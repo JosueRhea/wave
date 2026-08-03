@@ -189,6 +189,28 @@ int main(void) {
     CHECK(selected != NULL);
     CHECK_STR(selected, "ed");
     free(selected);
+
+    /* A selection has to survive the screen being redrawn under it.
+     *
+     * The Ghostty path rebuilds every visible row on each sync, and used to
+     * drop the selection along with them — so under anything that redraws (a
+     * shell prompt, and constantly under a TUI like Claude Code) a drag
+     * selected text that was erased before it could be seen. Feeding more
+     * output is exactly what the poll loop does. */
+    const char *more = "\r\nmore output\r\n";
+    terminal_write(&t, more, strlen(more));
+    terminal_poll(&t);
+    CHECK(terminal_selection_span(&t, 0, &start_col, &end_col));
+    char *after = terminal_copy_selection(&t);
+    CHECK(after != NULL);
+    CHECK_STR(after, "ed");
+    free(after);
+
+    /* Spawning a new command *should* drop it: the rows it referred to are
+     * gone. This is the case the shared teardown still has to cover. */
+    CHECK(terminal_spawn(&t, "color", ".", color_argv));
+    CHECK_EQ(terminal_selection_span(&t, 0, &start_col, &end_col), 0);
+    poll_terminal_until_done(&t);
     terminal_free(&t);
 
     TEST_REPORT();

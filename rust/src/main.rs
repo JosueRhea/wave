@@ -372,6 +372,8 @@ struct WaveView {
     /// makes the gesture feel stuck.
     scroll_accum: f32,
     side_accum: f32,
+    term_accum: f32,
+    git_accum: f32,
     /// Live metrics, recomputed from `WaveConfig.base_pt` each frame so the
     /// zoom shortcuts and `:set` take effect immediately.
     text_size: f32,
@@ -638,6 +640,8 @@ impl WaveView {
             last_cursor: (0, 0),
             scroll_accum: 0.0,
             side_accum: 0.0,
+            term_accum: 0.0,
+            git_accum: 0.0,
             text_size: TEXT_SIZE_DEFAULT,
             line_height: LINE_HEIGHT_DEFAULT,
             window_bg: WindowBackgroundAppearance::Opaque,
@@ -782,6 +786,10 @@ impl WaveView {
 
     fn on_term_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (row, col) = self.point_to_term_cell(ev.position, window);
+        dbg(format_args!(
+            "term mouse down at {:?} -> cell {row}:{col}",
+            ev.position
+        ));
         self.session.term_sel_begin(row, col);
         self.dragging = true;
         cx.notify();
@@ -800,6 +808,10 @@ impl WaveView {
         if self.dragging {
             self.dragging = false;
             self.session.term_sel_end();
+            dbg(format_args!(
+                "term mouse up -> copied={:?}",
+                self.session.term_copy_selection()
+            ));
             cx.notify();
         }
     }
@@ -1871,7 +1883,25 @@ impl WaveView {
             .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
-                this.session.term_scroll(-wheel_lines(ev, this.line_height).round() as i32);
+                let line_height = this.line_height;
+                // `take_lines` returns the editor's convention — positive means
+                // "show later content". terminal_scroll counts the other way,
+                // in lines *back* into scrollback, hence the negation. Getting
+                // this wrong is what made the terminal wheel run backwards.
+                let delta = Self::take_lines(&mut this.term_accum, ev, line_height);
+                if delta == 0 {
+                    return;
+                }
+                this.session.term_scroll(-delta as i32);
+                // The top visible line, because with the Ghostty backend the
+                // viewport moves inside the VT — `term_visible_start` stays 0,
+                // so the content is the only way to see which way it went.
+                dbg(format_args!(
+                    "term wheel {delta:+} -> top line {:?}",
+                    this.session
+                        .term_line(this.session.term_visible_start(this.rows))
+                        .trim_end()
+                ));
                 cx.notify();
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_term_mouse_down))
@@ -2026,8 +2056,11 @@ impl WaveView {
                             .cursor(CursorStyle::IBeam)
                             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                                 let lh = this.line_height;
-                                this.session
-                                    .git_diff_scroll(-wheel_lines(ev, lh).round() as i32);
+                                let delta = Self::take_lines(&mut this.git_accum, ev, lh);
+                                if delta == 0 {
+                                    return;
+                                }
+                                this.session.git_diff_scroll(delta as i32);
                                 cx.notify();
                             }))
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_git_mouse_down))
@@ -3658,6 +3691,64 @@ fn selftest(root: &str) {
         }
     }
     println!("rendered {} lines; echo output present: {found}", last - start);
+
+    // ---- terminal selection and scrollback ----
+    //
+    // Exactly the calls render_terminal and the terminal mouse handlers make,
+    // so a failure here is in the C core and a failure only in the GUI is in
+    // the event wiring.
+    let row = (start..last)
+        .find(|i| s.term_line(*i).contains("selftest-ok"))
+        .unwrap_or(start);
+    s.term_sel_begin(row, 0);
+    s.term_sel_update(row, 4);
+    s.term_sel_end();
+    println!(
+        "select row {row} cols 0..4 -> span={:?} copied={:?}",
+        s.term_sel_span(row),
+        s.term_copy_selection()
+    );
+
+    // A selection has to survive the terminal redrawing under it. The Ghostty
+    // path rebuilds every visible row on each poll that saw output, and used to
+    // drop the selection with them — so dragging across a live TUI selected
+    // nothing you could see.
+    s.term_write("printf 'redraw\\n'");
+    s.term_key(tk::ENTER, false, false, false);
+    pump(&mut s, 800);
+    println!(
+        "after further output -> still selected: {} copied={:?}",
+        s.term_sel_span(row).is_some(),
+        s.term_copy_selection()
+    );
+
+    // Enough output to have something above the viewport to scroll back to.
+    s.term_write("seq 1 120");
+    s.term_key(tk::ENTER, false, false, false);
+    pump(&mut s, 1500);
+
+    // Scrollback. With Ghostty the viewport lives inside the VT, so
+    // term_visible_start stays 0 and the *content* is what moves: positive
+    // units go back into history, the opposite of the editor's
+    // first-visible-line index. Reading the wheel the editor's way is what ran
+    // the terminal backwards.
+    let head = |s: &mut Session| s.term_line(s.term_visible_start(rows));
+    let at_bottom = head(&mut s);
+    s.term_scroll(5);
+    let scrolled_back = head(&mut s);
+    s.term_scroll(-5);
+    let returned = head(&mut s);
+    println!(
+        "scroll: top line at bottom={:?} after +5={:?} after -5={:?}",
+        at_bottom.trim_end(),
+        scrolled_back.trim_end(),
+        returned.trim_end()
+    );
+    println!(
+        "  +5 moved the viewport: {}; -5 came back: {}",
+        scrolled_back != at_bottom,
+        returned == at_bottom
+    );
 
     // ---- mouse selection on a buffer ----
     let mut e = Session::new();
