@@ -94,6 +94,15 @@ unsafe extern "C" {
     fn wave_theme_index(s: *const c_void) -> c_int;
     fn wave_theme_preview(name: *const c_char) -> c_int;
     fn wave_theme_set(s: *mut c_void, name: *const c_char) -> c_int;
+    fn wave_check_updates(manual: c_int);
+    fn wave_update_poll(
+        state: *mut c_int,
+        version: *mut *const c_char,
+        detail: *mut *const c_char,
+        progress: *mut f64,
+    ) -> c_int;
+    fn wave_version() -> *const c_char;
+    fn wave_pump_main_queue(seconds: f64);
     fn wave_cursor(s: *const c_void, row: *mut usize, col: *mut usize);
     fn wave_mode(s: *const c_void) -> c_int;
     fn wave_mode_name(s: *const c_void) -> *const c_char;
@@ -1647,6 +1656,73 @@ pub fn theme_preview(name: &str) -> bool {
         return false;
     };
     unsafe { wave_theme_preview(c.as_ptr()) != 0 }
+}
+
+/// What the auto-updater is doing, as reported by [`update_poll`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Update {
+    Checking,
+    UpToDate { version: String },
+    /// `from` is the version being replaced.
+    Available { version: String, from: String },
+    Downloading { version: String, progress: f64 },
+    /// The installer is running; the app is about to quit and relaunch.
+    Installing { version: String },
+    Failed { detail: String },
+}
+
+/// Ask GitHub whether there is a newer release, and install it if so. Returns
+/// at once — progress arrives through [`update_poll`].
+///
+/// `manual` is the difference between the palette command and the check on
+/// launch: an automatic check says nothing unless it found an update, so a
+/// machine that is offline or already current stays silent.
+pub fn check_updates(manual: bool) {
+    unsafe { wave_check_updates(manual as c_int) }
+}
+
+/// The next update state, or `None` if nothing has changed since the last call.
+pub fn update_poll() -> Option<Update> {
+    let mut state: c_int = 0;
+    let mut version: *const c_char = std::ptr::null();
+    let mut detail: *const c_char = std::ptr::null();
+    let mut progress: f64 = 0.0;
+    let changed = unsafe {
+        wave_update_poll(&mut state, &mut version, &mut detail, &mut progress) != 0
+    };
+    if !changed {
+        return None;
+    }
+    // Both point at static storage in the shim, valid until the next state.
+    let str_at = |p: *const c_char| {
+        if p.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        }
+    };
+    let version = str_at(version);
+    let detail = str_at(detail);
+    // Mirrors the UPDATE_STATE_* enum in src/updater.h.
+    Some(match state {
+        1 => Update::Checking,
+        2 => Update::UpToDate { version },
+        3 => Update::Available { version, from: detail },
+        4 => Update::Downloading { version, progress },
+        6 => Update::Installing { version },
+        _ => Update::Failed { detail },
+    })
+}
+
+/// The version this build reports as its own.
+pub fn version() -> String {
+    unsafe { CStr::from_ptr(wave_version()) }.to_string_lossy().into_owned()
+}
+
+/// Give main-queue work `seconds` to run. Only needed without a UI: GPUI runs
+/// the main run loop itself, so nothing outside `--selftest` should call this.
+pub fn pump_main_queue(seconds: f64) {
+    unsafe { wave_pump_main_queue(seconds) }
 }
 
 impl Session {

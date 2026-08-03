@@ -61,6 +61,19 @@ release zip; `make icon` regenerates the app icon. `make bundle` ships the GPUI
 front-end by default — `make bundle FRONTEND=c` bundles the original GLFW
 binary instead; everything else about the bundle is identical.
 
+### Updates
+
+Wave updates itself. On launch it asks GitHub for the latest release, and if
+there is a newer one it downloads the `.dmg`, replaces its own bundle and
+relaunches — no prompt, and nothing to click. A launch that finds nothing (or
+finds no network) says nothing at all. **⇧⌘P → "Check for Updates…"** does the
+same on demand, and reports the outcome either way in the status bar.
+
+One version cannot do this: **0.1.17-alpha shipped without an updater.** The
+mechanism lived in `src/mac.m`, which only the GLFW binary links, so it went
+missing the moment `Wave.app` switched to the GPUI front-end. If you are on
+0.1.17, update once by hand — from 0.1.18 on it carries itself forward.
+
 ### The `wave` command
 
 The CLI ships inside the app, but installing Wave cannot put it on your PATH by
@@ -138,6 +151,12 @@ lsp          ─ an async Language Server Protocol client: spawns a server
                the system clangd (part of LLVM) if present. A missing server (no
                clangd, or no JS runtime) just falls back to the tree-sitter
                heuristics.
+updater      ─ compares two version strings (updater.c, pure C), and on macOS
+               fetches the latest GitHub release, downloads its .dmg, and hands
+               the bundle swap to a detached shell script that waits for the old
+               process to exit before replacing it (updater_mac.m). Objective-C
+               but *not* GUI: both front-ends link it, which is the whole point
+               of it living here.
 ```
 
 GUI layer:

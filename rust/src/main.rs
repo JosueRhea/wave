@@ -132,11 +132,12 @@ enum Cmd {
     ZoomOut,
     ZoomReset,
     InstallCli,
+    CheckUpdates,
     Quit,
 }
 
 impl Cmd {
-    const ALL: [Cmd; 27] = [
+    const ALL: [Cmd; 28] = [
         Cmd::OpenFolder,
         Cmd::OpenFile,
         Cmd::Settings,
@@ -163,6 +164,7 @@ impl Cmd {
         Cmd::SaveConfig,
         Cmd::ResetConfig,
         Cmd::InstallCli,
+        Cmd::CheckUpdates,
         Cmd::Quit,
     ];
 
@@ -194,6 +196,7 @@ impl Cmd {
             Cmd::ZoomOut => "Zoom Out",
             Cmd::ZoomReset => "Reset Zoom",
             Cmd::InstallCli => "Install wave Command in PATH",
+            Cmd::CheckUpdates => "Check for Updates…",
             Cmd::Quit => "Quit Wave",
         }
     }
@@ -1339,6 +1342,12 @@ impl WaveView {
                         .detach();
                     }
                 }
+            }
+            Cmd::CheckUpdates => {
+                // Everything after this arrives through the poll below, which
+                // is also what installs it — there is no confirmation step, the
+                // same as the GLFW front-end has always behaved.
+                ffi::check_updates(true);
             }
             Cmd::ResetConfig => {
                 self.session.reset_config();
@@ -3791,6 +3800,38 @@ fn selftest(root: &str) {
         );
     }
 
+    // ---- auto-update ----
+    //
+    // A real check against GitHub, because the parts that break are the ones a
+    // mock would stub out: that the ObjC updater is linked into *this* binary at
+    // all (it was not, in 0.1.17), that its main-queue callback reaches Rust,
+    // and that the version comparison agrees with the published tag.
+    //
+    // Safe to run: this binary is not a .app, so even if it did find something
+    // newer the installer would decline rather than replace anything.
+    println!("\n=== updates ===");
+    println!("this build reports version {}", ffi::version());
+    ffi::check_updates(true);
+    let mut settled = false;
+    for _ in 0..40 {
+        ffi::pump_main_queue(0.25);
+        while let Some(update) = ffi::update_poll() {
+            println!("  {}", update_status_line(&update));
+            settled |= matches!(
+                update,
+                ffi::Update::UpToDate { .. }
+                    | ffi::Update::Available { .. }
+                    | ffi::Update::Failed { .. }
+            );
+        }
+        if settled {
+            break;
+        }
+    }
+    if !settled {
+        println!("  no reply within 10s (offline?)");
+    }
+
     // ---- bundled resources ----
     //
     // langs.c reads queries/<lang>/highlights.scm from the cwd first and only
@@ -4016,6 +4057,29 @@ fn install_cli(shim: &Path) -> Result<String, String> {
     }
 }
 
+/// One status-bar line per update state.
+///
+/// The GLFW front-end draws a toast with a real progress bar for this; here the
+/// status bar is the only always-visible surface, so the percentage goes in the
+/// text. Downloading is the one state that repeats — it overwrites itself each
+/// poll rather than accumulating.
+fn update_status_line(update: &ffi::Update) -> String {
+    match update {
+        ffi::Update::Checking => "checking for updates…".into(),
+        ffi::Update::UpToDate { version } => format!("Wave {version} is up to date"),
+        ffi::Update::Available { version, from } => {
+            format!("update available: {from} → {version}")
+        }
+        ffi::Update::Downloading { version, progress } => {
+            format!("downloading Wave {version}… {}%", (progress * 100.0) as i32)
+        }
+        ffi::Update::Installing { version } => {
+            format!("installing Wave {version} — restarting")
+        }
+        ffi::Update::Failed { detail } => format!("update failed: {detail}"),
+    }
+}
+
 /// `file:///Users/me/a%20b.tsx` -> `/Users/me/a b.tsx`.
 ///
 /// NSURL hands back a percent-encoded absolute string. Anything that is not a
@@ -4149,6 +4213,10 @@ fn main() {
                                 }
                                 dirty = true;
                             }
+                            if let Some(update) = ffi::update_poll() {
+                                this.status = update_status_line(&update);
+                                dirty = true;
+                            }
                             if dirty {
                                 cx.notify();
                             }
@@ -4158,6 +4226,11 @@ fn main() {
                         }
                     })
                     .detach();
+
+                    // Silent unless it finds something: an offline or
+                    // already-current launch says nothing, and an update
+                    // installs itself and relaunches, as in the GLFW build.
+                    ffi::check_updates(false);
 
                     let mut view = WaveView::new(path.clone(), focus);
                     if let Some((line, column)) = location {

@@ -54,6 +54,11 @@ cd / && /Applications/Wave.app/Contents/MacOS/wave --selftest ~/dev/edui
 Geist Mono is `include_bytes!`-ed into the binary, so no font ships in the
 bundle. `Contents/Resources/bin/wave` is the CLI shim; see the root README.
 
+`make gpui` passes the Makefile's `VERSION` through as `WAVE_VERSION`, which
+`build.rs` compiles into the shim — that is what the updater compares against
+when the binary is not in a bundle. Inside `Wave.app` the Info.plist version
+wins, so the two cannot drift apart in a shipped build.
+
 ## Working
 
 All of this is computed in C; the front-end only lays it out and forwards input.
@@ -193,6 +198,29 @@ backspace -> "backspace-works": 1 (stray "backspaceXX": 0)
 ctrl-c -> shell responsive again: 1
 cursor abs row=8 col=36 visible=1, visible_start=0 -> screen row 8
 idle polls reporting change: 0/20
+```
+
+Auto-update, which really does call GitHub — a mock would stub out the two
+things that break (whether the Objective-C updater is linked into *this* binary,
+and whether its main-queue callback reaches Rust):
+
+```
+this build reports version 0.1.18-alpha
+  checking for updates…
+  Wave 0.1.18-alpha is up to date
+```
+
+Build with an older `WAVE_VERSION` to watch the other path. It is safe from an
+unbundled binary — the installer requires a `.app` and declines otherwise, which
+is what the last line is:
+
+```
+$ WAVE_VERSION=0.1.0-alpha cargo build --release
+this build reports version 0.1.0-alpha
+  update available: 0.1.0-alpha → v0.1.17-alpha
+  downloading Wave v0.1.17-alpha… 42%
+  …
+  update failed: could not start installer
 ```
 
 ## Fonts

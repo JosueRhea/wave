@@ -79,6 +79,11 @@ GHOSTTY_INTERNAL_FRAMEWORKS := -framework Metal -framework QuartzCore \
 # Headless core (no GLFW/GL dependency) — also what the tests link against.
 CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/complete.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
+# The updater's I/O half is Objective-C (NSURLSession + NSTask), so it is listed
+# separately from CORE_SRC's .c files — but it *is* core: both front-ends link it
+# out of libwave.a. Keeping it in the GLFW-only set is what silently dropped the
+# updater from the GPUI build in 0.1.17.
+CORE_OBJ += $(BUILD)/updater_mac.o
 
 # tree-sitter runtime is a single translation unit (lib.c includes the rest).
 # Each language grammar = a parser.c (+ an external scanner.c where present).
@@ -115,7 +120,7 @@ TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 # --- macOS packaging ----------------------------------------------------------
 # Version stamped into the bundle + artifact name. Override on release:
 #   make dist VERSION=0.1.7-alpha
-VERSION  ?= 0.1.17-alpha
+VERSION  ?= 0.1.18-alpha
 APP       := $(BUILD)/Wave.app
 APP_BIN   := $(APP)/Contents/MacOS
 APP_RES   := $(APP)/Contents/Resources
@@ -163,7 +168,7 @@ app: lsp rg $(BUILD)/wave
 # libwave.a made here — so that has to exist first.
 gpui: $(BUILD)/libwave.a $(GHOSTTY_DEP)
 	@echo "  CARGO wave-gpui (release)"
-	@cd rust && cargo build --release
+	@cd rust && WAVE_VERSION=$(VERSION) cargo build --release
 
 # Install the bundled TS/JS language server into vendor/lsp (prefers bun, the
 # project's standard runtime; falls back to npm). Idempotent.
@@ -263,6 +268,12 @@ $(BUILD)/ts_tsx_scanner.o: vendor | $(BUILD)
 # --- core objects ---
 $(BUILD)/%.o: src/%.c | $(BUILD) vendor
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# VERSION is what an unbundled build reports as its own; a real Wave.app reads
+# CFBundleShortVersionString instead, so this only matters when running the
+# binary straight out of build/.
+$(BUILD)/updater_mac.o: src/updater_mac.m | $(BUILD)
+	$(CC) $(CFLAGS) -DWAVE_VERSION=\"$(VERSION)\" -fobjc-arc -c $< -o $@
 
 $(CORE_OBJ) $(TS_OBJ) $(GUI_OBJ): $(GHOSTTY_DEP) $(BUILD_CONFIG)
 

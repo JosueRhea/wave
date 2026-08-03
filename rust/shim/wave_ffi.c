@@ -10,6 +10,7 @@
  * in INSERT and edit_command_apply otherwise; special keys go to
  * editor_apply_insert_key in INSERT and editor_apply_motion_key otherwise. */
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -34,6 +35,7 @@
 #include "tabs.h"
 #include "terminal.h"
 #include "theme.h"
+#include "updater.h"
 #include "watch.h"
 #include "workspace.h"
 #include "yank.h"
@@ -1544,6 +1546,73 @@ int wave_theme_set(WaveSession *s, const char *name) {
         wave_config_save(&s->config);
     }
     return 1;
+}
+
+/* ---- auto-update (updater_mac.m) ----
+ *
+ * The check is process-global and asynchronous: wave_check_updates() returns
+ * immediately and the states arrive later, on the main thread, from a callback
+ * the front-end cannot own (it would have to be a Rust fn pointer kept alive
+ * across the FFI boundary for the life of the download). So the callback lands
+ * here instead, in a slot the front-end drains from the same poll it already
+ * runs for LSP replies and pty output.
+ *
+ * Only the newest state is kept. Every state is either terminal or a progress
+ * tick, so a front-end that polls slower than the download reports simply sees
+ * fewer percentages — never a wrong or out-of-order one. */
+static struct {
+    int state;
+    char version[64];
+    char detail[192];
+    double progress;
+    int pending; /* a state arrived that the front-end has not read yet */
+} g_update;
+
+static void wave_update_state_cb(int state, const char *version,
+                                 const char *detail, double progress) {
+    g_update.state = state;
+    snprintf(g_update.version, sizeof g_update.version, "%s", version ? version : "");
+    snprintf(g_update.detail, sizeof g_update.detail, "%s", detail ? detail : "");
+    g_update.progress = progress;
+    g_update.pending = 1;
+}
+
+/* `manual` distinguishes the palette command (report everything, including "up
+ * to date" and errors) from the check on launch (stay quiet unless there is an
+ * update). Safe to call again while one is in flight — the states just keep
+ * coming from whichever check is furthest along. */
+void wave_check_updates(int manual) {
+    wave_check_for_updates(WAVE_VERSION, manual, wave_update_state_cb);
+}
+
+/* Returns 1 and fills the out-params when a new state has arrived since the
+ * last call, else 0. The strings point at static storage and stay valid until
+ * the next state arrives — copy them. */
+int wave_update_poll(int *state, const char **version, const char **detail,
+                     double *progress) {
+    if (!g_update.pending) return 0;
+    g_update.pending = 0;
+    if (state) *state = g_update.state;
+    if (version) *version = g_update.version;
+    if (detail) *detail = g_update.detail;
+    if (progress) *progress = g_update.progress;
+    return 1;
+}
+
+/* What this build believes it is, for the front-end to show. A bundled Wave
+ * reports its Info.plist version instead when it checks — this is the fallback
+ * compiled in, and what an unbundled `cargo run` uses. */
+const char *wave_version(void) { return WAVE_VERSION; }
+
+/* Run the main run loop for `seconds`, so main-queue work gets a chance to run.
+ *
+ * Only for headless callers: the updater reports through dispatch_async onto the
+ * main queue, which is serviced by whatever run loop the app is already running.
+ * The GPUI front-end has one; `--selftest` does not, and without this its checks
+ * would sit in the queue forever. Returns when the time is up, not when the
+ * queue empties. */
+void wave_pump_main_queue(double seconds) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
 }
 
 /* ==========================================================================

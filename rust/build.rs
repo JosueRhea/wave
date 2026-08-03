@@ -13,6 +13,14 @@ fn main() {
         .expect("crate lives one level under the repo root")
         .to_path_buf();
 
+    // The version this build reports to the updater. The Makefile passes its own
+    // VERSION so the release binary and the bundle's Info.plist agree; a bare
+    // `cargo build` falls back to the crate version. Either way an installed
+    // Wave.app prefers CFBundleShortVersionString at runtime, so this only
+    // decides what an unbundled binary compares against.
+    let version = std::env::var("WAVE_VERSION")
+        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());
+
     // Same flags the Makefile compiles CORE_SRC with, so the shim agrees with
     // libwave.a on struct layout (notably the ghostty-VT-dependent Terminal).
     cc::Build::new()
@@ -23,7 +31,11 @@ fn main() {
         .include(root.join("vendor/ghostty/zig-out/include"))
         .define("WAVE_USE_GHOSTTY_VT", None)
         .define("GHOSTTY_STATIC", None)
+        .define("WAVE_VERSION", format!("\"{version}\"").as_str())
         .flag("-std=c11")
+        // The Makefile's CFLAGS carry this too. Several shim entry points take a
+        // session they do not read, to keep one shape across the whole ABI.
+        .flag("-Wno-unused-parameter")
         .compile("wave_ffi");
 
     // Link both archives by absolute path, exactly as the Makefile does.
@@ -42,6 +54,10 @@ fn main() {
     // What the Makefile's TEST_LIBS links for the headless core.
     println!("cargo:rustc-link-lib=framework=CoreServices");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    // updater_mac.o (now a core object) needs NSURLSession/NSTask, and one
+    // AppKit call to quit once the installer is running.
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=AppKit");
 
     // runtime.c resolves the bundled ripgrep and TS language server *relative to
     // the executable* (`<exe_dir>/vendor/...`, `<exe_dir>/../vendor/...`). That
@@ -57,6 +73,7 @@ fn main() {
         }
     }
 
+    println!("cargo:rerun-if-env-changed=WAVE_VERSION");
     println!("cargo:rerun-if-changed=shim/wave_ffi.c");
     println!(
         "cargo:rerun-if-changed={}",

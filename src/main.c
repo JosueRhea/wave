@@ -19,6 +19,9 @@
  * the cursor (a whole-word scan ranked by a preceding declaration keyword).
  */
 #include <GLFW/glfw3.h>
+/* Up here rather than with the rest of the includes below: the platform block
+ * that follows needs the updater's callback type and states. */
+#include "updater.h"
 #ifdef __APPLE__
 #define GLFW_EXPOSE_NATIVE_COCOA
 #include <GLFW/glfw3native.h>
@@ -36,15 +39,11 @@ int mac_sidebar_context_menu(void *nswindow, const char *target_name,
 int mac_open_panel(void *nswindow, int folders, char *out, size_t cap);
 int mac_confirm_delete(void *nswindow, const char *path);
 int mac_clipboard_has_image(void);
-typedef void (*MacUpdateCallback)(int state, const char *version,
-                                  const char *detail, double progress);
 void mac_prepare_document_open_handler(void);
 void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
                           void (*check_updates)(void), void (*next_tab)(void),
                           void (*prev_tab)(void),
                           void (*open_path)(const char *path));
-void mac_check_for_updates(const char *current_version, int manual,
-                           MacUpdateCallback callback);
 #else
 static void mac_set_blur(void *nswindow, int enable) { (void)nswindow; (void)enable; }
 static void mac_use_native_titlebar(void *nswindow, int enable) { (void)nswindow; (void)enable; }
@@ -65,8 +64,6 @@ static int mac_confirm_delete(void *nswindow, const char *path) {
     (void)nswindow; (void)path; return 0;
 }
 static int mac_clipboard_has_image(void) { return 0; }
-typedef void (*MacUpdateCallback)(int state, const char *version,
-                                  const char *detail, double progress);
 static void mac_prepare_document_open_handler(void) {}
 static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(void),
                                  void (*check_updates)(void),
@@ -75,10 +72,13 @@ static void mac_install_app_menu(void (*open_file)(void), void (*open_folder)(vo
     (void)open_file; (void)open_folder; (void)check_updates;
     (void)next_tab; (void)prev_tab; (void)open_path;
 }
-static void mac_check_for_updates(const char *current_version, int manual,
-                                  MacUpdateCallback callback) {
+/* updater_mac.m is the only implementation; elsewhere the check just reports
+ * that there is nothing to check with. */
+static void wave_check_for_updates(const char *current_version, int manual,
+                                   WaveUpdateCallback callback) {
     (void)current_version; (void)manual;
-    if (callback) callback(5, "", "updates unavailable on this platform", 0.0);
+    if (callback) callback(UPDATE_STATE_ERROR, "",
+                           "updates unavailable on this platform", 0.0);
 }
 #endif
 #include <limits.h>
@@ -115,7 +115,6 @@ static void mac_check_for_updates(const char *current_version, int manual,
 #include "terminal.h"
 #include "text_view.h"
 #include "theme.h"
-#include "updater.h"
 #include "view.h"
 #include "watch.h"
 #include "workspace.h"
@@ -225,15 +224,6 @@ static const char *FONT_PATH = "/System/Library/Fonts/SFNSMono.ttf";
 #endif
 
 static void app_palette_refilter(void);
-
-enum {
-    UPDATE_STATE_CHECKING = 1,
-    UPDATE_STATE_CURRENT = 2,
-    UPDATE_STATE_AVAILABLE = 3,
-    UPDATE_STATE_DOWNLOADING = 4,
-    UPDATE_STATE_ERROR = 5,
-    UPDATE_STATE_DOWNLOADED = 6
-};
 
 enum {
     SCROLLBAR_DRAG_NONE = 0,
@@ -702,7 +692,7 @@ static void update_callback(int state, const char *version,
 
 static void app_check_updates(int manual) {
     if (manual) update_callback(UPDATE_STATE_CHECKING, WAVE_VERSION, NULL, 0.0);
-    mac_check_for_updates(WAVE_VERSION, manual, update_callback);
+    wave_check_for_updates(WAVE_VERSION, manual, update_callback);
 }
 
 static void app_menu_check_updates(void) {
