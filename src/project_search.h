@@ -26,5 +26,7 @@ int project_search_running(const ProjectSearch *ps);
 size_t project_search_count(const ProjectSearch *ps);
 const SearchHit *project_search_hit(const ProjectSearch *ps, size_t i);
 int project_search_truncated(const ProjectSearch *ps);
+size_t project_search_group_count(const ProjectSearch *ps, size_t i);
+size_t project_search_file_count(const ProjectSearch *ps);
 
 #endif

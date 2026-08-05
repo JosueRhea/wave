@@ -152,16 +152,90 @@ int main(void) {
     view_tab_label(&e, out, sizeof out);
     CHECK_STR(out, "main.c *");
 
-    view_search_status(out, sizeof out, 1, 3, 0, 0, 0);
+    view_search_status(out, sizeof out, 1, 3, 0, 0, 0, 0);
     CHECK_STR(out, "ripgrep unavailable");
-    view_search_status(out, sizeof out, 0, 3, 1, 0, 0);
+    view_search_status(out, sizeof out, 0, 3, 1, 0, 0, 0);
     CHECK_STR(out, "searching...");
-    view_search_status(out, sizeof out, 0, 3, 0, 1, 42);
-    CHECK_STR(out, "42+ matches");
-    view_search_status(out, sizeof out, 0, 3, 0, 0, 1);
-    CHECK_STR(out, "1 match");
-    view_search_status(out, sizeof out, 0, 3, 0, 0, 2);
-    CHECK_STR(out, "2 matches");
+    view_search_status(out, sizeof out, 0, 3, 0, 1, 42, 7);
+    CHECK_STR(out, "42+ matches in 7 files");
+    view_search_status(out, sizeof out, 0, 3, 0, 0, 1, 1);
+    CHECK_STR(out, "1 match in 1 file");
+    view_search_status(out, sizeof out, 0, 3, 0, 0, 2, 1);
+    CHECK_STR(out, "2 matches in 1 file");
+    /* A query with nothing behind it says so; an empty box says nothing. */
+    view_search_status(out, sizeof out, 0, 3, 0, 0, 0, 0);
+    CHECK_STR(out, "no matches");
+    view_search_status(out, sizeof out, 0, 0, 0, 0, 0, 0);
+    CHECK_STR(out, "");
+
+    /* --- search result rows ------------------------------------------------ */
+
+    /* Smart case, matching ripgrep: lowercase queries ignore case, a query with
+     * an uppercase letter does not. */
+    CHECK(!view_query_case_sensitive("route"));
+    CHECK(view_query_case_sensitive("Route"));
+    CHECK_EQ(view_match_offset("in Route now", "route"), 3);
+    CHECK_EQ(view_match_offset("in route now", "Route"), -1);
+    CHECK_EQ(view_match_offset("in Route now", "Route"), 3);
+    CHECK_EQ(view_match_offset("nothing here", "route"), -1);
+    CHECK_EQ(view_match_offset("route", ""), -1);
+
+    /* Long directories keep their tail: the leaf folders say where you are. */
+    char elided[64];
+    view_elide_left(elided, sizeof elided, "app/dashboard/overview/ui", 25);
+    CHECK_STR(elided, "app/dashboard/overview/ui");
+    view_elide_left(elided, sizeof elided, "app/dashboard/overview/ui", 12);
+    CHECK_STR(elided, "...erview/ui");
+    view_elide_left(elided, sizeof elided, "app/dashboard", 3);
+    CHECK_STR(elided, "");
+
+    ViewSearchRow row = view_search_row("lib/orders/cancellation-policy.ts", 9,
+                                        "return \"en_route\";", "en_route",
+                                        NULL, 20, 40);
+    CHECK_STR(row.name, "cancellation-policy.ts");
+    CHECK_STR(row.dir, "lib/orders");
+    CHECK_EQ(row.line, 9);
+    CHECK(!row.repeats);
+    CHECK_STR(row.text, "return \"en_route\";");
+    CHECK_EQ(row.match_start, 8);
+    CHECK_EQ(row.match_len, 8);
+
+    /* A second hit in the same file is marked as a repeat, so the front-end can
+     * name the file once per run. */
+    row = view_search_row("lib/orders/cancellation-policy.ts", 17, "x", "x",
+                          "lib/orders/cancellation-policy.ts", 20, 40);
+    CHECK(row.repeats);
+    row = view_search_row("lib/orders/cancellation-policy.ts", 17, "x", "x",
+                          "lib/orders/other.ts", 20, 40);
+    CHECK(!row.repeats);
+
+    /* A file at the root has no directory to show. */
+    row = view_search_row("main.c", 3, "int x;", "int", NULL, 20, 40);
+    CHECK_STR(row.name, "main.c");
+    CHECK_STR(row.dir, "");
+
+    /* A match past the right edge scrolls the line, keeping context before it,
+     * and the reported offset follows the text it belongs to. */
+    row = view_search_row("a.ts", 1,
+                          "0123456789012345678901234567890123456789needle tail",
+                          "needle", NULL, 20, 20);
+    CHECK_STR(row.text, "...23456789needle...");
+    CHECK_EQ(row.match_start, 11);
+    CHECK_EQ(row.match_len, 6);
+    CHECK_STR(row.text + row.match_start, "needle...");
+
+    /* A long line whose match is already visible is only cut at the end. */
+    row = view_search_row("a.ts", 1, "needle 0123456789012345678901234567890",
+                          "needle", NULL, 20, 20);
+    CHECK_STR(row.text, "needle 0123456789...");
+    CHECK_EQ(row.match_start, 0);
+    CHECK_EQ(row.match_len, 6);
+
+    /* No match in the line (the query moved on, the results have not) leaves the
+     * row drawable with nothing highlighted. */
+    row = view_search_row("a.ts", 1, "plain line", "absent", NULL, 20, 40);
+    CHECK_EQ(row.match_start, -1);
+    CHECK_EQ(row.match_len, 0);
     CHECK_EQ(view_status_text(out, sizeof out, "w", "", "NORMAL",
                               "file.c", 0, "c", 0, 0, 0, 0, 1),
              VIEW_STATUS_COMMAND);

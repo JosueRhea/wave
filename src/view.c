@@ -5,6 +5,14 @@
 
 #include "langs.h"
 
+/* Both front-ends measure text in bytes-as-columns (the glyph atlas is ASCII,
+ * and the GPUI panel is monospace), so the elision marker has to be ASCII too —
+ * a "…" would cost three columns and draw as three missing glyphs. */
+#define VIEW_ELLIPSIS "..."
+#define VIEW_SEARCH_LEAD 8 /* columns of the line kept before a scrolled match */
+
+static char view_lower(char c) { return c >= 'A' && c <= 'Z' ? (char)(c + 32) : c; }
+
 const char *view_base_name(const char *path) {
     if (!path) return "[scratch]";
     const char *slash = strrchr(path, '/');
@@ -166,16 +174,138 @@ void view_tab_label(const Editor *e, char *out, size_t cap) {
 }
 
 void view_search_status(char *out, size_t cap, int unavailable, int query_len,
-                        int running, int truncated, int count) {
+                        int running, int truncated, int count, int files) {
     if (!out || cap == 0) return;
-    if (unavailable && query_len)
+    if (unavailable && query_len) {
         snprintf(out, cap, "ripgrep unavailable");
-    else if (running)
+        return;
+    }
+    if (running) {
         snprintf(out, cap, "searching...");
-    else if (truncated)
-        snprintf(out, cap, "%d+ matches", count);
-    else
-        snprintf(out, cap, "%d match%s", count, count == 1 ? "" : "es");
+        return;
+    }
+    if (count == 0) {
+        snprintf(out, cap, "%s", query_len ? "no matches" : "");
+        return;
+    }
+    /* Files matter as much as matches: they say whether a hundred hits are one
+     * file to skim or a change that reaches across the project. */
+    snprintf(out, cap, "%d%s match%s in %d file%s", count, truncated ? "+" : "",
+             count == 1 ? "" : "es", files, files == 1 ? "" : "s");
+}
+
+int view_query_case_sensitive(const char *query) {
+    if (!query) return 0;
+    for (const char *p = query; *p; p++)
+        if (*p >= 'A' && *p <= 'Z') return 1;
+    return 0;
+}
+
+int view_match_offset(const char *text, const char *query) {
+    if (!text || !query || !query[0]) return -1;
+    size_t qn = strlen(query);
+    int sensitive = view_query_case_sensitive(query);
+    for (const char *p = text; *p; p++) {
+        size_t i = 0;
+        while (i < qn && p[i] &&
+               (sensitive ? p[i] == query[i]
+                          : view_lower(p[i]) == view_lower(query[i])))
+            i++;
+        if (i == qn) return (int)(p - text);
+    }
+    return -1;
+}
+
+void view_elide_left(char *out, size_t cap, const char *text, int cells) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!text || cells <= 0) return;
+    int ell = (int)strlen(VIEW_ELLIPSIS);
+    int len = (int)strlen(text);
+    if (len <= cells) {
+        snprintf(out, cap, "%s", text);
+        return;
+    }
+    /* Too narrow to say anything useful, so say nothing rather than spend every
+     * column on the marker. */
+    if (cells <= ell) return;
+    snprintf(out, cap, VIEW_ELLIPSIS "%s", text + len - (cells - ell));
+}
+
+/* Slide a window over `text` so the match at *ms stays inside `cells` columns,
+ * marking either cut end with an ellipsis and moving *ms/*mlen with the text. */
+static void view_window_match(char *out, size_t cap, const char *text, int cells,
+                             int *ms, int *mlen) {
+    int ell = (int)strlen(VIEW_ELLIPSIS);
+    int len = (int)strlen(text);
+    out[0] = '\0';
+    if (cells <= 0) {
+        *ms = -1;
+        return;
+    }
+    if (len <= cells) {
+        snprintf(out, cap, "%s", text);
+        return;
+    }
+
+    /* Only scroll once the match would fall off the right edge, and then keep a
+     * little of the line before it — a match flush against the left edge reads
+     * like the start of the line, which it is not. Note we do *not* pull the
+     * window back to fill the last columns: keeping VIEW_SEARCH_LEAD before the
+     * match matters more than a few trailing cells. */
+    int start = 0;
+    if (*ms >= 0 && *ms + *mlen > cells) {
+        start = *ms - VIEW_SEARCH_LEAD;
+        if (start < 0) start = 0;
+        if (start > len - 1) start = len - 1;
+    }
+
+    int head = start > 0 ? ell : 0;
+    int take = cells - head;
+    int tail = start + take < len ? ell : 0;
+    take -= tail;
+    if (take < 1) take = 1;
+    if (take > len - start) take = len - start;
+
+    snprintf(out, cap, "%s%.*s%s", head ? VIEW_ELLIPSIS : "", take,
+             text + start, tail ? VIEW_ELLIPSIS : "");
+    if (*ms >= start && *ms < start + take) {
+        *ms = head + (*ms - start);
+        if (*ms + *mlen > head + take) *mlen = head + take - *ms;
+    } else {
+        *ms = -1;
+        *mlen = 0;
+    }
+}
+
+ViewSearchRow view_search_row(const char *path, int line, const char *text,
+                              const char *query, const char *prev_path,
+                              int dir_cells, int text_cells) {
+    ViewSearchRow row;
+    memset(&row, 0, sizeof row);
+    row.line = line;
+    row.match_start = -1;
+    if (!path) path = "";
+    if (!text) text = "";
+    row.name = view_base_name(path);
+    row.repeats = prev_path && !strcmp(prev_path, path);
+
+    const char *slash = strrchr(path, '/');
+    if (slash) {
+        char dir[1024];
+        size_t n = (size_t)(slash - path);
+        if (n >= sizeof dir) n = sizeof dir - 1;
+        memcpy(dir, path, n);
+        dir[n] = '\0';
+        view_elide_left(row.dir, sizeof row.dir, dir, dir_cells);
+    }
+
+    row.match_start = view_match_offset(text, query);
+    row.match_len = row.match_start >= 0 ? (int)strlen(query) : 0;
+    if (text_cells > VIEW_SEARCH_TEXT_MAX - 1) text_cells = VIEW_SEARCH_TEXT_MAX - 1;
+    view_window_match(row.text, sizeof row.text, text, text_cells,
+                      &row.match_start, &row.match_len);
+    return row;
 }
 
 ViewStatusKind view_status_text(char *out, size_t cap, const char *command,

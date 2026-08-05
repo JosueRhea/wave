@@ -233,6 +233,7 @@ unsafe extern "C" {
     fn wave_search_active(s: *const c_void) -> c_int;
     fn wave_search_query(s: *const c_void) -> *const c_char;
     fn wave_search_input(s: *mut c_void, text: *const c_char);
+    fn wave_search_set_query(s: *mut c_void, text: *const c_char);
     fn wave_search_backspace(s: *mut c_void);
     fn wave_search_move(s: *mut c_void, delta: c_int);
     fn wave_search_poll(s: *mut c_void) -> c_int;
@@ -247,7 +248,25 @@ unsafe extern "C" {
         col: *mut c_int,
         text: *mut *const c_char,
     ) -> c_int;
+    fn wave_search_truncated(s: *const c_void) -> c_int;
+    fn wave_search_file_count(s: *const c_void) -> usize;
+    fn wave_search_status(s: *const c_void, out: *mut c_char, cap: usize) -> usize;
+    fn wave_search_row(
+        s: *const c_void,
+        i: usize,
+        dir_cells: c_int,
+        text_cells: c_int,
+        name: *mut *const c_char,
+        dir: *mut *const c_char,
+        text: *mut *const c_char,
+        line: *mut c_int,
+        repeats: *mut c_int,
+        match_start: *mut c_int,
+        match_len: *mut c_int,
+        group_count: *mut usize,
+    ) -> c_int;
     fn wave_search_accept(s: *mut c_void) -> c_int;
+    fn wave_elide_left(text: *const c_char, cells: c_int, out: *mut c_char, cap: usize);
 
     // command line
     fn wave_cmd_active(s: *const c_void) -> c_int;
@@ -457,6 +476,23 @@ pub struct SearchHit {
     pub text: String,
 }
 
+/// A project-search hit laid out for display: the file's base name, its elided
+/// parent directory, the matched line windowed to the visible width, and where
+/// the query sits inside that line (`match_start` is a byte offset, or -1 when
+/// the query is no longer present).
+pub struct SearchRow {
+    pub name: String,
+    pub dir: String,
+    pub text: String,
+    pub line: i32,
+    /// True when this row continues the file named by the row above it.
+    pub repeats: bool,
+    pub match_start: i32,
+    pub match_len: i32,
+    /// Number of hits in this row's file (shown once, on the first row).
+    pub group_count: usize,
+}
+
 pub struct GitFile {
     pub code: String,
     pub path: String,
@@ -536,6 +572,17 @@ fn cstr(p: *const c_char) -> String {
         return String::new();
     }
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+/// Fit `text` into `cells` columns, dropping from the *left* so the tail
+/// survives: a path's leaf folders say where you are, its root does not.
+pub fn elide_left(text: &str, cells: i32) -> String {
+    let Ok(c) = CString::new(text) else {
+        return String::new();
+    };
+    let mut buf = [0i8; 512];
+    unsafe { wave_elide_left(c.as_ptr(), cells as c_int, buf.as_mut_ptr(), buf.len()) };
+    cstr(buf.as_ptr())
 }
 
 impl Session {
@@ -1323,6 +1370,13 @@ impl Session {
         unsafe { wave_search_input(self.raw, c.as_ptr()) }
     }
 
+    /// Replace the query and re-run the search. Used by the search box, which
+    /// owns its own caret and so edits the text itself.
+    pub fn search_set_query(&mut self, text: &str) {
+        let Ok(c) = CString::new(text) else { return };
+        unsafe { wave_search_set_query(self.raw, c.as_ptr()) }
+    }
+
     pub fn search_backspace(&mut self) {
         unsafe { wave_search_backspace(self.raw) }
     }
@@ -1359,6 +1413,62 @@ impl Session {
             line,
             col,
             text: cstr(text),
+        })
+    }
+
+    pub fn search_truncated(&self) -> bool {
+        unsafe { wave_search_truncated(self.raw) != 0 }
+    }
+
+    pub fn search_file_count(&self) -> usize {
+        unsafe { wave_search_file_count(self.raw) }
+    }
+
+    /// The status line shown under the results, e.g. "128 matches in 9 files".
+    pub fn search_status(&self) -> String {
+        let mut buf = [0i8; 96];
+        let n = unsafe { wave_search_status(self.raw, buf.as_mut_ptr(), buf.len()) };
+        if n == 0 {
+            return String::new();
+        }
+        cstr(buf.as_ptr())
+    }
+
+    /// A result row laid out for `dir_cells` / `text_cells` columns wide. The
+    /// core windows the match line so the hit stays visible at that width.
+    pub fn search_row(&self, i: usize, dir_cells: i32, text_cells: i32) -> Option<SearchRow> {
+        let (mut name, mut dir, mut text) =
+            (std::ptr::null(), std::ptr::null(), std::ptr::null());
+        let (mut line, mut repeats, mut match_start, mut match_len) = (0, 0, 0, 0);
+        let mut group_count = 0usize;
+        if unsafe {
+            wave_search_row(
+                self.raw,
+                i,
+                dir_cells as c_int,
+                text_cells as c_int,
+                &mut name,
+                &mut dir,
+                &mut text,
+                &mut line,
+                &mut repeats,
+                &mut match_start,
+                &mut match_len,
+                &mut group_count,
+            )
+        } == 0
+        {
+            return None;
+        }
+        Some(SearchRow {
+            name: cstr(name),
+            dir: cstr(dir),
+            text: cstr(text),
+            line,
+            repeats: repeats != 0,
+            match_start,
+            match_len,
+            group_count,
         })
     }
 

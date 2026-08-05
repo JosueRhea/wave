@@ -1675,6 +1675,15 @@ void wave_search_input(WaveSession *s, const char *text) {
     overlay_insert_text(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "", text);
 }
 
+/* Replace the whole query and re-run. The front-end owns the search box's caret
+ * and selection, so it edits the text itself and hands the result over here —
+ * the append-only wave_search_input() above cannot express an edit in the middle
+ * of the line. */
+void wave_search_set_query(WaveSession *s, const char *text) {
+    if (!s || !text) return;
+    overlay_set_search_query(&s->overlay, s->ws ? ws_root(s->ws) : "", text);
+}
+
 void wave_search_backspace(WaveSession *s) {
     if (s) overlay_backspace(&s->overlay, s->ws, s->ws ? ws_root(s->ws) : "");
 }
@@ -1712,6 +1721,67 @@ int wave_search_hit(const WaveSession *s, size_t i, const char **path,
     if (col) *col = h->col;
     if (text) *text = h->text;
     return 1;
+}
+
+int wave_search_truncated(const WaveSession *s) {
+    return s ? project_search_truncated(&s->overlay.search) : 0;
+}
+
+size_t wave_search_file_count(const WaveSession *s) {
+    return s ? project_search_file_count(&s->overlay.search) : 0;
+}
+
+/* The status shown under the results ("128 matches in 9 files"), from the same
+ * helper the GLFW panel draws. */
+size_t wave_search_status(const WaveSession *s, char *out, size_t cap) {
+    if (!out || cap == 0) return 0;
+    out[0] = '\0';
+    if (!s) return 0;
+    const ProjectSearch *ps = &s->overlay.search;
+    view_search_status(out, cap, ps->unavailable, ps->query_len,
+                       project_search_running(ps), project_search_truncated(ps),
+                       (int)project_search_count(ps),
+                       (int)project_search_file_count(ps));
+    return strlen(out);
+}
+
+/* One result row, laid out by view_search_row(): the file's name and elided
+ * directory, the matched line windowed to `text_cells`, and where the query sits
+ * inside it. The strings live in a static row, valid until the next call — the
+ * caller (a single-threaded renderer) copies them out immediately. */
+int wave_search_row(const WaveSession *s, size_t i, int dir_cells,
+                    int text_cells, const char **name, const char **dir,
+                    const char **text, int *line, int *repeats,
+                    int *match_start, int *match_len, size_t *group_count) {
+    if (!s) return 0;
+    const ProjectSearch *ps = &s->overlay.search;
+    const SearchHit *h = project_search_hit(ps, i);
+    if (!h) return 0;
+    const SearchHit *prev = i ? project_search_hit(ps, i - 1) : NULL;
+
+    static ViewSearchRow row;
+    static char row_path[sizeof h->path];
+    /* view_search_row() returns `name` as a pointer into the path it was given,
+     * so the path has to outlive the call as well. */
+    snprintf(row_path, sizeof row_path, "%s", h->path);
+    row = view_search_row(row_path, h->line, h->text,
+                          overlay_query((OverlayState *)&s->overlay),
+                          prev ? prev->path : NULL, dir_cells, text_cells);
+
+    if (name) *name = row.name;
+    if (dir) *dir = row.dir;
+    if (text) *text = row.text;
+    if (line) *line = row.line;
+    if (repeats) *repeats = row.repeats;
+    if (match_start) *match_start = row.match_start;
+    if (match_len) *match_len = row.match_len;
+    if (group_count) *group_count = project_search_group_count(ps, i);
+    return 1;
+}
+
+/* Fit `text` into `cells` columns, keeping the tail: ".../orders/detail". */
+void wave_elide_left(const char *text, int cells, char *out, size_t cap) {
+    view_elide_left(out, cap, text, cells);
 }
 
 /* Open the highlighted hit at its line/column. */

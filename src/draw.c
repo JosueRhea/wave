@@ -1201,11 +1201,12 @@ void draw_search_panel(OverlayState *overlay, int fb_w, Font *font,
                   box.y + ascent + 2, (Color){0.92f, 0.93f, 0.95f});
 
     int n = (int)project_search_count(&overlay->search);
-    char status[64];
+    char status[96];
     view_search_status(status, sizeof status, overlay->search.unavailable,
                        overlay->search.query_len,
                        project_search_running(&overlay->search),
-                       project_search_truncated(&overlay->search), n);
+                       project_search_truncated(&overlay->search), n,
+                       (int)project_search_file_count(&overlay->search));
     float sw = (float)strlen(status) * adv;
     draw_text_run(font, r, status, (int)strlen(status), box.x + box.w - sw - adv,
                   box.y + ascent + 2, (Color){0.55f, 0.58f, 0.64f});

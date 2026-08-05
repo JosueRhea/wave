@@ -13,13 +13,15 @@
 
 mod ffi;
 mod frontend_config;
+mod textfield;
 
 use ffi::{flags, CloseAction, GitMode, Key, Mode, Motion, Session, TabKind, COLOR_DEFAULT};
 use frontend_config::FrontendConfig;
+use textfield::TextField;
 use gpui::{
     actions, div, point, prelude::*, px, rgb, rgba, size, App, Application, Bounds, ClickEvent,
     ClipboardItem, Context, CursorStyle, FocusHandle, HighlightStyle, KeyBinding, KeyDownEvent,
-    Div, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
+    Keystroke, Div, Menu, MenuItem, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollDelta,
     FontStyle, FontWeight, ScrollWheelEvent, StyledText, SystemMenuType, Timer, TitlebarOptions,
     UnderlineStyle, Window,
     WindowBackgroundAppearance, WindowBounds, WindowOptions,
@@ -414,6 +416,9 @@ struct WaveView {
     cmds_open: bool,
     cmds_query: String,
     cmds_sel: usize,
+    /// The ⌘⇧F search box. The front-end owns the caret and selection and hands
+    /// the finished text to the core, which only knows how to append.
+    search_field: TextField,
     /// Recent-projects overlay, openable without closing the workspace.
     recent_open: bool,
     /// Settings screen.
@@ -639,6 +644,27 @@ fn styled_line(text: String, cells: &[Cell]) -> StyledText {
     StyledText::new(text).with_highlights(highlights)
 }
 
+/// A search-result line drawn in `base`, with the matched query span repainted
+/// in the accent colour so the hit stands out. `start`/`len` are byte offsets
+/// into `text` (as the C core reports them); a negative `start` means the query
+/// is no longer present in this line and the whole thing draws plain.
+fn search_match_text(text: String, start: i32, len: i32, base: u32) -> StyledText {
+    let mut base_style = HighlightStyle::default();
+    base_style.color = Some(rgb(base).into());
+    let mut highlights = vec![(0..text.len(), base_style)];
+
+    if start >= 0 && len > 0 {
+        let (s, e) = (start as usize, (start + len) as usize);
+        if e <= text.len() && text.is_char_boundary(s) && text.is_char_boundary(e) {
+            let mut hit = HighlightStyle::default();
+            hit.color = Some(rgb(palette::accent()).into());
+            hit.font_weight = Some(FontWeight::BOLD);
+            highlights.push((s..e, hit));
+        }
+    }
+    StyledText::new(text).with_highlights(highlights)
+}
+
 impl WaveView {
     fn new(path: Option<PathBuf>, focus: FocusHandle) -> Self {
         let mut session = Session::new();
@@ -679,6 +705,7 @@ impl WaveView {
             cmds_open: false,
             cmds_query: String::new(),
             cmds_sel: 0,
+            search_field: TextField::default(),
             recent_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -1288,10 +1315,9 @@ impl WaveView {
             .collect();
 
         overlay_panel(
-            "theme".to_string(),
+            overlay_header("theme".to_string(), self.line_height - 6.0),
             rows,
             "↑↓ to preview · ⏎ to keep · esc to cancel".to_string(),
-            self.line_height - 6.0,
         )
     }
 
@@ -1346,14 +1372,16 @@ impl WaveView {
             .collect();
 
         overlay_panel(
-            format!("font › {}", self.fonts_query),
+            overlay_header(
+                format!("font › {}", self.fonts_query),
+                self.line_height - 6.0,
+            ),
             rows,
             if self.fonts_all {
                 format!("{total} families (all) · ⌃A for monospace only · current: {current}")
             } else {
                 format!("{total} monospace · ⌃A for all families · current: {current}")
             },
-            self.line_height - 6.0,
         )
     }
 
@@ -1482,7 +1510,7 @@ impl WaveView {
                 self.session.palette_open();
             }
             Cmd::ProjectSearch => {
-                self.session.search_open();
+                self.search_open();
             }
             Cmd::BufferSearch => {
                 self.session.text_input('/');
@@ -1565,10 +1593,9 @@ impl WaveView {
             .collect();
 
         overlay_panel(
-            format!("> {}", self.cmds_query),
+            overlay_header(format!("> {}", self.cmds_query), self.line_height - 6.0),
             rows,
             format!("{total} commands"),
-            self.line_height - 6.0,
         )
     }
 
@@ -1687,10 +1714,9 @@ impl WaveView {
         let query = self.session.recent_query();
         let rows = self.recent_rows(cx);
         overlay_panel(
-            format!("recent › {query}"),
+            overlay_header(format!("recent › {query}"), self.line_height - 6.0),
             rows,
             format!("{total} projects"),
-            self.line_height - 6.0,
         )
     }
 
@@ -2439,74 +2465,290 @@ impl WaveView {
             .collect();
 
         overlay_panel(
-            format!("› {query}"),
+            overlay_header(format!("› {query}"), self.line_height - 6.0),
             rows,
             format!("{total} files"),
-            self.line_height - 6.0,
         )
     }
 
-    fn render_search(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        const VISIBLE: usize = 12;
+    /// Project-search results, grouped by file: each file names itself once on
+    /// its own row and its matches are stacked underneath, indented. Every row
+    /// is selectable — clicking a match opens it, clicking the file opens its
+    /// first one.
+    fn render_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A budget in *rows*, not hits: a file header spends one too, so a set
+        // spread thin over many files shows fewer matches rather than spilling
+        // out of the panel. The selected hit is always drawn, budget or not.
+        const MAX_ROWS: usize = 16;
+        const AROUND: usize = 8;
+        const LINE_COL: f32 = 40.;
+        const INDENT: f32 = 12.;
+        const GAP: f32 = 8.;
+
         let total = self.session.search_count();
         let sel = self.session.search_selected().min(total.saturating_sub(1));
-        let query = self.session.search_query();
-        let running = self.session.search_running();
-        let first = sel
-            .saturating_sub(VISIBLE / 2)
-            .min(total.saturating_sub(VISIBLE.min(total)));
-        let last = (first + VISIBLE).min(total);
+        let status = self.session.search_status();
 
-        let rows: Vec<_> = (first..last)
-            .filter_map(|i| {
-                let h = self.session.search_hit(i)?;
-                let selected = i == sel;
-                Some(
+        // Columns, not pixels: the core windows each match line to fit, so the
+        // hit stays on screen instead of being clipped by the panel edge.
+        let adv = self.advance(window).max(1.0);
+        let inner = OVERLAY_WIDTH - PANEL_PAD * 2.0;
+        let text_cells = ((inner - LINE_COL - INDENT - GAP) / adv) as i32;
+        let head_cells = (inner / adv) as i32;
+
+        let first = sel
+            .saturating_sub(AROUND / 2)
+            .min(total.saturating_sub(AROUND.min(total)));
+
+        let mut rows: Vec<gpui::Stateful<gpui::Div>> = Vec::new();
+        let mut i = first;
+        while i < total && (rows.len() < MAX_ROWS || i <= sel) {
+            let Some(row) = self.session.search_row(i, VIEW_DIR_CELLS, text_cells) else {
+                break;
+            };
+            let selected = i == sel;
+
+            // Name the file once per run of hits. `first` may land mid-run when
+            // the list is scrolled, so head that case too — otherwise the top
+            // matches would float with no file above them.
+            if !row.repeats || i == first {
+                let count = row.group_count;
+                let dir = ffi::elide_left(
+                    &row.dir,
+                    head_cells - row.name.chars().count() as i32 - count.to_string().len() as i32 - 4,
+                );
+                rows.push(
                     div()
-                        .id(("search-row", i))
+                        .id(("search-file", i))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(GAP))
                         .h(px(self.line_height))
-                        .px(px(10.))
-                        .when(selected, |d| d.bg(rgb(palette::selection_bg())))
+                        .px(px(PANEL_PAD))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(palette::tab_active_bg())))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let cur = this.session.search_selected();
-                            this.session.search_move(i as i32 - cur as i32);
-                            if this.session.search_accept() {
-                                this.scroll = 0;
-                                this.follow_cursor();
-                            }
-                            cx.notify();
+                            this.search_goto(i, cx);
                         }))
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(palette::dir_fg()))
-                                .child(format!("{}:{}", h.path, h.line)),
+                                .text_color(rgb(palette::default_fg()))
+                                .child(row.name.clone()),
                         )
                         .child(
                             div()
-                                .text_color(rgb(if selected { palette::default_fg() } else { palette::dim_fg() }))
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .child(h.text),
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(rgb(palette::gutter_fg()))
+                                .child(dir),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(palette::dim_fg()))
+                                .child(format!("{count}")),
                         ),
-                )
-            })
-            .collect();
+                );
+            }
 
-        overlay_panel(
-            format!("search › {query}"),
-            rows,
-            if running {
-                "searching…".to_string()
-            } else {
-                format!("{total} matches")
-            },
-            self.line_height - 6.0,
-        )
+            let base = if selected { palette::default_fg() } else { palette::muted_fg() };
+            rows.push(
+                div()
+                    .id(("search-row", i))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(GAP))
+                    .h(px(self.line_height))
+                    .pl(px(PANEL_PAD + INDENT))
+                    .pr(px(PANEL_PAD))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(rgb(palette::selection_bg())))
+                    .when(!selected, |d| {
+                        d.hover(|s| s.bg(rgb(palette::tab_active_bg())))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.search_goto(i, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(LINE_COL))
+                            .text_color(rgb(palette::gutter_fg()))
+                            .child(format!("{}", row.line)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(search_match_text(
+                                row.text,
+                                row.match_start,
+                                row.match_len,
+                                base,
+                            )),
+                    ),
+            );
+            i += 1;
+        }
+
+        overlay_panel(self.search_box(adv), rows, status)
+    }
+
+    /// The search box: the query with its selection shaded and the caret drawn
+    /// where it actually is. Monospace, so a column is `adv` pixels and the caret
+    /// can simply be placed at one.
+    fn search_box(&self, adv: f32) -> gpui::Div {
+        const PROMPT: &str = "search › ";
+
+        let field = &self.search_field;
+        let query = field.text();
+        let mut highlights = Vec::new();
+        if let Some(sel) = field.selection() {
+            let mut style = HighlightStyle::default();
+            style.background_color = Some(rgb(palette::selection_bg()).into());
+            highlights.push((PROMPT.len() + sel.start..PROMPT.len() + sel.end, style));
+        }
+        let text = StyledText::new(format!("{PROMPT}{query}")).with_highlights(highlights);
+
+        // An empty box says what it is for; the caret sits over the hint.
+        let hint = field.is_empty().then(|| {
+            div()
+                .absolute()
+                .left(px(PROMPT.chars().count() as f32 * adv))
+                .text_color(rgb(palette::gutter_fg()))
+                .child("find in project")
+        });
+        let caret_x = (PROMPT.chars().count() + field.caret_col()) as f32 * adv;
+
+        // Solid, like the caret in every other overlay header: the blink phase is
+        // only kept up to date while the editor renders, and the search box has
+        // to work with no file open at all.
+        div()
+            .relative()
+            .flex_1()
+            .child(text)
+            .children(hint)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(caret_x))
+                    .top(px(2.))
+                    .child(caret(self.line_height - 6.0)),
+            )
+    }
+
+    /// The search box's own key handling: everything a macOS text field does.
+    /// Returns whether the key was consumed — Escape, Enter and ↑/↓ belong to the
+    /// results list, so they are deliberately left alone.
+    fn search_key(&mut self, ks: &Keystroke, typed: Option<String>, cx: &mut Context<Self>) -> bool {
+        use textfield::{Delete, Motion as TfMotion};
+        let m = &ks.modifiers;
+        let extend = m.shift;
+
+        match ks.key.as_str() {
+            // ⌥ moves by word, ⌘ to the line's edges, as everywhere else on the
+            // platform.
+            "left" | "right" | "home" | "end" => {
+                let motion = match (ks.key.as_str(), m.alt, m.platform) {
+                    ("left", true, _) => TfMotion::WordLeft,
+                    ("right", true, _) => TfMotion::WordRight,
+                    ("left", _, true) | ("home", ..) => TfMotion::Start,
+                    ("right", _, true) | ("end", ..) => TfMotion::End,
+                    ("left", ..) => TfMotion::Left,
+                    _ => TfMotion::Right,
+                };
+                self.search_field.move_caret(motion, extend);
+            }
+            "backspace" => {
+                let kind = if m.platform {
+                    Delete::ToStart
+                } else if m.alt {
+                    Delete::WordBack
+                } else {
+                    Delete::Back
+                };
+                self.search_edit(|f| f.delete(kind));
+            }
+            "delete" => {
+                let kind = if m.platform {
+                    Delete::ToEnd
+                } else if m.alt {
+                    Delete::WordForward
+                } else {
+                    Delete::Forward
+                };
+                self.search_edit(|f| f.delete(kind));
+            }
+            "a" if m.platform => self.search_field.select_all(),
+            "v" if m.platform => {
+                let text = cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .unwrap_or_default();
+                self.search_edit(|f| f.insert(&text));
+            }
+            "c" | "x" if m.platform => {
+                let selected = self.search_field.selected_text().to_string();
+                if selected.is_empty() {
+                    return true;
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(selected));
+                if ks.key == "x" {
+                    self.search_edit(|f| f.delete(Delete::Back));
+                }
+            }
+            _ => {
+                // Everything else printable is text. Enter and Tab arrive with a
+                // key_char of their own ("\n", "\t"), so filter to what actually
+                // types: the rest belongs to the results list below, and ⌘/⌃
+                // chords to the global shortcuts.
+                let text: String = typed
+                    .filter(|_| !m.platform && !m.control)
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                if text.is_empty() {
+                    return false;
+                }
+                self.search_edit(|f| f.insert(&text));
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Open the search overlay, adopting the query the core still holds from the
+    /// last run so reopening lands you back in it with the caret at the end.
+    fn search_open(&mut self) {
+        self.session.search_open();
+        self.search_field = TextField::new(&self.session.search_query());
+    }
+
+    /// Apply an edit to the search box. Only a change in the text re-runs the
+    /// search — moving the caret must not spawn another ripgrep.
+    fn search_edit(&mut self, edit: impl FnOnce(&mut TextField) -> bool) {
+        if edit(&mut self.search_field) {
+            let text = self.search_field.text().to_string();
+            self.session.search_set_query(&text);
+        }
+    }
+
+    /// Select hit `i` and open it, as Enter on that row would.
+    fn search_goto(&mut self, i: usize, cx: &mut Context<Self>) {
+        let cur = self.session.search_selected();
+        self.session.search_move(i as i32 - cur as i32);
+        if self.session.search_accept() {
+            self.scroll = 0;
+            self.follow_cursor();
+        }
+        cx.notify();
     }
 
     /// The completion menu, anchored under the cursor. This is the one place
@@ -2763,10 +3005,36 @@ impl WaveView {
         })
     }
 
+    /// The character a keystroke types, with Caps Lock applied.
+    ///
+    /// gpui builds `key_char` from the keyboard layout under ⇧ and ⌥ only — Caps
+    /// Lock is not one of the modifiers it passes to the layout — so with it on,
+    /// every letter still arrives lowercase and the lock looks broken everywhere
+    /// text is typed: the editor, the search box, the terminal. Inverting the
+    /// case of the letters reproduces macOS: Caps Lock uppercases, and ⇧ with it
+    /// on types lowercase again.
+    fn typed_text(ks: &Keystroke, window: &Window) -> Option<String> {
+        let text = ks.key_char.clone()?;
+        if !window.capslock().on {
+            return Some(text);
+        }
+        Some(
+            text.chars()
+                .flat_map(|c| {
+                    if c.is_uppercase() {
+                        c.to_lowercase().collect::<Vec<_>>()
+                    } else {
+                        c.to_uppercase().collect()
+                    }
+                })
+                .collect(),
+        )
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let key = ks.key.as_str();
-        let typed = ks.key_char.clone();
+        let typed = Self::typed_text(ks, window);
         let plain = !ks.modifiers.platform && !ks.modifiers.control;
         // Any key holds the caret solid, so it never blinks out mid-word. Set
         // for every key, not just the ones that edit: arrowing around is just
@@ -3005,16 +3273,17 @@ impl WaveView {
             return;
         }
 
+        // The search box is a real text field, so it claims the editing keys
+        // (and ⌘A/⌘V/⌘C/⌘X) before the global shortcuts further down would take
+        // them for the editor behind the overlay.
+        if self.session.search_active() && self.search_key(ks, typed.clone(), cx) {
+            return;
+        }
+
         if self.session.palette_active() || self.session.search_active() {
             let is_search = self.session.search_active();
             match key {
-                "escape" => {
-                    if is_search {
-                        self.session.palette_close(); // overlay_close covers both
-                    } else {
-                        self.session.palette_close();
-                    }
-                }
+                "escape" => self.session.palette_close(), // overlay_close covers both
                 "enter" => {
                     let opened = if is_search {
                         self.session.search_accept()
@@ -3040,20 +3309,10 @@ impl WaveView {
                         self.session.palette_move(1)
                     }
                 }
-                "backspace" => {
-                    if is_search {
-                        self.session.search_backspace()
-                    } else {
-                        self.session.palette_backspace()
-                    }
-                }
+                "backspace" => self.session.palette_backspace(),
                 _ => {
                     if let (true, Some(t)) = (plain, typed) {
-                        if is_search {
-                            self.session.search_input(&t);
-                        } else {
-                            self.session.palette_input(&t);
-                        }
+                        self.session.palette_input(&t);
                     }
                 }
             }
@@ -3102,8 +3361,9 @@ impl WaveView {
                     }
                 }
                 // Find in file. Vim reaches this with `/`, which in standard
-                // editing is just a slash.
-                "f" if !self.session.vim_enabled() => {
+                // editing is just a slash. Shift is reserved for ⌘⇧F project
+                // search below — without the guard this arm would steal it.
+                "f" if !ks.modifiers.shift && !self.session.vim_enabled() => {
                     self.session.buffer_search_open();
                 }
                 "/" if !self.session.vim_enabled() => {
@@ -3162,7 +3422,7 @@ impl WaveView {
                     self.session.palette_open();
                 }
                 "f" if ks.modifiers.shift => {
-                    self.session.search_open();
+                    self.search_open();
                 }
                 "t" => {
                     let ok = self.session.term_open("terminal", "");
@@ -3513,12 +3773,31 @@ impl WaveView {
     }
 }
 
+/// Width of the centered overlay panels, and the horizontal padding their rows
+/// sit in. Shared so the search overlay can turn the leftover space into a
+/// column budget for the C core to window match lines against.
+const OVERLAY_WIDTH: f32 = 760.;
+const PANEL_PAD: f32 = 10.;
+/// Ask the core for the whole directory (it caps at `VIEW_SEARCH_DIR_MAX`) and
+/// elide it here, once the file name it shares the row with is known.
+const VIEW_DIR_CELLS: i32 = 255;
+
+/// A plain overlay header: a label with the caret parked at its end. Inputs that
+/// track a real caret build their own row instead — see `search_box`.
+fn overlay_header(label: String, caret_h: f32) -> gpui::Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(label)
+        .child(caret(caret_h))
+}
+
 /// Shared chrome for the centered Cmd-P / Cmd-Shift-F panels.
 fn overlay_panel(
-    header: String,
+    header: gpui::Div,
     rows: Vec<gpui::Stateful<gpui::Div>>,
     footer: String,
-    caret_h: f32,
 ) -> gpui::Div {
     div()
         .absolute()
@@ -3531,7 +3810,7 @@ fn overlay_panel(
         .child(
             div()
                 .mt(px(56.))
-                .w(px(680.))
+                .w(px(OVERLAY_WIDTH))
                 .flex()
                 .flex_col()
                 .bg(rgb(palette::sidebar_bg()))
@@ -3545,18 +3824,19 @@ fn overlay_panel(
                         .flex()
                         .flex_row()
                         .items_center()
-                        .px(px(10.))
+                        .px(px(PANEL_PAD))
                         .border_b_1()
                         .border_color(rgb(palette::border()))
                         .text_color(rgb(palette::default_fg()))
-                        .child(header)
-                        .child(caret(caret_h)),
+                        .child(header),
                 )
                 .children(rows)
                 .child(
                     div()
-                        .h(px(20.))
-                        .px(px(10.))
+                        .h(px(22.))
+                        .px(px(PANEL_PAD))
+                        .border_t_1()
+                        .border_color(rgb(palette::border()))
                         .text_color(rgb(palette::gutter_fg()))
                         .child(footer),
                 ),
@@ -3750,7 +4030,10 @@ impl Render for WaveView {
         let settings = self.settings_open.then(|| self.render_settings(cx));
         let fonts = self.fonts_open.then(|| self.render_fonts(window, cx));
         let themes = self.themes_open.then(|| self.render_themes(cx));
-        let search = self.session.search_active().then(|| self.render_search(cx));
+        let search = self
+            .session
+            .search_active()
+            .then(|| self.render_search(window, cx));
         let completion = (self.session.complete_active() && self.session.complete_count() > 0)
             .then(|| self.render_completion(cx));
         let popover = self.session.popover_active().then(|| self.render_popover(cx));

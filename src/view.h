@@ -45,6 +45,23 @@ typedef struct {
     float y;
 } ViewPoint;
 
+/* Longest directory / match-line either front-end asks a row to hold. */
+#define VIEW_SEARCH_DIR_MAX 256
+#define VIEW_SEARCH_TEXT_MAX 544
+
+/* One project-search hit, laid out for display: the file's own name carries the
+ * row, the directory trails it elided, and the matched line is windowed so the
+ * match itself is always on screen with the query located inside it. */
+typedef struct {
+    const char *name;  /* file base name — points into the caller's path */
+    char dir[VIEW_SEARCH_DIR_MAX];   /* parent dirs, elided; "" at the root */
+    char text[VIEW_SEARCH_TEXT_MAX]; /* the matched line, windowed */
+    int line;
+    int repeats;      /* 1 when the row continues the previous row's file */
+    int match_start;  /* byte offset of the query in `text`, -1 when absent */
+    int match_len;
+} ViewSearchRow;
+
 typedef enum {
     VIEW_OVERLAY_DRAW_NONE,
     VIEW_OVERLAY_DRAW_PALETTE,
@@ -124,7 +141,13 @@ ViewSidebarRow view_sidebar_row(const WsEntry *entry, const char *active_path,
                                 float line_h, float ascent);
 void view_tab_label(const Editor *e, char *out, size_t cap);
 void view_search_status(char *out, size_t cap, int unavailable, int query_len,
-                        int running, int truncated, int count);
+                        int running, int truncated, int count, int files);
+int view_query_case_sensitive(const char *query);
+int view_match_offset(const char *text, const char *query);
+void view_elide_left(char *out, size_t cap, const char *text, int cells);
+ViewSearchRow view_search_row(const char *path, int line, const char *text,
+                              const char *query, const char *prev_path,
+                              int dir_cells, int text_cells);
 ViewStatusKind view_status_text(char *out, size_t cap, const char *command,
                                 const char *info, const char *mode,
                                 const char *path, int modified,

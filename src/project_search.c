@@ -94,3 +94,35 @@ const SearchHit *project_search_hit(const ProjectSearch *ps, size_t i) {
 int project_search_truncated(const ProjectSearch *ps) {
     return ps && search_truncated(ps->search);
 }
+
+/* ripgrep writes each file's matches as one contiguous block, so a file's hits
+ * are always neighbours in the list: both counts below just watch for the path
+ * changing rather than building an index. */
+size_t project_search_group_count(const ProjectSearch *ps, size_t i) {
+    const SearchHit *h = project_search_hit(ps, i);
+    if (!h) return 0;
+    size_t n = 1;
+    for (size_t j = i; j-- > 0;) {
+        const SearchHit *p = project_search_hit(ps, j);
+        if (!p || strcmp(p->path, h->path)) break;
+        n++;
+    }
+    for (size_t j = i + 1;; j++) {
+        const SearchHit *p = project_search_hit(ps, j);
+        if (!p || strcmp(p->path, h->path)) break;
+        n++;
+    }
+    return n;
+}
+
+size_t project_search_file_count(const ProjectSearch *ps) {
+    size_t total = project_search_count(ps), files = 0;
+    const char *prev = NULL;
+    for (size_t i = 0; i < total; i++) {
+        const SearchHit *h = project_search_hit(ps, i);
+        if (!h) break;
+        if (!prev || strcmp(prev, h->path)) files++;
+        prev = h->path;
+    }
+    return files;
+}
