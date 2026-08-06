@@ -624,7 +624,7 @@ void wave_drag_to(WaveSession *s, int line, int col) {
 int wave_has_selection(const WaveSession *s) {
     const Editor *e = s ? tabs_current_const(&s->tabs) : NULL;
     if (!e || !e->buf) return 0;
-    return s->modal.mode == MODE_VISUAL;
+    return s->modal.mode == MODE_VISUAL || s->modal.mode == MODE_VISUAL_BLOCK;
 }
 
 /* The selected text, for Cmd-C. Caller must free via wave_string_free(). */
@@ -632,6 +632,35 @@ char *wave_selection_text(WaveSession *s) {
     Editor *e = cur(s);
     if (!e || !e->buf) return NULL;
     if (!wave_has_selection(s)) return NULL;
+    if (s->modal.mode == MODE_VISUAL_BLOCK) {
+        size_t row0, row1, col0, col1;
+        if (!editor_block_bounds(e, &row0, &row1, &col0, &col1)) return NULL;
+        size_t cap = 0;
+        for (size_t row = row0; row <= row1; row++) {
+            EditorRange r;
+            if (editor_block_line_range(e, row, col0, col1, &r))
+                cap += r.end - r.start;
+            cap += 1;
+        }
+        char *buf = malloc(cap + 1);
+        if (!buf) return NULL;
+        size_t n = 0;
+        for (size_t row = row0; row <= row1; row++) {
+            if (row > row0) buf[n++] = '\n';
+            EditorRange r;
+            if (editor_block_line_range(e, row, col0, col1, &r)) {
+                char *slice = editor_range_text(e, r.start, r.end);
+                if (slice) {
+                    size_t sn = strlen(slice);
+                    memcpy(buf + n, slice, sn);
+                    n += sn;
+                    free(slice);
+                }
+            }
+        }
+        buf[n] = '\0';
+        return buf;
+    }
     return editor_copy_text(e, 1);
 }
 
@@ -643,11 +672,22 @@ void wave_string_free(char *p) { free(p); }
 int wave_line_selection(WaveSession *s, size_t line, size_t *a, size_t *b) {
     Editor *e = cur(s);
     if (!e || !e->buf) return 0;
-    if (s->modal.mode != MODE_VISUAL) return 0;
-    EditorRange sel;
-    if (!editor_visual_range(e, &sel)) return 0;
+    if (s->modal.mode != MODE_VISUAL && s->modal.mode != MODE_VISUAL_BLOCK)
+        return 0;
     size_t start, end;
     if (!line_bounds(e, line, &start, &end)) return 0;
+    if (s->modal.mode == MODE_VISUAL_BLOCK) {
+        size_t row0, row1, col0, col1;
+        if (!editor_block_bounds(e, &row0, &row1, &col0, &col1)) return 0;
+        if (line < row0 || line > row1) return 0;
+        EditorRange r;
+        if (!editor_block_line_range(e, line, col0, col1, &r)) return 0;
+        *a = r.start - start;
+        *b = r.end - start;
+        return 1;
+    }
+    EditorRange sel;
+    if (!editor_visual_range(e, &sel)) return 0;
     if (sel.end <= start || sel.start > end) return 0;
     size_t lo = sel.start < start ? start : sel.start;
     size_t hi = sel.end > end ? end : sel.end;
@@ -692,7 +732,11 @@ unsigned wave_text_input(WaveSession *s, unsigned int cp) {
     }
 
     if (s->modal.mode == MODE_INSERT) {
-        editor_apply_text_input(e, cp);
+        /* After visual-block I/A/c, extras must type together even under vim. */
+        if (e->extra_n > 0)
+            standard_multi_text_input(e, &s->modal, cp);
+        else
+            editor_apply_text_input(e, cp);
         editor_update_highlighter(e);
         lsp_manager_push_change(&s->lsp, e);
         comp_after_insert(s, e, cp);
@@ -749,9 +793,24 @@ int wave_special_key(WaveSession *s, int key) {
     int handled;
     if (!s->config.vim)
         handled = standard_multi_editor_key(e, &s->modal, (EditorKey)key);
-    else if (s->modal.mode == MODE_INSERT)
-        handled = editor_apply_insert_key(e, (EditorKey)key);
-    else
+    else if (s->modal.mode == MODE_INSERT) {
+        EditorKey ek = (EditorKey)key;
+        /* Multi-carets from block insert: arrows move every caret; delete keys
+         * edit every caret. */
+        if (e->extra_n > 0) {
+            StdMotion motion = STD_MOTION_NONE;
+            if (ek == EDITOR_KEY_LEFT) motion = STD_MOTION_LEFT;
+            else if (ek == EDITOR_KEY_RIGHT) motion = STD_MOTION_RIGHT;
+            else if (ek == EDITOR_KEY_UP) motion = STD_MOTION_UP;
+            else if (ek == EDITOR_KEY_DOWN) motion = STD_MOTION_DOWN;
+            if (motion != STD_MOTION_NONE)
+                handled = standard_multi_motion(e, &s->modal, motion, 0);
+            else
+                handled = standard_multi_editor_key(e, &s->modal, ek);
+        } else {
+            handled = editor_apply_insert_key(e, ek);
+        }
+    } else
         handled = editor_apply_motion_key(e, (EditorKey)key);
     editor_update_highlighter(e);
     lsp_manager_push_change(&s->lsp, e);
@@ -765,10 +824,9 @@ int wave_special_key(WaveSession *s, int key) {
 int wave_motion(WaveSession *s, int motion, int extend) {
     Editor *e = cur(s);
     if (!s || !e || !e->buf) return 0;
-    /* A motion collapses to one caret, which is what every editor with
-     * multiple carets does — the alternative is N carets drifting apart. */
-    standard_clear_carets(e);
-    int moved = standard_motion(e, &s->modal, (StdMotion)motion, extend);
+    /* Every caret moves together — the VS Code / Cursor model. Clearing extras
+     * on arrow keys made ⌘D feel broken: type worked, navigation did not. */
+    int moved = standard_multi_motion(e, &s->modal, (StdMotion)motion, extend);
     if (moved) popover_close(&s->pop);
     return moved;
 }
@@ -1065,8 +1123,22 @@ void wave_escape(WaveSession *s) {
         }
         return;
     }
+    if (e) {
+        standard_clear_carets(e);
+        e->anchor = e->cursor;
+        editor_cancel_group(e);
+    }
     modal_enter_normal(&s->modal);
-    if (e) editor_cancel_group(e);
+}
+
+/* Ctrl+V — enter visual-block with the caret as both corners. */
+void wave_enter_visual_block(WaveSession *s) {
+    Editor *e = cur(s);
+    if (!s || !e || !e->buf) return;
+    if (!s->config.vim) return;
+    standard_clear_carets(e);
+    e->anchor = e->cursor;
+    modal_enter_visual_block(&s->modal);
 }
 
 int wave_undo(WaveSession *s) {
@@ -2350,12 +2422,28 @@ int wave_paste(WaveSession *s, const char *text) {
     if (!e || !e->buf || !text || !*text) return 0;
 
     int replace = wave_has_selection(s);
+    if (s->modal.mode == MODE_VISUAL_BLOCK) {
+        /* Character-wise replace would span the wrong range; leave the caret at
+         * the block's top-left and paste there. */
+        size_t row0, row1, col0, col1;
+        if (editor_block_bounds(e, &row0, &row1, &col0, &col1)) {
+            const PieceTable *pt = buffer_pt(e->buf);
+            size_t start = pt_line_start(pt, row0);
+            size_t end = line_end_of(pt, start);
+            size_t len = end - start;
+            e->cursor = e->anchor = start + (col0 < len ? col0 : len);
+        }
+        standard_clear_carets(e);
+        enter_rest_mode(s);
+        replace = 0;
+    }
     EditorPasteResult r = editor_paste_text(e, text, replace);
     if (r == EDITOR_PASTE_NONE) return 0;
 
     /* The selection is consumed by the paste either way; under standard editing
      * that lands back in insert with the caret after the pasted text. */
-    if (s->modal.mode == MODE_VISUAL) enter_rest_mode(s);
+    if (s->modal.mode == MODE_VISUAL || s->modal.mode == MODE_VISUAL_BLOCK)
+        enter_rest_mode(s);
     editor_update_highlighter(e);
     lsp_manager_push_change(&s->lsp, e);
     refresh_diags(s);
@@ -2584,9 +2672,22 @@ size_t wave_line_selections(WaveSession *s, size_t line, size_t *starts,
                             size_t *ends, size_t max) {
     Editor *e = cur(s);
     if (!e || !e->buf || !starts || !ends || max == 0) return 0;
-    if (s->modal.mode != MODE_VISUAL) return 0;
+    if (s->modal.mode != MODE_VISUAL && s->modal.mode != MODE_VISUAL_BLOCK)
+        return 0;
     size_t line_a, line_b;
     if (!line_bounds(e, line, &line_a, &line_b)) return 0;
+
+    /* Visual-block: one rectangular slice on this line, if any. */
+    if (s->modal.mode == MODE_VISUAL_BLOCK) {
+        size_t row0, row1, col0, col1;
+        if (!editor_block_bounds(e, &row0, &row1, &col0, &col1)) return 0;
+        if (line < row0 || line > row1) return 0;
+        EditorRange r;
+        if (!editor_block_line_range(e, line, col0, col1, &r)) return 0;
+        starts[0] = r.start - line_a;
+        ends[0] = r.end - line_a;
+        return 1;
+    }
 
     size_t n = 0;
     size_t keep_cursor = e->cursor, keep_anchor = e->anchor;

@@ -128,9 +128,9 @@ int standard_insert_line(Editor *e, ModalState *m, int below);
 /* ---- multiple carets ----
  *
  * The editor proper carries one cursor and one anchor; these are the *extra*
- * ones, kept beside it. Only text insertion and the delete keys honour them —
- * every other command clears them first — which keeps ⌘D useful without every
- * motion, LSP request and highlight path having to learn about N carets.
+ * ones, kept beside it. Text insertion, delete keys, and motions honour them;
+ * other commands clear them first — which keeps ⌘D useful without every LSP
+ * request and highlight path having to learn about N carets.
  *
  * Each extra caret has its own anchor, so ⌘D can carry a selection per caret. */
 #define STANDARD_MAX_CARETS EDITOR_MAX_EXTRA_CARETS
@@ -154,6 +154,10 @@ int standard_select_next_occurrence(Editor *e, ModalState *m);
 /* Apply to every caret, primary included. These are the only edits that do. */
 int standard_multi_text_input(Editor *e, ModalState *m, unsigned int cp);
 int standard_multi_editor_key(Editor *e, ModalState *m, EditorKey key);
+
+/* Move every caret with the same motion. Shift (`extend`) grows each caret's
+ * own selection. With no extras this is exactly standard_motion(). */
+int standard_multi_motion(Editor *e, ModalState *m, StdMotion motion, int extend);
 
 /* Read back extra caret i (0-based), for painting. */
 int standard_caret_at(const Editor *e, size_t i, size_t *anchor, size_t *cursor);

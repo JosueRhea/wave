@@ -1,13 +1,8 @@
 /* updater_mac.m — the macOS half of the auto-updater: ask GitHub for the latest
  * release, download its .dmg, and swap the running Wave.app for the one inside.
  *
- * This lives apart from mac.m, and in the *core* object set rather than the
- * GLFW-only one, because both front-ends need it. Until 0.1.17 all of this sat
- * in mac.m, which is linked only into the GLFW binary — so when Wave.app started
- * shipping the GPUI front-end the updater silently went away with it, and every
- * install from that release was stranded on manual downloads. Nothing here
- * touches GLFW or OpenGL; it is Foundation + one AppKit call to quit, so it
- * links into either front-end unchanged.
+ * Linked into the headless core (libwave.a) so the GPUI front-end gets it for
+ * free. It is Foundation + one AppKit call to quit — no OpenGL.
  *
  * The version comparison itself is in updater.c (pure C, tested); this file is
  * only the I/O around it.

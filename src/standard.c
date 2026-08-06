@@ -3,6 +3,7 @@
 #include "buffer.h"
 #include "piece_table.h"
 
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -359,10 +360,9 @@ int standard_delete_to_line_start(Editor *e, ModalState *m) {
     return 1;
 }
 
-/* Every language Wave highlights (C, JavaScript, TypeScript, TSX) uses `//`,
- * and it is a reasonable default for an unrecognised file too, so the token is
- * fixed rather than looked up per language. If a grammar with a different
- * comment syntax is ever added, this is the one place to make it per-language. */
+/* Most languages Wave highlights (C, JavaScript, TypeScript, TSX, JSON) use
+ * `//`. Dotenv uses `#`, so if comment toggling is ever made per-language, this
+ * is the place — for now `//` remains the fixed default. */
 #define STD_COMMENT "// "
 
 static size_t line_indent_of(const PieceTable *pt, size_t start, size_t end) {
@@ -699,6 +699,17 @@ static void store_carets(Editor *e, ModalState *m, CaretRef *c, size_t n) {
     sync_selection(e, m);
 }
 
+/* After editing at `at`, bump already-processed carets (indices < i). Carets
+ * are walked high→low so unprocessed lower offsets stay valid; once saved,
+ * a later lower edit still shifts the buffer under those higher cursors. */
+static void adjust_higher_carets(CaretRef *c, size_t i, size_t at, ptrdiff_t delta) {
+    if (delta == 0) return;
+    for (size_t j = 0; j < i; j++) {
+        if (c[j].cursor >= at) c[j].cursor = (size_t)((ptrdiff_t)c[j].cursor + delta);
+        if (c[j].anchor >= at) c[j].anchor = (size_t)((ptrdiff_t)c[j].anchor + delta);
+    }
+}
+
 int standard_multi_text_input(Editor *e, ModalState *m, unsigned int cp) {
     if (!e || !m || !e->buf) return 0;
     if (e->extra_n == 0) return standard_text_input(e, m, cp);
@@ -712,8 +723,12 @@ int standard_multi_text_input(Editor *e, ModalState *m, unsigned int cp) {
         e->cursor = c[i].cursor;
         e->anchor = c[i].anchor;
         m->mode = (c[i].cursor != c[i].anchor) ? MODE_VISUAL : MODE_INSERT;
+        size_t at = e->cursor < e->anchor ? e->cursor : e->anchor;
+        size_t before = pt_length(buffer_pt(e->buf));
         standard_text_input(e, m, cp);
+        ptrdiff_t delta = (ptrdiff_t)pt_length(buffer_pt(e->buf)) - (ptrdiff_t)before;
         c[i].cursor = c[i].anchor = e->cursor;
+        adjust_higher_carets(c, i, at, delta);
     }
     store_carets(e, m, c, n);
     e->group_open = 1;
@@ -732,12 +747,36 @@ int standard_multi_editor_key(Editor *e, ModalState *m, EditorKey key) {
         e->cursor = c[i].cursor;
         e->anchor = c[i].anchor;
         m->mode = (c[i].cursor != c[i].anchor) ? MODE_VISUAL : MODE_INSERT;
+        size_t at = e->cursor < e->anchor ? e->cursor : e->anchor;
+        size_t before = pt_length(buffer_pt(e->buf));
         handled |= standard_editor_key(e, m, key);
+        ptrdiff_t delta = (ptrdiff_t)pt_length(buffer_pt(e->buf)) - (ptrdiff_t)before;
         c[i].cursor = c[i].anchor = e->cursor;
+        adjust_higher_carets(c, i, at, delta);
     }
     store_carets(e, m, c, n);
     e->group_open = 1;
     return handled;
+}
+
+int standard_multi_motion(Editor *e, ModalState *m, StdMotion motion, int extend) {
+    if (!e || !m || !e->buf || motion == STD_MOTION_NONE) return 0;
+    if (e->extra_n == 0) return standard_motion(e, m, motion, extend);
+
+    CaretRef c[EDITOR_MAX_EXTRA_CARETS + 1];
+    size_t n = collect_carets(e, c);
+    e->group_open = 0;
+    int moved = 0;
+    for (size_t i = 0; i < n; i++) {
+        e->cursor = c[i].cursor;
+        e->anchor = c[i].anchor;
+        m->mode = (c[i].cursor != c[i].anchor) ? MODE_VISUAL : MODE_INSERT;
+        moved |= standard_motion(e, m, motion, extend);
+        c[i].cursor = e->cursor;
+        c[i].anchor = e->anchor;
+    }
+    store_carets(e, m, c, n);
+    return moved;
 }
 
 void standard_set_enabled(Editor *e, ModalState *m, int enabled) {

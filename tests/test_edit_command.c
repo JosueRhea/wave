@@ -1,6 +1,7 @@
 /* test_edit_command.c — vim-style edit commands without the GUI shell. */
 #include "test.h"
 #include "edit_command.h"
+#include "standard.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,79 @@ int main(void) {
     CHECK_STR(y.text, "bcd");
     text = editor_text(&e);
     CHECK_STR(text, "aef\n");
+    free(text);
+    editor_close(&e);
+    yank_free(&y);
+
+    /* ---- visual-block (Ctrl+V) ---- */
+    editor_set_selection_exclusive(0);
+    modal_init(&m);
+    fill(&e, "abcd\nefgh\nijkl\n");
+    e.cursor = e.anchor = 1; /* 'b' */
+    modal_enter_visual_block(&m);
+    CHECK_EQ(m.mode, MODE_VISUAL_BLOCK);
+    edit_command_apply(&e, &m, &y, 'j'); /* down to 'f' */
+    edit_command_apply(&e, &m, &y, 'l'); /* right to 'g' */
+    {
+        size_t r0, r1, c0, c1;
+        CHECK(editor_block_bounds(&e, &r0, &r1, &c0, &c1));
+        CHECK_EQ(r0, 0u);
+        CHECK_EQ(r1, 1u);
+        CHECK_EQ(c0, 1u);
+        CHECK_EQ(c1, 3u); /* exclusive end */
+    }
+    r = edit_command_apply(&e, &m, &y, 'd');
+    CHECK(r.flags & EDIT_COMMAND_YANKED);
+    CHECK_EQ(m.mode, MODE_NORMAL);
+    CHECK_STR(y.text, "bc\nfg");
+    text = editor_text(&e);
+    CHECK_STR(text, "ad\neh\nijkl\n");
+    free(text);
+    editor_close(&e);
+    yank_free(&y);
+
+    modal_init(&m);
+    fill(&e, "aaa\nbbb\nccc\n");
+    e.cursor = e.anchor = 0;
+    modal_enter_visual_block(&m);
+    edit_command_apply(&e, &m, &y, 'j');
+    edit_command_apply(&e, &m, &y, 'j');
+    r = edit_command_apply(&e, &m, &y, 'I');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    CHECK_EQ(standard_caret_count(&e), 2u);
+    CHECK(standard_multi_text_input(&e, &m, 'X'));
+    text = editor_text(&e);
+    CHECK_STR(text, "Xaaa\nXbbb\nXccc\n");
+    free(text);
+    CHECK_EQ(e.cursor, 1u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 11u); /* after X on line 2 */
+        CHECK(standard_caret_at(&e, 1, &ca, &cc));
+        CHECK_EQ(cc, 6u); /* after X on line 1 */
+    }
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_RIGHT, 0));
+    CHECK_EQ(e.cursor, 2u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 12u);
+        CHECK(standard_caret_at(&e, 1, &ca, &cc));
+        CHECK_EQ(cc, 7u);
+    }
+    editor_close(&e);
+
+    modal_init(&m);
+    fill(&e, "aaa\nbbb\n");
+    e.cursor = e.anchor = 1;
+    modal_enter_visual_block(&m);
+    edit_command_apply(&e, &m, &y, 'j');
+    r = edit_command_apply(&e, &m, &y, 'c');
+    CHECK_EQ(m.mode, MODE_INSERT);
+    CHECK(standard_multi_text_input(&e, &m, 'Z'));
+    text = editor_text(&e);
+    CHECK_STR(text, "aZa\nbZb\n");
     free(text);
     editor_close(&e);
     yank_free(&y);

@@ -1,12 +1,8 @@
 # Wave — build.
 #
-# Vendors the tree-sitter runtime and the C grammar on first build, compiles
-# the core as a static lib, builds + runs the test binaries, and links the
-# GUI application (`wave`) against GLFW + OpenGL.
-#
-# There are two front-ends over that core: the GLFW/OpenGL one built here
-# (`make app`) and the GPUI/Rust one in rust/ (`make gpui`). Wave.app ships the
-# GPUI one unless you ask for the other — see FRONTEND under macOS packaging.
+# Vendors the tree-sitter runtime and language grammars on first build, compiles
+# the headless core as a static lib, builds + runs the test binaries, and builds
+# the GPUI/Rust front-end (`make gpui`). Wave.app ships that binary.
 
 CC      ?= cc
 ZIG     ?= zig
@@ -30,17 +26,6 @@ RUST_TARGET := $(ARCH)-apple-darwin
 ZIG_TARGET  := $(ARCH)-macos
 endif
 CFLAGS += -arch $(ARCH)
-
-# GLFW via Homebrew; OpenGL + Cocoa frameworks for the window/context.
-# Link GLFW *statically* (the .a, by full path) so the shipped binary carries no
-# dependency on a Homebrew dylib — the .app must run on machines without brew,
-# and the hardened runtime's library validation rejects foreign-Team-ID dylibs.
-GLFW_PREFIX := $(shell brew --prefix glfw 2>/dev/null)
-GUI_CFLAGS  := -I$(GLFW_PREFIX)/include
-GUI_LIBS    := $(GLFW_PREFIX)/lib/libglfw3.a \
-               -framework OpenGL -framework Cocoa -framework IOKit \
-               -framework CoreVideo -framework CoreFoundation \
-               -framework CoreServices
 
 VENDOR        := vendor
 LSP_DIR       := $(VENDOR)/lsp
@@ -72,14 +57,20 @@ TS_DIR        := $(VENDOR)/tree-sitter
 TS_C_DIR      := $(VENDOR)/tree-sitter-c
 TS_JS_DIR     := $(VENDOR)/tree-sitter-javascript
 TS_TS_DIR     := $(VENDOR)/tree-sitter-typescript
+TS_JSON_DIR   := $(VENDOR)/tree-sitter-json
+TS_ENV_DIR    := $(VENDOR)/tree-sitter-dotenv
 TS_REPO       := https://github.com/tree-sitter/tree-sitter.git
 TS_C_REPO     := https://github.com/tree-sitter/tree-sitter-c.git
 TS_JS_REPO    := https://github.com/tree-sitter/tree-sitter-javascript.git
 TS_TS_REPO    := https://github.com/tree-sitter/tree-sitter-typescript.git
+TS_JSON_REPO  := https://github.com/tree-sitter/tree-sitter-json.git
+TS_ENV_REPO   := https://github.com/pnx/tree-sitter-dotenv.git
 TS_TAG        := v0.22.6
 TS_C_TAG      := v0.21.4
 TS_JS_TAG     := v0.21.4
 TS_TS_TAG     := v0.21.2
+TS_JSON_TAG   := v0.21.0
+TS_ENV_TAG    := v1.1.1
 
 # The host build keeps build/ to itself; a cross build nests under it, so the
 # two sets of single-arch objects cannot be mistaken for each other and `make
@@ -111,18 +102,13 @@ GHOSTTY_INTERNAL_PREFIX ?= $(GHOSTTY_DIR)/macos/GhosttyKit.xcframework/macos-arm
 GHOSTTY_INTERNAL_LIB := $(GHOSTTY_INTERNAL_PREFIX)/libghostty-internal-fat.a
 GHOSTTY_INTERNAL_ARGS ?= -Dapp-runtime=none -Demit-lib-vt=false -Demit-xcframework=true -Dxcframework-target=native -Demit-macos-app=false -Doptimize=ReleaseFast
 GHOSTTY_DEP :=
-GHOSTTY_GUI_LIBS :=
 GHOSTTY_TEST_LIBS :=
-GHOSTTY_INTERNAL_FRAMEWORKS := -framework Metal -framework QuartzCore \
-                               -framework Foundation -framework IOSurface \
-                               -framework GameController -framework Carbon -lc++
-# Headless core (no GLFW/GL dependency) — also what the tests link against.
+# Headless core — what the tests and the GPUI shim link against.
 CORE_SRC := src/piece_table.c src/buffer.c src/highlight.c src/langs.c src/workspace.c src/lsp.c src/search.c src/config.c src/editor.c src/runtime.c src/lsp_manager.c src/palette.c src/project_search.c src/overlay.c src/popover.c src/complete.c src/theme.c src/watch.c src/command.c src/yank.c src/tabs.c src/mode.c src/standard.c src/diagnostics.c src/layout.c src/edit_command.c src/view.c src/text_view.c src/input.c src/updater.c src/recent.c src/terminal.c src/git_view.c
 CORE_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(CORE_SRC))
 # The updater's I/O half is Objective-C (NSURLSession + NSTask), so it is listed
-# separately from CORE_SRC's .c files — but it *is* core: both front-ends link it
-# out of libwave.a. Keeping it in the GLFW-only set is what silently dropped the
-# updater from the GPUI build in 0.1.17.
+# separately from CORE_SRC's .c files — but it *is* core: GPUI links it out of
+# libwave.a.
 CORE_OBJ += $(BUILD)/updater_mac.o
 
 # tree-sitter runtime is a single translation unit (lib.c includes the rest).
@@ -130,30 +116,25 @@ CORE_OBJ += $(BUILD)/updater_mac.o
 TS_OBJ   := $(BUILD)/ts_lib.o $(BUILD)/ts_c_parser.o \
             $(BUILD)/ts_js_parser.o $(BUILD)/ts_js_scanner.o \
             $(BUILD)/ts_ts_parser.o $(BUILD)/ts_ts_scanner.o \
-            $(BUILD)/ts_tsx_parser.o $(BUILD)/ts_tsx_scanner.o
-
-# GUI-only objects (need GLFW/GL headers; mac.o is Objective-C / Cocoa).
-GUI_OBJ := $(BUILD)/font.o $(BUILD)/render.o $(BUILD)/stb_impl.o \
-           $(BUILD)/draw.o $(BUILD)/input_glfw.o $(BUILD)/main.o $(BUILD)/mac.o
+            $(BUILD)/ts_tsx_parser.o $(BUILD)/ts_tsx_scanner.o \
+            $(BUILD)/ts_json_parser.o \
+            $(BUILD)/ts_env_parser.o $(BUILD)/ts_env_scanner.o
 
 TEST_LIBS := -framework CoreServices -framework CoreFoundation
 
 CFLAGS += -DWAVE_USE_GHOSTTY_VT -DGHOSTTY_STATIC -I$(GHOSTTY_VT_PREFIX)/include
 GHOSTTY_DEP += $(GHOSTTY_VT_LIB)
-GHOSTTY_GUI_LIBS += $(GHOSTTY_VT_LIB)
 GHOSTTY_TEST_LIBS += $(GHOSTTY_VT_LIB)
 
 ifeq ($(USE_GHOSTTY_INTERNAL),1)
 CFLAGS += -DWAVE_USE_GHOSTTY_INTERNAL -I$(GHOSTTY_INTERNAL_PREFIX)/Headers
 GHOSTTY_DEP += $(GHOSTTY_INTERNAL_LIB)
-GHOSTTY_GUI_LIBS += -Wl,-force_load,$(GHOSTTY_INTERNAL_LIB)
-GUI_LIBS += $(GHOSTTY_INTERNAL_FRAMEWORKS)
 endif
 
-TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_standard test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_font test_git_view test_theme
+TESTS    := test_piece_table test_buffer test_highlight test_langs test_workspace test_lsp test_search test_editor test_yank test_tabs test_mode test_standard test_command test_config test_diagnostics test_layout test_edit_command test_view test_overlay test_popover test_complete test_input test_runtime test_lsp_manager test_updater test_recent test_terminal test_git_view test_theme
 TEST_BIN := $(addprefix $(BUILD)/,$(TESTS))
 
-.PHONY: all app gpui test clean vendor lsp rg distclean icon bundle dist \
+.PHONY: all gpui test clean vendor lsp rg distclean icon bundle dist \
         dmg notarize notarize-dmg zip-app release-macos install-cli uninstall-cli \
         ghostty-vt ghostty-internal FORCE
 
@@ -187,14 +168,9 @@ endif
 DIST      := $(BUILD)/$(ASSET).zip
 DMG       := $(BUILD)/$(ASSET).dmg
 
-# Which front-end goes into Wave.app: the GPUI/Rust one (`gpui`, default) or the
-# original GLFW/C binary (`c`, i.e. `make bundle FRONTEND=c`). Both link the same
-# libwave.a and resolve queries/ + vendor/ relative to the executable, so the
-# bundle layout below is the same either way and only the copied binary differs.
-FRONTEND ?= gpui
-# cargo puts a --target'd build under target/<triple>/, and an untargeted one
-# straight in target/. The host build stays untargeted so its incremental cache
-# is untouched by a cross build.
+# Wave.app ships the GPUI/Rust binary. cargo puts a --target'd build under
+# target/<triple>/, and an untargeted one straight in target/. The host build
+# stays untargeted so its incremental cache is untouched by a cross build.
 ifeq ($(ARCH),$(HOST_ARCH))
 CARGO_TARGET_ARG :=
 GPUI_BIN := rust/target/release/wave-gpui
@@ -202,13 +178,8 @@ else
 CARGO_TARGET_ARG := --target $(RUST_TARGET)
 GPUI_BIN := rust/target/$(RUST_TARGET)/release/wave-gpui
 endif
-ifeq ($(FRONTEND),gpui)
 BUNDLE_BIN := $(GPUI_BIN)
 BUNDLE_DEP := gpui lsp rg
-else
-BUNDLE_BIN := $(BUILD)/wave
-BUNDLE_DEP := app
-endif
 
 # Where `make install-cli` puts the `wave` shim. It is a symlink into the app,
 # so an app update needs no reinstall.
@@ -226,11 +197,7 @@ NOTARY_PROFILE ?= wave-notary
 CODESIGN_ID   ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
                    | awk -F'"' '/Developer ID Application/{print $$2; exit}')
 
-all: $(BUILD)/libwave.a app
-
-# `app` pulls in the bundled language server + ripgrep so a fresh build is
-# shippable as a self-contained pack (the C binary + its vendored tools).
-app: lsp rg $(BUILD)/wave
+all: $(BUILD)/libwave.a gpui
 
 # The GPUI front-end. cargo's own dependency tracking decides what to rebuild;
 # the shim (rust/shim/wave_ffi.c) is compiled by build.rs, which links the
@@ -264,7 +231,8 @@ $(LSP_STAMP): $(LSP_DIR)/package.json
 	    || npm install --no-audit --no-fund --loglevel=error )
 
 vendor: $(TS_DIR)/lib/src/lib.c $(TS_C_DIR)/src/parser.c \
-        $(TS_JS_DIR)/src/parser.c $(TS_TS_DIR)/typescript/src/parser.c
+        $(TS_JS_DIR)/src/parser.c $(TS_TS_DIR)/typescript/src/parser.c \
+        $(TS_JSON_DIR)/src/parser.c $(TS_ENV_DIR)/src/parser.c
 
 ghostty-vt: $(GHOSTTY_VT_LIB)
 
@@ -303,6 +271,18 @@ $(TS_TS_DIR)/typescript/src/parser.c:
 	@echo "  GIT   tree-sitter-typescript $(TS_TS_TAG)"
 	@git clone --depth 1 --branch $(TS_TS_TAG) $(TS_TS_REPO) $(TS_TS_DIR)
 
+$(TS_JSON_DIR)/src/parser.c:
+	@echo "  GIT   tree-sitter-json $(TS_JSON_TAG)"
+	@git clone --depth 1 --branch $(TS_JSON_TAG) $(TS_JSON_REPO) $(TS_JSON_DIR)
+
+$(TS_ENV_DIR)/src/parser.c:
+	@echo "  GIT   tree-sitter-dotenv $(TS_ENV_TAG)"
+	@git clone --depth 1 --branch $(TS_ENV_TAG) $(TS_ENV_REPO) $(TS_ENV_DIR)
+	# Upstream ships ABI 15; Wave's tree-sitter is ABI 14. overlays/ holds a
+	# parser regenerated with `tree-sitter generate --abi 14`.
+	@echo "  PATCH tree-sitter-dotenv (ABI 14 for tree-sitter $(TS_TAG))"
+	@cp -R overlays/tree-sitter-dotenv/src/. $(TS_ENV_DIR)/src/
+
 $(BUILD):
 	@mkdir -p $(BUILD)
 
@@ -338,6 +318,14 @@ $(BUILD)/ts_tsx_parser.o: vendor | $(BUILD)
 $(BUILD)/ts_tsx_scanner.o: vendor | $(BUILD)
 	$(CC) $(CFLAGS) -I$(TS_TS_DIR)/tsx/src -c $(TS_TS_DIR)/tsx/src/scanner.c -o $@
 
+$(BUILD)/ts_json_parser.o: vendor | $(BUILD)
+	$(CC) $(CFLAGS) -I$(TS_JSON_DIR)/src -c $(TS_JSON_DIR)/src/parser.c -o $@
+
+$(BUILD)/ts_env_parser.o: vendor | $(BUILD)
+	$(CC) $(CFLAGS) -I$(TS_ENV_DIR)/src -c $(TS_ENV_DIR)/src/parser.c -o $@
+$(BUILD)/ts_env_scanner.o: vendor | $(BUILD)
+	$(CC) $(CFLAGS) -I$(TS_ENV_DIR)/src -c $(TS_ENV_DIR)/src/scanner.c -o $@
+
 # --- core objects ---
 $(BUILD)/%.o: src/%.c | $(BUILD) vendor
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -348,36 +336,15 @@ $(BUILD)/%.o: src/%.c | $(BUILD) vendor
 $(BUILD)/updater_mac.o: src/updater_mac.m | $(BUILD)
 	$(CC) $(CFLAGS) -DWAVE_VERSION=\"$(VERSION)\" -fobjc-arc -c $< -o $@
 
-$(CORE_OBJ) $(TS_OBJ) $(GUI_OBJ): $(GHOSTTY_DEP) $(BUILD_CONFIG)
+$(CORE_OBJ) $(TS_OBJ): $(GHOSTTY_DEP) $(BUILD_CONFIG)
 
 $(BUILD)/libwave.a: $(CORE_OBJ) $(TS_OBJ)
 	@echo "  AR    $@"
 	@ar rcs $@ $^
 
-# --- GUI objects (extra include path for GLFW) ---
-$(BUILD)/font.o: src/font.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/stb_impl.o: src/stb_impl.c | $(BUILD)
-	$(CC) $(CFLAGS) -Wno-unused-function -c $< -o $@
-$(BUILD)/render.o: src/render.c | $(BUILD)
-	$(CC) $(CFLAGS) $(GUI_CFLAGS) -c $< -o $@
-$(BUILD)/input_glfw.o: src/input_glfw.c | $(BUILD)
-	$(CC) $(CFLAGS) $(GUI_CFLAGS) -c $< -o $@
-$(BUILD)/main.o: src/main.c | $(BUILD) vendor
-	$(CC) $(CFLAGS) $(GUI_CFLAGS) -DWAVE_VERSION=\"$(VERSION)\" -c $< -o $@
-$(BUILD)/mac.o: src/mac.m | $(BUILD)
-	$(CC) $(CFLAGS) $(GUI_CFLAGS) -fobjc-arc -c $< -o $@
-
-$(BUILD)/wave: $(GUI_OBJ) $(BUILD)/libwave.a $(GHOSTTY_DEP)
-	@echo "  LD    $@"
-	@$(CC) $(CFLAGS) $(GUI_OBJ) $(BUILD)/libwave.a $(GHOSTTY_GUI_LIBS) $(GUI_LIBS) -o $@
-
 # --- tests ---
 $(BUILD)/%: tests/%.c $(BUILD)/libwave.a
 	$(CC) $(CFLAGS) $< $(BUILD)/libwave.a $(GHOSTTY_TEST_LIBS) $(TEST_LIBS) -o $@
-
-$(BUILD)/test_font: tests/test_font.c $(BUILD)/font.o $(BUILD)/stb_impl.o
-	$(CC) $(CFLAGS) $< $(BUILD)/font.o $(BUILD)/stb_impl.o -o $@
 
 test: $(TEST_BIN)
 	@echo "== running tests =="
@@ -407,7 +374,7 @@ icon:
 # Assemble Wave.app: binary in Contents/MacOS, vendored lsp+rg beside it (Wave
 # resolves them relative to the executable), icon + Info.plist in place.
 bundle: $(BUNDLE_DEP)
-	@echo "  BUNDLE $(APP) ($(VERSION), $(FRONTEND) front-end)"
+	@echo "  BUNDLE $(APP) ($(VERSION))"
 	@rm -rf $(APP)
 	@mkdir -p $(APP_BIN) $(APP_RES)
 	@cp $(BUNDLE_BIN) $(APP_BIN)/wave

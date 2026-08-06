@@ -3,10 +3,8 @@
 
 typedef struct { float r, g, b; } Color;
 
-/* A theme is one row of colors: the tree-sitter capture colors both front-ends
- * draw text with, plus the chrome slots the GPUI front-end paints around it.
- * The GLFW front-end reads the capture colors only — its chrome still lives in
- * draw.c — so switching a theme retints code in both, and the window in one.
+/* A theme is one row of colors: the tree-sitter capture colors the front-end
+ * draws text with, plus the chrome slots GPUI paints around it.
  *
  * Slots are looked up by name rather than by index so a front-end never has to
  * track this enum's order; theme_color()/theme_ui() take the same strings the

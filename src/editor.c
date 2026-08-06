@@ -400,6 +400,41 @@ int editor_visual_range(Editor *e, EditorRange *out) {
     return 1;
 }
 
+int editor_block_bounds(const Editor *e, size_t *row0, size_t *row1,
+                        size_t *col0, size_t *col1) {
+    if (!e || !e->buf) return 0;
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t r0, c0, r1, c1;
+    pt_offset_to_rowcol(pt, e->anchor, &r0, &c0);
+    pt_offset_to_rowcol(pt, e->cursor, &r1, &c1);
+    if (r0 > r1) { size_t t = r0; r0 = r1; r1 = t; }
+    if (c0 > c1) { size_t t = c0; c0 = c1; c1 = t; }
+    /* Inclusive corners → exclusive end column. */
+    c1 += 1;
+    if (row0) *row0 = r0;
+    if (row1) *row1 = r1;
+    if (col0) *col0 = c0;
+    if (col1) *col1 = c1;
+    return 1;
+}
+
+int editor_block_line_range(const Editor *e, size_t row, size_t col0,
+                            size_t col1, EditorRange *out) {
+    if (!e || !e->buf || !out || col1 <= col0) return 0;
+    const PieceTable *pt = buffer_pt(e->buf);
+    size_t lines = pt_line_count(pt);
+    if (row >= lines) return 0;
+    size_t start = pt_line_start(pt, row);
+    size_t end = line_end_of(pt, start);
+    size_t len = end - start;
+    if (col0 >= len) return 0;
+    size_t hi = col1 < len ? col1 : len;
+    if (hi <= col0) return 0;
+    out->start = start + col0;
+    out->end = start + hi;
+    return 1;
+}
+
 int editor_line_range(Editor *e, EditorRange *out) {
     if (!e || !e->buf || !out) return 0;
     const PieceTable *pt = buffer_pt(e->buf);

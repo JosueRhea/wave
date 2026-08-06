@@ -4,6 +4,8 @@ vendor/tree-sitter/
 vendor/tree-sitter-c/
 vendor/tree-sitter-javascript/
 vendor/tree-sitter-typescript/
+vendor/tree-sitter-json/
+vendor/tree-sitter-dotenv/
 vendor/ghostty/
 vendor/lsp/node_modules/
 vendor/lsp/bun.lock

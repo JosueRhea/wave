@@ -125,6 +125,7 @@ unsafe extern "C" {
     fn wave_text_input(s: *mut c_void, cp: c_uint) -> c_uint;
     fn wave_special_key(s: *mut c_void, key: c_int) -> c_int;
     fn wave_escape(s: *mut c_void);
+    fn wave_enter_visual_block(s: *mut c_void);
     fn wave_motion(s: *mut c_void, motion: c_int, extend: c_int) -> c_int;
     fn wave_select_all(s: *mut c_void) -> c_int;
     fn wave_select_word(s: *mut c_void) -> c_int;
@@ -535,6 +536,7 @@ pub enum Mode {
     Normal,
     Insert,
     Visual,
+    VisualBlock,
 }
 
 /// Mirrors the `EditCommandFlags` bits the front-end acts on.
@@ -868,6 +870,7 @@ impl Session {
         match unsafe { wave_mode(self.raw) } {
             1 => Mode::Insert,
             2 => Mode::Visual,
+            3 => Mode::VisualBlock,
             _ => Mode::Normal,
         }
     }
@@ -1062,6 +1065,11 @@ impl Session {
 
     pub fn escape(&mut self) {
         unsafe { wave_escape(self.raw) }
+    }
+
+    /// Ctrl+V — enter vim visual-block mode.
+    pub fn enter_visual_block(&mut self) {
+        unsafe { wave_enter_visual_block(self.raw) }
     }
 
     pub fn undo(&mut self) -> bool {

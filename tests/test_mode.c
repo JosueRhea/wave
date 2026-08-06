@@ -48,7 +48,13 @@ int main(void) {
 
     CHECK_STR(mode_name(MODE_INSERT), "INSERT");
     CHECK_STR(mode_name(MODE_VISUAL), "VISUAL");
+    CHECK_STR(mode_name(MODE_VISUAL_BLOCK), "V-BLOCK");
     CHECK_STR(mode_name(MODE_NORMAL), "NORMAL");
+
+    modal_enter_visual_block(&m);
+    CHECK_EQ(m.mode, MODE_VISUAL_BLOCK);
+    modal_toggle_visual(&m);
+    CHECK_EQ(m.mode, MODE_NORMAL);
 
     TEST_REPORT();
 }

@@ -13,6 +13,7 @@
 
 mod ffi;
 mod frontend_config;
+mod selftest;
 mod textfield;
 
 use ffi::{flags, CloseAction, GitMode, Key, Mode, Motion, Session, TabKind, COLOR_DEFAULT};
@@ -286,6 +287,15 @@ impl Cmd {
             .chars()
             .all(|q| q == ' ' || chars.any(|c| c == q))
     }
+}
+
+/// Labels matching a command-palette query — used by `--selftest`.
+pub(crate) fn cmd_labels_matching(query: &str) -> Vec<&'static str> {
+    Cmd::ALL
+        .into_iter()
+        .filter(|c| c.matches(query))
+        .map(|c| c.label())
+        .collect()
 }
 
 /// A row on the settings screen. Each one maps to a `WaveConfig` field.
@@ -3703,6 +3713,13 @@ impl WaveView {
                 "r" => {
                     self.session.redo();
                 }
+                // Ctrl+V — visual-block (vim). ⌘V paste is handled on the
+                // platform shortcut path and must not land here.
+                "v" if self.session.vim_enabled()
+                    && self.session.mode() != Mode::Insert =>
+                {
+                    self.session.enter_visual_block();
+                }
                 "d" => {
                     let half = (self.rows / 2).max(1);
                     for _ in 0..half {
@@ -3982,7 +3999,7 @@ impl Render for WaveView {
         let mode_color = match self.session.mode() {
             Mode::Normal => 0x7fb069,
             Mode::Insert => palette::dir_fg(),
-            Mode::Visual => palette::accent(),
+            Mode::Visual | Mode::VisualBlock => palette::accent(),
         };
         // Mode and cursor are editor concepts; a terminal or git tab should say
         // what *it* is doing instead.
@@ -4153,470 +4170,6 @@ impl Render for WaveView {
             .children(settings)
             .children(fonts)
             .children(themes)
-    }
-}
-
-/// Exercise the terminal exactly as the UI does — same `Session` calls, same
-/// key codes, same visible-window arithmetic as `render_terminal` — but with no
-/// window, so "the terminal doesn't work" is answerable without a GUI.
-fn selftest(root: &str) {
-    use ffi::term_key as tk;
-
-    // Config commands persist to $HOME/.config/wave/config, and every Session
-    // loads it. Redirect HOME before *anything* is constructed so no part of
-    // the run can read or write the user's real settings.
-    let home = std::env::temp_dir().join("wave-selftest-home");
-    let _ = std::fs::create_dir_all(home.join(".config/wave"));
-    std::env::set_var("HOME", &home);
-    println!("(isolated HOME={})", home.display());
-
-    let mut s = Session::new();
-    println!("open {root}: {:?}", s.open(std::path::Path::new(root)));
-    println!(
-        "workspace={} tabs={} kind={:?}",
-        s.has_workspace(),
-        s.tab_count(),
-        s.tab_kind(s.tab_active())
-    );
-
-    // `:` must reach the command line even with no buffer open — otherwise the
-    // tab-spawning commands are unreachable from a freshly opened folder.
-    println!(
-        "no buffer: has_buffer={} typing ':' -> cmd_active={}",
-        s.has_buffer(),
-        {
-            s.text_input(':');
-            s.cmd_active()
-        }
-    );
-    s.cmd_close();
-
-    // The `:term` path, which does not depend on a keyboard shortcut reaching us.
-    s.cmd_open();
-    for ch in "term".chars() {
-        s.cmd_input(&ch.to_string());
-    }
-    let close = s.cmd_accept();
-    println!(
-        ":term -> close={close:?} tabs={} kind={:?} info={:?}",
-        s.tab_count(),
-        s.tab_kind(s.tab_active()),
-        s.info()
-    );
-
-    // What Cmd-T does.
-    let opened = s.term_open("terminal", "");
-    println!(
-        "term_open={opened} tabs={} active={} kind={:?} term_active={} running={}",
-        s.tab_count(),
-        s.tab_active(),
-        s.tab_kind(s.tab_active()),
-        s.term_active(),
-        s.term_running()
-    );
-
-    // What the render pass does before drawing.
-    let rows = 30usize;
-    s.term_resize(rows, 100);
-
-    let pump = |s: &mut Session, ms: usize| {
-        for _ in 0..(ms / 20) {
-            s.term_poll();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    };
-    pump(&mut s, 1200);
-
-    // What the key handler does for "echo selftest-ok" + Enter.
-    for ch in "echo selftest-ok".chars() {
-        s.term_write(&ch.to_string());
-    }
-    pump(&mut s, 300);
-    s.term_key(tk::ENTER, false, false, false);
-    pump(&mut s, 1000);
-
-    // What render_terminal computes.
-    let start = s.term_visible_start(rows);
-    let total = s.term_total_lines();
-    let last = (start + rows).min(total.max(start));
-    let (cur_row, cur_col, cur_vis) = s.term_cursor();
-    println!(
-        "render: rows={rows} start={start} total={total} last={last} cursor={cur_row}:{cur_col} vis={cur_vis} -> screen_row={:?}",
-        cur_row.checked_sub(start)
-    );
-
-    // Multi-byte lines are where column/byte indexing diverges — a TUI like
-    // Claude Code is full of them, and mixing the two misplaces the cursor.
-    s.term_write("printf '\\u203a\\u203a\\u203aabc\\n'");
-    s.term_key(tk::ENTER, false, false, false);
-    pump(&mut s, 900);
-    let total2 = s.term_total_lines();
-    for index in 0..total2 {
-        let line = s.term_line(index);
-        if line.starts_with("\u{203a}\u{203a}\u{203a}abc") {
-            println!(
-                "multibyte line {index:?}: chars={} bytes={} col_to_byte(3)={} (want 9) col_to_byte(4)={} (want 10)",
-                line.chars().count(),
-                line.trim_end().len(),
-                s.term_col_to_byte(index, 3),
-                s.term_col_to_byte(index, 4),
-            );
-            break;
-        }
-    }
-
-    let mut shown = 0;
-    let mut found = false;
-    for index in start..last {
-        let line = s.term_line(index);
-        if !line.trim().is_empty() && shown < 8 {
-            println!("  [{index}] {}", line.trim_end());
-            shown += 1;
-        }
-        if line.contains("selftest-ok") {
-            found = true;
-        }
-    }
-    println!("rendered {} lines; echo output present: {found}", last - start);
-
-    // ---- terminal selection and scrollback ----
-    //
-    // Exactly the calls render_terminal and the terminal mouse handlers make,
-    // so a failure here is in the C core and a failure only in the GUI is in
-    // the event wiring.
-    let row = (start..last)
-        .find(|i| s.term_line(*i).contains("selftest-ok"))
-        .unwrap_or(start);
-    s.term_sel_begin(row, 0);
-    s.term_sel_update(row, 4);
-    s.term_sel_end();
-    println!(
-        "select row {row} cols 0..4 -> span={:?} copied={:?}",
-        s.term_sel_span(row),
-        s.term_copy_selection()
-    );
-
-    // A selection has to survive the terminal redrawing under it. The Ghostty
-    // path rebuilds every visible row on each poll that saw output, and used to
-    // drop the selection with them — so dragging across a live TUI selected
-    // nothing you could see.
-    s.term_write("printf 'redraw\\n'");
-    s.term_key(tk::ENTER, false, false, false);
-    pump(&mut s, 800);
-    println!(
-        "after further output -> still selected: {} copied={:?}",
-        s.term_sel_span(row).is_some(),
-        s.term_copy_selection()
-    );
-
-    // Enough output to have something above the viewport to scroll back to.
-    s.term_write("seq 1 120");
-    s.term_key(tk::ENTER, false, false, false);
-    pump(&mut s, 1500);
-
-    // Scrollback. With Ghostty the viewport lives inside the VT, so
-    // term_visible_start stays 0 and the *content* is what moves: positive
-    // units go back into history, the opposite of the editor's
-    // first-visible-line index. Reading the wheel the editor's way is what ran
-    // the terminal backwards.
-    let head = |s: &mut Session| s.term_line(s.term_visible_start(rows));
-    let at_bottom = head(&mut s);
-    s.term_scroll(5);
-    let scrolled_back = head(&mut s);
-    s.term_scroll(-5);
-    let returned = head(&mut s);
-    println!(
-        "scroll: top line at bottom={:?} after +5={:?} after -5={:?}",
-        at_bottom.trim_end(),
-        scrolled_back.trim_end(),
-        returned.trim_end()
-    );
-    println!(
-        "  +5 moved the viewport: {}; -5 came back: {}",
-        scrolled_back != at_bottom,
-        returned == at_bottom
-    );
-
-    // ---- mouse selection on a buffer ----
-    let mut e = Session::new();
-    if e.open(std::path::Path::new("src/piece_table.c")).is_ok() {
-        println!("\n=== mouse selection ===");
-        // The mode is printed with each step because the two have to agree: a
-        // painted selection outside VISUAL is a selection normal-mode motions
-        // would silently extend.
-        e.click_at(20, 4);
-        println!(
-            "click(20,4) -> cursor={:?} mode={:?} has_selection={}",
-            e.cursor(),
-            e.mode(),
-            e.has_selection()
-        );
-        e.drag_to(22, 10);
-        println!(
-            "drag(22,10) -> cursor={:?} mode={:?} has_selection={}",
-            e.cursor(),
-            e.mode(),
-            e.has_selection()
-        );
-        for line in 20..=22 {
-            println!("  line {line} selection cols: {:?}", e.line_selection(line));
-        }
-        match e.selection_text() {
-            Some(t) => println!("selected {} bytes: {:?}", t.len(), t.replace('\n', "\\n")),
-            None => println!("selection_text: None"),
-        }
-        e.click_at(20, 4);
-        println!(
-            "click again -> mode={:?} has_selection={}",
-            e.mode(),
-            e.has_selection()
-        );
-
-        // Motions after a drag must not keep painting: the anchor the drag left
-        // behind is still set, so a selection here would grow with every j/l
-        // while the status bar still read NORMAL.
-        for ch in "jjll".chars() {
-            e.text_input(ch);
-        }
-        println!(
-            "jjll -> cursor={:?} mode={:?} has_selection={} line 22 cols={:?}",
-            e.cursor(),
-            e.mode(),
-            e.has_selection(),
-            e.line_selection(22)
-        );
-
-        // ---- one Escape leaves insert mode, even with a completion menu up ----
-        println!("\n=== escape ===");
-        e.text_input('o'); // open a line below -> INSERT
-        for ch in "pt_l".chars() {
-            e.text_input(ch);
-        }
-        for _ in 0..20 {
-            e.lsp_poll();
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        println!(
-            "typing in insert: mode={:?} completion_open={} items={}",
-            e.mode(),
-            e.complete_active(),
-            e.complete_count()
-        );
-        // Exactly what the key handler does for "escape".
-        e.complete_close();
-        e.popover_close();
-        e.hover_clear();
-        e.escape();
-        println!(
-            "after ONE escape: mode={:?} completion_open={}",
-            e.mode(),
-            e.complete_active()
-        );
-
-        // ---- config: the `:` commands and the zoom/sidebar toggles ----
-        //
-        // `:opacity`, `:radius` and `:blur` set save_config, which writes to
-        // $HOME/.config/wave/config. Point HOME at a scratch dir so the test
-        // cannot scribble on real settings.
-        println!("\n=== config ===");
-        let mut e = Session::new();
-        let run = |e: &mut Session, text: &str| {
-            e.cmd_open();
-            for ch in text.chars() {
-                e.cmd_input(&ch.to_string());
-            }
-            e.cmd_accept();
-        };
-        println!(
-            "start: opacity={}% blur={} radius={} base_pt={} sidebar={} wrap={}",
-            e.opacity_pct(),
-            e.blur(),
-            e.radius(),
-            e.base_pt(),
-            e.show_sidebar(),
-            e.wrap()
-        );
-        // command.c accepts a fraction in [0.2, 1.0], not a percentage.
-        run(&mut e, "opacity 0.8");
-        println!("after ':opacity 0.8' -> {}%", e.opacity_pct());
-        run(&mut e, "opacity 80");
-        println!("after ':opacity 80' (out of range) -> {}%", e.opacity_pct());
-        run(&mut e, "blur");
-        println!("after ':blur' -> blur={}", e.blur());
-        run(&mut e, "radius 12");
-        println!("after ':radius 12' -> radius={}", e.radius());
-
-        let before = e.base_pt();
-        e.zoom(1);
-        e.zoom(1);
-        println!("zoom in twice: effective pt {before} -> {}", e.base_pt());
-        e.zoom(0);
-        println!("zoom reset: effective pt -> {}", e.base_pt());
-
-        let s0 = e.show_sidebar();
-        e.toggle_sidebar();
-        println!("toggle sidebar: {s0} -> {}", e.show_sidebar());
-        let w0 = e.wrap();
-        e.toggle_wrap();
-        println!("toggle wrap: {w0} -> {}", e.wrap());
-
-        // ---- command palette filtering ----
-        println!("\n=== command palette ===");
-        for q in ["", "open", "of", "zoom", "tab", "git", "xyzzy"] {
-            let hits: Vec<&str> = Cmd::ALL
-                .into_iter()
-                .filter(|c| c.matches(q))
-                .map(|c| c.label())
-                .collect();
-            println!("  {:8} -> {} {:?}", format!("{q:?}"), hits.len(), &hits[..hits.len().min(4)]);
-        }
-
-        // ---- paste ----
-        println!("\n=== paste ===");
-        let mut p = Session::new();
-        if p.open(std::path::Path::new("src/piece_table.c")).is_ok() {
-            p.click_at(0, 0);
-            let before = p.line_text(0);
-            p.paste("PASTED-");
-            println!("line 0: {:?}", p.line_text(0));
-            println!("  (was {:?})", before);
-            // Paste over a selection replaces it.
-            p.click_at(1, 0);
-            p.drag_to(1, 8);
-            let sel = p.selection_text().unwrap_or_default();
-            p.paste("XX");
-            println!("replaced {sel:?} -> line 1 now {:?}", p.line_text(1));
-        }
-
-        // ---- soft wrap ----
-        println!("\n=== soft wrap ===");
-        let mut w = Session::new();
-        if w.open(std::path::Path::new("src/piece_table.c")).is_ok() {
-            w.wrap_set_cols(0); // wrapping off
-            let unwrapped = w.visual_rows();
-            w.wrap_set_cols(40);
-            let wrapped = w.visual_rows();
-            println!(
-                "lines={} visual rows: nowrap={} wrapped@40={}",
-                w.line_count(),
-                unwrapped,
-                wrapped
-            );
-            for vrow in 20..24 {
-                if let Some(r) = w.visual_row(vrow) {
-                    let text = w.line_text(r.line);
-                    let slice = &text[r.start_byte.min(text.len())..r.end_byte.min(text.len())];
-                    println!("  vrow {vrow} -> line {} [{}..{}] {:?}", r.line, r.start_byte, r.end_byte, slice);
-                }
-            }
-            println!("cursor_visual at start: {:?}", w.cursor_visual());
-
-            // The bug the completion menu hit: once anything above the cursor
-            // wraps, the logical line and the visual row diverge.
-            w.click_at(60, 4);
-            println!(
-                "at logical line 60: cursor()={:?} cursor_visual()={:?}",
-                w.cursor(),
-                w.cursor_visual()
-            );
-        }
-    }
-
-    // ---- themes ----
-    //
-    // The palette lives in C so both front-ends share it; what is worth
-    // checking from here is the round trip: selecting a theme repaints *and*
-    // sticks, since the config write is what a restart reads back.
-    println!("\n=== themes ===");
-    {
-        let mut t = Session::new();
-        let names: Vec<String> = ffi::themes().iter().map(|(n, _)| n.clone()).collect();
-        println!("{} themes: {}", names.len(), names.join(", "));
-        println!(
-            "active={} bg=#{:06x} keyword=#{:06x}",
-            names[t.theme_index()],
-            ffi::theme_ui("bg"),
-            ffi::theme_rgb("keyword")
-        );
-        println!("set gruvbox-dark -> {}", t.theme_set("gruvbox-dark"));
-        println!(
-            "active={} bg=#{:06x} keyword=#{:06x} muted=#{:06x}",
-            names[t.theme_index()],
-            ffi::theme_ui("bg"),
-            ffi::theme_rgb("keyword"),
-            ffi::theme_ui("muted")
-        );
-        println!("unknown name rejected: {}", !t.theme_set("no-such-theme"));
-
-        // The front-end paints from a cache, not from theme_ui() directly, so
-        // the switch is only real once reload() has run — this is what the
-        // picker does on every keypress.
-        palette::reload();
-        println!(
-            "front-end cache after reload: bg=#{:06x} muted=#{:06x} accent=#{:06x}",
-            palette::bg(),
-            palette::muted_fg(),
-            palette::accent()
-        );
-
-        // A fresh session re-reads the config, which is the restart path.
-        let fresh = Session::new();
-        println!(
-            "after reopening the session: active={} (config kept it)",
-            names[fresh.theme_index()]
-        );
-    }
-
-    // ---- auto-update ----
-    //
-    // A real check against GitHub, because the parts that break are the ones a
-    // mock would stub out: that the ObjC updater is linked into *this* binary at
-    // all (it was not, in 0.1.17), that its main-queue callback reaches Rust,
-    // and that the version comparison agrees with the published tag.
-    //
-    // Safe to run: this binary is not a .app, so even if it did find something
-    // newer the installer would decline rather than replace anything.
-    println!("\n=== updates ===");
-    println!("this build reports version {}", ffi::version());
-    ffi::check_updates(true);
-    let mut settled = false;
-    for _ in 0..40 {
-        ffi::pump_main_queue(0.25);
-        while let Some(update) = ffi::update_poll() {
-            println!("  {}", update_status_line(&update));
-            settled |= matches!(
-                update,
-                ffi::Update::UpToDate { .. }
-                    | ffi::Update::Available { .. }
-                    | ffi::Update::Failed { .. }
-            );
-        }
-        if settled {
-            break;
-        }
-    }
-    if !settled {
-        println!("  no reply within 10s (offline?)");
-    }
-
-    // ---- bundled resources ----
-    //
-    // langs.c reads queries/<lang>/highlights.scm from the cwd first and only
-    // then from ../Resources/queries next to the executable; runtime.c resolves
-    // the vendored server and ripgrep the same way. Both paths look identical
-    // from the repo root, so this probes with an absolute file and prints the
-    // cwd: run it from `/` against an installed Wave.app and a zero span count
-    // means the bundle is missing its queries, not that highlighting broke.
-    println!("\n=== resources ===");
-    println!("cwd={:?}", std::env::current_dir().unwrap_or_default());
-    let probe = std::path::Path::new(root).join("src/piece_table.c");
-    let mut r = Session::new();
-    if r.open(&probe).is_ok() {
-        let lines = r.line_count().min(80);
-        let spans: usize = (0..lines).map(|l| r.line_spans(l).len()).sum();
-        println!("tree-sitter spans in first {lines} lines of {probe:?}: {spans}");
-    } else {
-        println!("could not open {probe:?}");
     }
 }
 
@@ -4882,7 +4435,10 @@ fn main() {
     match argv.get(1).map(String::as_str) {
         Some("--fonts") => return list_fonts(),
         Some("--selftest") => {
-            return selftest(argv.get(2).map(String::as_str).unwrap_or("."));
+            return selftest::run(
+                argv.get(2).map(String::as_str).unwrap_or("."),
+                cmd_labels_matching,
+            );
         }
         _ => {}
     }

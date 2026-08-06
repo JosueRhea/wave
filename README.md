@@ -1,11 +1,11 @@
 # Wave
 
-A code editor written from the ground up in C: tree-sitter for syntax, a custom
-batched OpenGL renderer, and (next) LuaJIT extensions.
+A code editor written from the ground up in C (headless core) with a GPUI/Rust
+front-end: tree-sitter for syntax, and (next) LuaJIT extensions.
 
 **Working today:**
 
-- Opens a single file **or a whole folder** (`./build/wave .`). Opening a folder
+- Opens a single file **or a whole folder** (`make gpui && ./rust/target/release/wave-gpui .`). Opening a folder
   starts on an empty state — no file is opened until you click one in the sidebar
   (or Cmd-P).
 - **Sidebar file browser** — the folder's tree with folder/file icons. Folders
@@ -41,8 +41,9 @@ batched OpenGL renderer, and (next) LuaJIT extensions.
   (`make` vendors it into `vendor/lsp`; Wave runs it via `bun`/`node`), so it
   works out of the box with no global install; C uses the system `clangd` if
   present. No server (no clangd, or no JS runtime) → tree-sitter fallbacks.
-- **tree-sitter highlighting for C, JavaScript, JSX, TypeScript, TSX** — picked
-  by file extension, driven by external `queries/<language>/highlights.scm`
+- **tree-sitter highlighting for C, JavaScript, JSX, TypeScript, TSX, JSON,
+  and dotenv** — picked by file extension (and basename for `.env*`), driven by
+  external `queries/<language>/highlights.scm`
   files, with live syntax-error underlines.
 
 ![Wave rendering a highlighted C file](docs/screenshot.png)
@@ -64,9 +65,7 @@ at all on an Intel Mac. The updater keeps you on the architecture you installed.
 
 To build from source instead, see [Build & run](#build--run). Packaging targets:
 `make bundle` assembles `Wave.app`; `make dist VERSION=x.y.z` produces the
-release zip; `make icon` regenerates the app icon. `make bundle` ships the GPUI
-front-end by default — `make bundle FRONTEND=c` bundles the original GLFW
-binary instead; everything else about the bundle is identical.
+release zip; `make icon` regenerates the app icon.
 
 ### Updates
 
@@ -76,10 +75,10 @@ relaunches — no prompt, and nothing to click. A launch that finds nothing (or
 finds no network) says nothing at all. **⇧⌘P → "Check for Updates…"** does the
 same on demand, and reports the outcome either way in the status bar.
 
-One version cannot do this: **0.1.17-alpha shipped without an updater.** The
-mechanism lived in `src/mac.m`, which only the GLFW binary links, so it went
-missing the moment `Wave.app` switched to the GPUI front-end. If you are on
-0.1.17, update once by hand — from 0.1.18 on it carries itself forward.
+One version cannot do this: **0.1.17-alpha shipped without an updater.** That
+release briefly lost the updater when Wave.app switched to GPUI before the
+updater lived in the shared core. If you are on 0.1.17, update once by hand —
+from 0.1.18 on it carries itself forward.
 
 ### The `wave` command
 
@@ -131,10 +130,10 @@ highlight    ─ owns a TSParser/TSTree; drains buffer edits, applies them with
                tree for ERROR/MISSING diagnostics. Parses straight from the
                piece table via a TSInput callback — never flattens the document.
                Grammar-agnostic: the language is passed in.
-langs        ─ maps a file extension to a grammar and loads
-               queries/<language>/highlights.scm from the source tree, build
-               tree, or app bundle resources (C, JavaScript/JSX, TypeScript,
-               TSX).
+langs        ─ maps a file path (extension, or basename for `.env*`) to a
+               grammar and loads queries/<language>/highlights.scm from the
+               source tree, build tree, or app bundle resources (C,
+               JavaScript/JSX, TypeScript, TSX, JSON, dotenv).
 workspace    ─ an opened folder: a recursively scanned, display-ordered tree of
                files and subdirectories (skips .git, node_modules, build, …).
 search       ─ project-wide content search: spawns the bundled ripgrep as a
@@ -161,22 +160,14 @@ lsp          ─ an async Language Server Protocol client: spawns a server
 updater      ─ compares two version strings (updater.c, pure C), and on macOS
                fetches the latest GitHub release, downloads its .dmg, and hands
                the bundle swap to a detached shell script that waits for the old
-               process to exit before replacing it (updater_mac.m). Objective-C
-               but *not* GUI: both front-ends link it, which is the whole point
-               of it living here.
+               process to exit before replacing it (updater_mac.m).
 ```
 
-GUI layer:
+Front-end:
 
 ```
-font         ─ bakes a monospace glyph atlas (ASCII) once via stb_truetype.
-render       ─ batched OpenGL 3.3 renderer: every glyph/rect for a frame goes
-               into one vertex buffer, drawn in a single glDrawArrays call.
-               Solid rects (cursor, gutter, diagnostic underlines) reuse the
-               text shader via negative UVs.
-main         ─ GLFW window + input; per frame, lays out only the visible line
-               range, colors glyphs from highlight spans, draws the gutter,
-               cursor, diagnostic underlines, and a status bar.
+rust/        ─ GPUI application (`wave-gpui`); talks to the core through
+               rust/shim/wave_ffi.c. Ships as Wave.app via `make bundle`.
 ```
 
 Next planned layers: a parse worker thread (double-buffered tree + lock-free
@@ -186,24 +177,23 @@ talks to the core through message queues only.
 ## Build & run
 
 ```sh
-make            # builds the static core + the `wave` app (+ bundles the TS LSP + ripgrep)
-make app        # just the GUI app
+make            # builds the static core + GPUI front-end (+ vendors TS LSP + ripgrep)
+make gpui       # just the GPUI binary
 make lsp        # just (re)vendor the bundled TS/JS language server
 make rg         # just (re)download the bundled ripgrep
 make test       # builds + runs the core test suite
-./build/wave .                # open the current folder (sidebar + Cmd-P); no file open until you pick one
-./build/wave path/to/file.tsx # open a single file (its folder becomes the sidebar)
-./build/wave --line 42 --column 8 path/to/file.tsx # open at a 1-based location
-./build/wave                  # empty scratch buffer
+./rust/target/release/wave-gpui .                # open the current folder
+./rust/target/release/wave-gpui path/to/file.tsx # open a single file
+./rust/target/release/wave-gpui --line 42 --column 8 path/to/file.tsx
+./rust/target/release/wave-gpui                  # empty scratch buffer
 ```
 
 First build clones the tree-sitter runtime and the C / JavaScript / TypeScript
 grammars into `vendor/`, vendors the bundled TS/JS language server into
 `vendor/lsp/` (via `bun install`, falling back to `npm`), and downloads a
-prebuilt **ripgrep** for content search into `vendor/rg/` (`make rg`). It
-requires GLFW (`brew install glfw`) and, for the TS/JS server at runtime, `bun`
-or `node` on `PATH`. The font path is SF Mono
-(`/System/Library/Fonts/SFNSMono.ttf`).
+prebuilt **ripgrep** for content search into `vendor/rg/` (`make rg`). It needs
+a Rust toolchain for the front-end and, for the TS/JS server at runtime, `bun`
+or `node` on `PATH`.
 
 ### Cross-compiling for Intel
 
@@ -221,13 +211,8 @@ and artifacts under `build/x86_64/`, `libghostty-vt` at
 cargo target triple `x86_64-apple-darwin` (`rustup target add
 x86_64-apple-darwin` once). The two never overwrite each other.
 
-Two constraints worth knowing:
-
-- **Zig 0.15.2 specifically.** The vendored Ghostty rejects anything else,
-  0.16 included. Point `ZIG` at it if it is not what is on `PATH`.
-- **`FRONTEND=c` does not cross-compile.** Homebrew's static GLFW is host-arch
-  only, so the GLFW front-end has no Intel slice to link. The default GPUI
-  front-end — the one releases ship — has no such dependency.
+**Zig 0.15.2 specifically.** The vendored Ghostty rejects anything else,
+0.16 included. Point `ZIG` at it if it is not what is on `PATH`.
 
 ### Keys
 
@@ -317,40 +302,28 @@ immediately, so it survives a restart.
 A theme carries both halves of the palette: the tree-sitter capture colors
 (keyword, string, comment, …) and the chrome slots the window is painted from
 (background, gutter, selection, borders, diff colors). Adding one is a single
-row of `0xRRGGBB` values in `THEMES[]` — no code. The GLFW front-end shares the
-capture colors, since both front-ends call `theme_color()`; its chrome still
-comes from `draw.c`.
+row of `0xRRGGBB` values in `THEMES[]` — no code.
 
 Transparency and blur are adjustable live: `:opacity 0.85` makes the window
-translucent, and `:blur` toggles a macOS frosted-glass layer behind it (a
-transparent framebuffer is always requested, so opacity changes need no
-restart). Both persist to the config.
+translucent, and `:blur` toggles a macOS frosted-glass layer behind it. Both
+persist to the config.
 
-On macOS the window uses a transparent, full-size-content title bar: the native
-traffic-light buttons (close / minimise / zoom) float over the top-left of
-Wave's own header band — the VS Code / Cursor look — with the title hidden and
-that band kept draggable. Toggle it with `:titlebar` (falls back to the standard
-OS title bar when off).
+### Headless verification
 
-### Headless snapshot (for verification)
-
-```sh
-WAVE_SNAPSHOT=out.ppm ./build/wave file.c          # render one frame, exit
-WAVE_TYPE='int x = 1\n' WAVE_SNAPSHOT=out.ppm ./build/wave   # type, then snapshot
-```
+The core test suite (`make test`) covers editing, highlighting, LSP, search,
+and packaging helpers without opening a window.
 
 ## Layout
 
 ```
 src/      piece_table, buffer, highlight, langs, workspace, lsp, search (core)
 queries/  tree-sitter highlight queries loaded at runtime and bundled into app
-          + font, render, main (gui)
+rust/     GPUI front-end + wave_ffi shim over libwave.a
 tests/    test_piece_table, test_buffer, test_highlight, test_workspace,
           test_lsp (drives a real clangd: cross-file go-to-definition +
           live diagnostics; skips cleanly if clangd isn't installed),
           test_search (drives a real ripgrep; skips cleanly if rg is absent)
           + tiny harness
-vendor/   tree-sitter runtime + C/JS/TS grammars (fetched by make),
-          the bundled TS/JS language server (lsp/) + ripgrep (rg/),
-          stb_truetype.h
+vendor/   tree-sitter runtime + C/JS/TS/JSON/dotenv grammars (fetched by make),
+          the bundled TS/JS language server (lsp/) + ripgrep (rg/)
 ```

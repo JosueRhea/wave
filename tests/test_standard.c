@@ -463,6 +463,69 @@ int main(void) {
     check_text(&e, "Zabc\n");
     editor_close(&e);
 
+    /* Motions move every caret, not just the primary. */
+    modal_init(&m);
+    fill(&e, "abcd\nefgh\n");
+    standard_set_enabled(&e, &m, 1);
+    e.cursor = e.anchor = 0;                 /* 'a' */
+    CHECK(standard_add_caret(&e, 5, 5));     /* 'e' */
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_RIGHT, 0));
+    CHECK_EQ(e.cursor, 1u);                  /* 'b' */
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 6u);                    /* 'f' */
+    }
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_LEFT, 0));
+    CHECK_EQ(e.cursor, 0u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 5u);
+    }
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_DOWN, 0));
+    CHECK_EQ(e.cursor, 5u);                  /* 'e' */
+    CHECK_EQ(standard_caret_count(&e), 1u);  /* second caret still present */
+    /* Shift+Right extends each selection independently. */
+    e.cursor = e.anchor = 0;
+    e.extra_n = 0;
+    CHECK(standard_add_caret(&e, 5, 5));
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_RIGHT, 1));
+    CHECK(standard_has_selection(&e, &m));
+    CHECK_EQ(e.anchor, 0u);
+    CHECK_EQ(e.cursor, 1u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(ca, 5u);
+        CHECK_EQ(cc, 6u);
+    }
+    editor_close(&e);
+
+    /* Word and line-start move both carets. */
+    modal_init(&m);
+    fill(&e, "aa bb\ncc dd\n");
+    standard_set_enabled(&e, &m, 1);
+    e.cursor = e.anchor = 0;
+    CHECK(standard_add_caret(&e, 6, 6));
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_WORD_RIGHT, 0));
+    CHECK_EQ(e.cursor, 3u);                  /* start of "bb" */
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 9u);                    /* start of "dd" */
+    }
+    CHECK(standard_multi_motion(&e, &m, STD_MOTION_LINE_START, 0));
+    CHECK_EQ(e.cursor, 0u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 6u);
+    }
+    standard_clear_carets(&e);
+    CHECK_EQ(standard_caret_count(&e), 0u);
+    editor_close(&e);
+
     /* Restore the default so a later test in the same binary is unaffected. */
     editor_set_selection_exclusive(0);
     TEST_REPORT();

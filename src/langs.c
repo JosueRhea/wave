@@ -15,8 +15,10 @@ const TSLanguage *tree_sitter_c(void);
 const TSLanguage *tree_sitter_javascript(void);
 const TSLanguage *tree_sitter_typescript(void);
 const TSLanguage *tree_sitter_tsx(void);
+const TSLanguage *tree_sitter_json(void);
+const TSLanguage *tree_sitter_dotenv(void);
 
-static Language registry[4];
+static Language registry[6];
 static int registry_ready;
 
 static char *read_file(const char *path) {
@@ -95,6 +97,8 @@ static void registry_init(void) {
     registry[1] = (Language){"javascript", tree_sitter_javascript(), NULL};
     registry[2] = (Language){"typescript", tree_sitter_typescript(), NULL};
     registry[3] = (Language){"tsx", tree_sitter_tsx(), NULL};
+    registry[4] = (Language){"json", tree_sitter_json(), NULL};
+    registry[5] = (Language){"dotenv", tree_sitter_dotenv(), NULL};
     registry_ready = 1;
 }
 
@@ -107,6 +111,20 @@ static const char *ext_of(const char *path) {
     return dot;
 }
 
+static const char *basename_of(const char *path) {
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static int is_dotenv_name(const char *base) {
+    if (!base || !*base) return 0;
+    /* `.env`, `.env.local`, `.env.development.local`, … */
+    if (!strcmp(base, ".env") || !strncmp(base, ".env.", 5)) return 1;
+    /* `foo.env` / `sample.env` — uncommon but unambiguous. */
+    size_t n = strlen(base);
+    return n > 4 && !strcmp(base + n - 4, ".env");
+}
+
 static Language *ensure_query(Language *lang) {
     if (lang && !lang->query) lang->query = load_query_for(lang->name);
     return lang;
@@ -115,6 +133,10 @@ static Language *ensure_query(Language *lang) {
 const Language *lang_detect(const char *path) {
     if (!path) return NULL;
     if (!registry_ready) registry_init();
+
+    const char *base = basename_of(path);
+    if (is_dotenv_name(base)) return ensure_query(&registry[5]);
+
     const char *ext = ext_of(path);
     if (!ext) return NULL;
 
@@ -125,5 +147,7 @@ const Language *lang_detect(const char *path) {
     if (!strcmp(ext, "ts") || !strcmp(ext, "mts") || !strcmp(ext, "cts"))
         return ensure_query(&registry[2]);
     if (!strcmp(ext, "tsx")) return ensure_query(&registry[3]);
+    if (!strcmp(ext, "json") || !strcmp(ext, "jsonc"))
+        return ensure_query(&registry[4]);
     return NULL;
 }

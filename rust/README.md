@@ -1,15 +1,13 @@
 # wave-gpui — GPUI front-end for Wave's C core
 
-A Rust/GPUI front-end driving Wave's **existing C core** over FFI. Nothing in
-`src/` was modified; the C code here is one new file (`shim/wave_ffi.c`).
+A Rust/GPUI front-end driving Wave's **existing C core** over FFI. The C
+surface is `shim/wave_ffi.c` over `libwave.a`.
 
 ## Why this works
 
-`libwave.a` (the Makefile's `CORE_SRC` + tree-sitter) contains no OpenGL, GLFW
-or Cocoa — the Makefile calls it the "headless core", and the 28 test binaries
-already link it with nothing but `CoreServices`/`CoreFoundation`. Only
-`render.c`, `font.c`, `draw.c`, `input_glfw.c`, `main.c` and `mac.m` touch the
-platform, and those are exactly the files GPUI replaces.
+`libwave.a` (the Makefile's `CORE_SRC` + tree-sitter) is headless — the test
+binaries already link it with nothing but `CoreServices`/`CoreFoundation`. The
+GPUI crate owns the window, input, and painting.
 
 `edit_command.h` also reifies editing as a single narrow call —
 `edit_command_apply(Editor*, ModalState*, YankRegister*, codepoint) -> flags` —
@@ -25,27 +23,28 @@ make build/libwave.a          # from the repo root
 cd rust && cargo build
 ```
 
+Or from the repo root: `make gpui` (release).
+
 Run **from the repo root** so `queries/<lang>/highlights.scm` resolves:
 
 ```sh
 ./rust/target/debug/wave-gpui .            # folder → sidebar + no file open
-./rust/target/debug/wave-gpui src/main.c   # file → opens in a tab
+./rust/target/debug/wave-gpui src/editor.c # file → opens in a tab
 ```
 
 The command line is `wave [--line N] [--column N] [file-or-folder]`, parsed by
-`wave_runtime_open_request` — main.c's own parser, reached through
-`wave_cli_open_request` — so the contract does not fork between the two
-front-ends. `--fonts` and `--selftest` sit outside it, on purpose.
+`wave_runtime_open_request` via `wave_cli_open_request`. `--fonts` and
+`--selftest` sit outside it, on purpose.
 
 ## Packaging
 
 `make bundle` from the repo root puts **this** binary in
-`Wave.app/Contents/MacOS/wave` (`make bundle FRONTEND=c` bundles the GLFW one).
-Nothing here needs a bundle-aware code path: `langs.c` and `runtime.c` already
-look next to the executable, so `../Resources/queries`, the vendored language
-server and ripgrep all resolve from inside the .app. `--selftest` prints the cwd
-and a span count under `=== resources ===`, which is the cheap way to tell a
-bundle that found its queries from one that only worked in a dev tree:
+`Wave.app/Contents/MacOS/wave`. Nothing here needs a bundle-aware code path:
+`langs.c` and `runtime.c` already look next to the executable, so
+`../Resources/queries`, the vendored language server and ripgrep all resolve
+from inside the .app. `--selftest` prints the cwd and a span count under
+`=== resources ===`, which is the cheap way to tell a bundle that found its
+queries from one that only worked in a dev tree:
 
 ```sh
 cd / && /Applications/Wave.app/Contents/MacOS/wave --selftest ~/dev/edui
@@ -301,9 +300,8 @@ this build reports version 0.1.0-alpha
 GPUI renders text through the platform stack — CoreText on macOS
 (`platform/mac/text_system.rs`), cosmic-text on Linux, DirectWrite on Windows.
 It shapes runs, caches glyphs in an atlas, and does fallback and subpixel
-positioning, none of which `font.c`'s baked stb_truetype atlas could do. It is
-also why each line is handed over as a single `StyledText`: advances only sum
-correctly when the whole run is shaped together.
+positioning. Each line is handed over as a single `StyledText`: advances only
+sum correctly when the whole run is shaped together.
 
 **Geist Mono is bundled** (`assets/fonts`, SIL OFL, see `OFL.txt`) and compiled
 into the binary with `include_bytes!`, so a fresh clone ships with a real
@@ -329,10 +327,11 @@ and would destroy any key it does not know.
 WAVE_DEBUG=1 ./rust/target/debug/wave-gpui .    # trace key routing + render
 ```
 
-`--selftest` runs the exact `Session` calls the UI makes — `:term`, `Cmd-T`'s
-`term_open`, the key codes the handler sends, and the same visible-window
-arithmetic `render_terminal` does — then prints the screen. If that passes but
-the app misbehaves, the fault is in GPUI event/render wiring, not the core.
+`--selftest` runs a hard-fail Session/FFI suite for every headlessly testable
+editor surface (editing, multi-cursor, vim, tabs, search, terminal, git,
+config/themes, highlighting). Network updates soft-skip when offline. Exit
+non-zero on any failed check. If that passes but the app misbehaves, the fault
+is in GPUI event/render wiring, not the core.
 
 `WAVE_DEBUG=1` logs every keystroke with its modifiers and which surface owned
 it, so "the shortcut does nothing" can be told apart from "the shortcut ran and

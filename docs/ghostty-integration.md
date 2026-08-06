@@ -15,7 +15,7 @@ Build `libghostty-vt` with:
 ```sh
 make ghostty-vt
 make test
-make app
+make gpui
 ```
 
 This requires Zig 0.15.2, because Ghostty pins the C library build to that Zig
@@ -23,14 +23,14 @@ release. If another Zig is first on `PATH`, pass the version explicitly:
 
 ```sh
 make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig ghostty-vt
-make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig app
+make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig gpui
 ```
 
 There is also an experimental probe for Ghostty's non-VT library artifacts:
 
 ```sh
 make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig ghostty-internal
-make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig USE_GHOSTTY_INTERNAL=1 app
+make ZIG=/opt/homebrew/opt/zig@0.15/bin/zig USE_GHOSTTY_INTERNAL=1 gpui
 ```
 
 Wave's terminal code uses the `ghostty/vt.h` C API directly. The Makefile links
@@ -49,10 +49,8 @@ API. For Wave, the safer path is:
 1. Use `libghostty-vt` for terminal state, escape parsing, scrollback, effects,
    and input encoding.
 2. Keep `GhosttyRenderState` as the bridge from terminal state into Wave's
-   renderer.
-3. Extend Wave's OpenGL text path to consume Ghostty cell attributes so colors,
-   cursor style, selection, and dirty rows render directly instead of being
-   flattened to strings.
+   GPUI text path.
+3. Consume Ghostty cell attributes so colors, cursor style, selection, and dirty
+   rows render directly instead of being flattened to strings.
 4. Treat the full static `libghostty` archive as an experimental embedded
-   payload until Ghostty publishes a stable app/surface API that can accept
-   Wave's GLFW/OpenGL or macOS layer ownership cleanly.
+   payload until Ghostty publishes a stable app/surface API.

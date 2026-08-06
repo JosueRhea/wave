@@ -31,6 +31,14 @@ int main(void) {
     check_language_query("sample.tsx",
                          "type Props = {name: string};\n"
                          "function View(props: Props) { return <div>{props.name}</div>; }\n");
+    check_language_query("sample.json",
+                         "{\"name\": \"wave\", \"count\": 1, \"ok\": true}\n");
+    check_language_query(".env",
+                         "export API_URL=https://example.com\n"
+                         "# local override\n"
+                         "DEBUG=true\n");
+    check_language_query(".env.local", "SECRET=s3cret\n");
+    check_language_query("config.env", "PORT=3000\n");
 
     TEST_REPORT();
 }

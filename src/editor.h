@@ -129,6 +129,17 @@ void editor_set_selection_exclusive(int exclusive);
 int editor_selection_exclusive(void);
 int editor_visual_range(Editor *e, EditorRange *out);
 int editor_line_range(Editor *e, EditorRange *out);
+
+/* Rectangular selection from cursor/anchor corners (vim Ctrl+V). Rows and
+ * columns are 0-based; col1 is exclusive so a one-column block has col1 =
+ * col0 + 1. Returns 0 if the editor has no buffer. */
+int editor_block_bounds(const Editor *e, size_t *row0, size_t *row1,
+                        size_t *col0, size_t *col1);
+/* Byte range on `row` for columns [col0, col1), clamped to the line. Returns 0
+ * when the line has no overlap with that column span (e.g. too short). */
+int editor_block_line_range(const Editor *e, size_t row, size_t col0,
+                            size_t col1, EditorRange *out);
+
 char *editor_copy_text(Editor *e, int visual_mode);
 EditorPasteResult editor_paste_text(Editor *e, const char *text, int replace_visual);
 int editor_paste_enters_insert(EditorPasteResult result);

@@ -29,9 +29,17 @@ void modal_enter_visual(ModalState *m) {
     m->count = 0;
 }
 
+void modal_enter_visual_block(ModalState *m) {
+    if (!m) return;
+    m->mode = MODE_VISUAL_BLOCK;
+    m->pending = 0;
+    m->op_g = 0;
+    m->count = 0;
+}
+
 void modal_toggle_visual(ModalState *m) {
     if (!m) return;
-    if (m->mode == MODE_VISUAL)
+    if (m->mode == MODE_VISUAL || m->mode == MODE_VISUAL_BLOCK)
         modal_enter_normal(m);
     else
         modal_enter_visual(m);
@@ -84,6 +92,7 @@ const char *mode_name(Mode mode) {
     switch (mode) {
     case MODE_INSERT: return "INSERT";
     case MODE_VISUAL: return "VISUAL";
+    case MODE_VISUAL_BLOCK: return "V-BLOCK";
     case MODE_NORMAL:
     default: return "NORMAL";
     }

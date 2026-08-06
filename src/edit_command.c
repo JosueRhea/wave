@@ -1,7 +1,11 @@
 #include "edit_command.h"
 
+#include "standard.h"
+
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static void enter_insert(Editor *e, ModalState *modal) {
     modal_enter_insert(modal);
@@ -27,6 +31,101 @@ static int yank_range(Editor *e, YankRegister *yank, size_t a, size_t b,
     if (!e || !e->buf || !yank) return 0;
     if (!yank_from_range(yank, buffer_pt(e->buf), a, b, line_wise)) return 0;
     if (res) res->flags |= EDIT_COMMAND_YANKED;
+    return 1;
+}
+
+/* Place carets at `col` on every line of the block (clamped to the line), enter
+ * insert, and keep the extras so subsequent typing edits the column. */
+static void block_insert_at_col(Editor *e, ModalState *modal, size_t row0,
+                                size_t row1, size_t col) {
+    const PieceTable *pt = buffer_pt(e->buf);
+    standard_clear_carets(e);
+    int first = 1;
+    for (size_t row = row0; row <= row1; row++) {
+        size_t start = pt_line_start(pt, row);
+        size_t end = line_end_of(pt, start);
+        size_t len = end - start;
+        size_t at = start + (col < len ? col : len);
+        if (first) {
+            e->cursor = e->anchor = at;
+            first = 0;
+        } else {
+            standard_add_caret(e, at, at);
+        }
+    }
+    enter_insert(e, modal);
+}
+
+static int visual_block_command(Editor *e, ModalState *modal, YankRegister *yank,
+                                unsigned int cp, EditCommandResult *res) {
+    size_t row0, row1, col0, col1;
+    if (!editor_block_bounds(e, &row0, &row1, &col0, &col1)) return 0;
+
+    if (cp == 'I') {
+        block_insert_at_col(e, modal, row0, row1, col0);
+        return 1;
+    }
+    if (cp == 'A') {
+        block_insert_at_col(e, modal, row0, row1, col1);
+        return 1;
+    }
+    if (cp != 'd' && cp != 'x' && cp != 'y' && cp != 'c') return 0;
+
+    /* Build yank text top-down; delete bottom-up so offsets stay valid. */
+    size_t cap = 0;
+    for (size_t row = row0; row <= row1; row++) {
+        EditorRange r;
+        if (editor_block_line_range(e, row, col0, col1, &r))
+            cap += r.end - r.start;
+        cap += 1; /* newline between rows (and a final one is fine / trimmed) */
+    }
+    char *buf = malloc(cap + 1);
+    size_t n = 0;
+    if (buf) {
+        for (size_t row = row0; row <= row1; row++) {
+            if (row > row0) buf[n++] = '\n';
+            EditorRange r;
+            if (editor_block_line_range(e, row, col0, col1, &r)) {
+                char *slice = editor_range_text(e, r.start, r.end);
+                if (slice) {
+                    size_t sn = strlen(slice);
+                    memcpy(buf + n, slice, sn);
+                    n += sn;
+                    free(slice);
+                }
+            }
+        }
+        buf[n] = '\0';
+        if (yank_set(yank, buf, n, 0) == 0) res->flags |= EDIT_COMMAND_YANKED;
+        free(buf);
+    }
+
+    if (cp == 'y') {
+        e->cursor = e->anchor;
+        modal_enter_normal(modal);
+        return 1;
+    }
+
+    for (size_t row = row1;;) {
+        EditorRange r;
+        if (editor_block_line_range(e, row, col0, col1, &r))
+            ed_delete_range(e, r.start, r.end);
+        if (row == row0) break;
+        row--;
+    }
+
+    if (cp == 'c') {
+        block_insert_at_col(e, modal, row0, row1, col0);
+    } else {
+        /* Land on the top-left of the former block. */
+        const PieceTable *pt = buffer_pt(e->buf);
+        size_t start = pt_line_start(pt, row0);
+        size_t end = line_end_of(pt, start);
+        size_t len = end - start;
+        e->cursor = e->anchor = start + (col0 < len ? col0 : len);
+        standard_clear_carets(e);
+        modal_enter_normal(modal);
+    }
     return 1;
 }
 
@@ -132,6 +231,13 @@ EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
             }
         }
         return res;
+    }
+
+    if (modal->mode == MODE_VISUAL_BLOCK) {
+        if (visual_block_command(e, modal, yank, cp, &res)) {
+            modal->count = 0;
+            return res;
+        }
     }
 
     if (modal->mode == MODE_VISUAL && (cp == 'd' || cp == 'x' || cp == 'y' || cp == 'c')) {
@@ -243,7 +349,13 @@ EditCommandResult edit_command_apply(Editor *e, ModalState *modal,
 
     case 'v':
         if (modal->mode == MODE_VISUAL) modal_enter_normal(modal);
-        else { modal_enter_visual(modal); e->anchor = e->cursor; }
+        else if (modal->mode == MODE_VISUAL_BLOCK) {
+            /* Keep the corners; switch to character-wise visual. */
+            modal_enter_visual(modal);
+        } else {
+            modal_enter_visual(modal);
+            e->anchor = e->cursor;
+        }
         break;
 
     case ':':

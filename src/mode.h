@@ -1,7 +1,7 @@
 #ifndef WAVE_MODE_H
 #define WAVE_MODE_H
 
-typedef enum { MODE_NORMAL, MODE_INSERT, MODE_VISUAL } Mode;
+typedef enum { MODE_NORMAL, MODE_INSERT, MODE_VISUAL, MODE_VISUAL_BLOCK } Mode;
 
 typedef struct {
     Mode mode;
@@ -14,6 +14,7 @@ void modal_init(ModalState *m);
 void modal_enter_normal(ModalState *m);
 void modal_enter_insert(ModalState *m);
 void modal_enter_visual(ModalState *m);
+void modal_enter_visual_block(ModalState *m);
 void modal_toggle_visual(ModalState *m);
 void modal_clear_pending(ModalState *m);
 void modal_set_pending(ModalState *m, char pending);
