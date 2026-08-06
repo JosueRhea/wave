@@ -430,6 +430,34 @@ int main(void) {
     /* Typing replaces every occurrence at once. */
     standard_multi_text_input(&e, &m, 'X');
     check_text(&e, "X\nX\nX\n");
+    /* One ⌘Z reverts every caret's insert — not just the primary. */
+    CHECK(editor_undo(&e));
+    check_text(&e, "foo\nfoo\nfoo\n");
+    CHECK_EQ(standard_caret_count(&e), 2u);
+    CHECK(editor_redo(&e));
+    check_text(&e, "X\nX\nX\n");
+    CHECK_EQ(standard_caret_count(&e), 2u);
+    editor_close(&e);
+
+    /* Multi-type then undo restores the pre-type caret offsets. */
+    modal_init(&m);
+    fill(&e, "aa\nbb\ncc\n");
+    standard_set_enabled(&e, &m, 1);
+    e.cursor = e.anchor = 0;
+    CHECK(standard_add_caret(&e, 3, 3));
+    CHECK(standard_add_caret(&e, 6, 6));
+    standard_multi_text_input(&e, &m, 'Z');
+    check_text(&e, "Zaa\nZbb\nZcc\n");
+    CHECK(editor_undo(&e));
+    check_text(&e, "aa\nbb\ncc\n");
+    CHECK_EQ(e.cursor, 0u);
+    {
+        size_t ca = 0, cc = 0;
+        CHECK(standard_caret_at(&e, 0, &ca, &cc));
+        CHECK_EQ(cc, 3u);
+        CHECK(standard_caret_at(&e, 1, &ca, &cc));
+        CHECK_EQ(cc, 6u);
+    }
     editor_close(&e);
 
     /* Backspace at every caret. */

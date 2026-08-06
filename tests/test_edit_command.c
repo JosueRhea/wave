@@ -149,19 +149,23 @@ int main(void) {
     {
         size_t ca = 0, cc = 0;
         CHECK(standard_caret_at(&e, 0, &ca, &cc));
-        CHECK_EQ(cc, 11u); /* after X on line 2 */
+        CHECK_EQ(cc, 6u); /* after X on line 1 (ascending store order) */
         CHECK(standard_caret_at(&e, 1, &ca, &cc));
-        CHECK_EQ(cc, 6u); /* after X on line 1 */
+        CHECK_EQ(cc, 11u); /* after X on line 2 */
     }
     CHECK(standard_multi_motion(&e, &m, STD_MOTION_RIGHT, 0));
     CHECK_EQ(e.cursor, 2u);
     {
         size_t ca = 0, cc = 0;
         CHECK(standard_caret_at(&e, 0, &ca, &cc));
-        CHECK_EQ(cc, 12u);
-        CHECK(standard_caret_at(&e, 1, &ca, &cc));
         CHECK_EQ(cc, 7u);
+        CHECK(standard_caret_at(&e, 1, &ca, &cc));
+        CHECK_EQ(cc, 12u);
     }
+    CHECK(editor_undo(&e));
+    text = editor_text(&e);
+    CHECK_STR(text, "aaa\nbbb\nccc\n");
+    free(text);
     editor_close(&e);
 
     modal_init(&m);

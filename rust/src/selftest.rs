@@ -429,6 +429,19 @@ fn suite_multi_cursor(home: &Path) -> usize {
             &format!("typing replaces every occurrence -> {text:?}"),
         );
         c.ok(s.caret_count() == 2, "carets survive typing");
+        c.ok(s.undo(), "undo multi-caret type");
+        let text = buffer_text(&s);
+        c.ok(
+            text.starts_with("foo\nfoo\nfoo\n"),
+            &format!("undo restores every occurrence -> {text:?}"),
+        );
+        c.ok(s.caret_count() == 2, "undo keeps extras");
+        c.ok(s.redo(), "redo multi-caret type");
+        let text = buffer_text(&s);
+        c.ok(
+            text.starts_with("X\nX\nX\n"),
+            &format!("redo restores typed text -> {text:?}"),
+        );
         s.escape();
         c.ok(s.caret_count() == 0, "Escape clears extras");
     }
@@ -558,7 +571,7 @@ fn suite_multi_cursor(home: &Path) -> usize {
             &format!("typing after I edits every line -> {text:?}"),
         );
         c.ok(
-            caret_rowcol(&s, 0) == Some((2, 1)) && caret_rowcol(&s, 1) == Some((1, 1)),
+            caret_rowcol(&s, 0) == Some((1, 1)) && caret_rowcol(&s, 1) == Some((2, 1)),
             &format!(
                 "carets sit after each typed char -> {:?} / {:?}",
                 caret_rowcol(&s, 0),
@@ -572,7 +585,7 @@ fn suite_multi_cursor(home: &Path) -> usize {
             &format!("arrow right moved primary -> {:?}", s.cursor()),
         );
         c.ok(
-            caret_rowcol(&s, 0) == Some((2, 2)) && caret_rowcol(&s, 1) == Some((1, 2)),
+            caret_rowcol(&s, 0) == Some((1, 2)) && caret_rowcol(&s, 1) == Some((2, 2)),
             &format!(
                 "arrow right moved extras -> {:?} / {:?}",
                 caret_rowcol(&s, 0),

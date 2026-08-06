@@ -645,8 +645,9 @@ int standard_select_next_occurrence(Editor *e, ModalState *m) {
 }
 
 /* Every caret's (anchor, cursor) pair, primary included, sorted by cursor
- * descending. Editing from the bottom up means an earlier edit never shifts the
- * offsets of the carets still to come, so no fix-up pass is needed. */
+ * ascending. Editing low→high records undo positions that LIFO-undo cleanly;
+ * later (higher) carets are shifted when an earlier edit grows/shrinks the
+ * buffer. */
 typedef struct {
     size_t anchor;
     size_t cursor;
@@ -665,10 +666,10 @@ static size_t collect_carets(Editor *e, CaretRef *out) {
         out[n].primary = 0;
         n++;
     }
-    for (size_t i = 1; i < n; i++) {  /* insertion sort, descending by cursor */
+    for (size_t i = 1; i < n; i++) {  /* insertion sort, ascending by cursor */
         CaretRef key = out[i];
         size_t j = i;
-        while (j > 0 && out[j - 1].cursor < key.cursor) {
+        while (j > 0 && out[j - 1].cursor > key.cursor) {
             out[j] = out[j - 1];
             j--;
         }
@@ -699,12 +700,13 @@ static void store_carets(Editor *e, ModalState *m, CaretRef *c, size_t n) {
     sync_selection(e, m);
 }
 
-/* After editing at `at`, bump already-processed carets (indices < i). Carets
- * are walked high→low so unprocessed lower offsets stay valid; once saved,
- * a later lower edit still shifts the buffer under those higher cursors. */
-static void adjust_higher_carets(CaretRef *c, size_t i, size_t at, ptrdiff_t delta) {
+/* After editing at `at`, bump not-yet-processed carets (indices > i). Carets
+ * are walked low→high so recorded undo positions stay valid under LIFO undo;
+ * a lower edit still shifts the higher carets waiting their turn. */
+static void adjust_later_carets(CaretRef *c, size_t i, size_t n, size_t at,
+                                ptrdiff_t delta) {
     if (delta == 0) return;
-    for (size_t j = 0; j < i; j++) {
+    for (size_t j = i + 1; j < n; j++) {
         if (c[j].cursor >= at) c[j].cursor = (size_t)((ptrdiff_t)c[j].cursor + delta);
         if (c[j].anchor >= at) c[j].anchor = (size_t)((ptrdiff_t)c[j].anchor + delta);
     }
@@ -716,9 +718,9 @@ int standard_multi_text_input(Editor *e, ModalState *m, unsigned int cp) {
 
     CaretRef c[EDITOR_MAX_EXTRA_CARETS + 1];
     size_t n = collect_carets(e, c);
-    e->group_open = 0;
+    editor_begin_txn(e);
     for (size_t i = 0; i < n; i++) {
-        /* One caret at a time, bottom-up: point the editor at it, reuse the
+        /* One caret at a time, low→high: point the editor at it, reuse the
          * single-caret path, then read back where it ended up. */
         e->cursor = c[i].cursor;
         e->anchor = c[i].anchor;
@@ -728,10 +730,10 @@ int standard_multi_text_input(Editor *e, ModalState *m, unsigned int cp) {
         standard_text_input(e, m, cp);
         ptrdiff_t delta = (ptrdiff_t)pt_length(buffer_pt(e->buf)) - (ptrdiff_t)before;
         c[i].cursor = c[i].anchor = e->cursor;
-        adjust_higher_carets(c, i, at, delta);
+        adjust_later_carets(c, i, n, at, delta);
     }
     store_carets(e, m, c, n);
-    e->group_open = 1;
+    editor_end_txn(e);
     return 1;
 }
 
@@ -741,7 +743,7 @@ int standard_multi_editor_key(Editor *e, ModalState *m, EditorKey key) {
 
     CaretRef c[EDITOR_MAX_EXTRA_CARETS + 1];
     size_t n = collect_carets(e, c);
-    e->group_open = 0;
+    editor_begin_txn(e);
     int handled = 0;
     for (size_t i = 0; i < n; i++) {
         e->cursor = c[i].cursor;
@@ -752,10 +754,10 @@ int standard_multi_editor_key(Editor *e, ModalState *m, EditorKey key) {
         handled |= standard_editor_key(e, m, key);
         ptrdiff_t delta = (ptrdiff_t)pt_length(buffer_pt(e->buf)) - (ptrdiff_t)before;
         c[i].cursor = c[i].anchor = e->cursor;
-        adjust_higher_carets(c, i, at, delta);
+        adjust_later_carets(c, i, n, at, delta);
     }
     store_carets(e, m, c, n);
-    e->group_open = 1;
+    editor_end_txn(e);
     return handled;
 }
 

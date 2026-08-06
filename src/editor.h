@@ -15,6 +15,9 @@ typedef struct {
     char *text;
     size_t len;
     size_t cur;
+    /* Non-zero: this op belongs to a multi-caret (or other) transaction.
+     * Undo/redo apply every contiguous op with the same id as one step. */
+    unsigned txn;
 } EditOp;
 typedef struct { EditOp *v; int n, cap; } OpStack;
 
@@ -22,6 +25,20 @@ typedef struct { EditOp *v; int n, cap; } OpStack;
  * storage lives here because it is per-buffer state that has to survive a tab
  * switch, but only standard.c reads or writes it. */
 #define EDITOR_MAX_EXTRA_CARETS 64
+#define EDITOR_TXN_SNAP_MAX 16
+
+/* Caret positions captured around a transaction so undo/redo can put every
+ * caret back, not just the primary. Heap-allocated on the editor — embedding
+ * an array here made TabSet too large for the stack. */
+typedef struct {
+    unsigned id;
+    size_t cursor, anchor, extra_n;
+    size_t extra_cursor[EDITOR_MAX_EXTRA_CARETS];
+    size_t extra_anchor[EDITOR_MAX_EXTRA_CARETS];
+    size_t after_cursor, after_anchor, after_extra_n;
+    size_t after_extra_cursor[EDITOR_MAX_EXTRA_CARETS];
+    size_t after_extra_anchor[EDITOR_MAX_EXTRA_CARETS];
+} EditorTxnSnap;
 
 typedef struct {
     Buffer *buf;
@@ -41,6 +58,11 @@ typedef struct {
 
     OpStack undo, redo;
     int group_open;
+    unsigned txn_seq;
+    unsigned txn_current;
+    EditorTxnSnap *txn_snaps;
+    int txn_snap_n;
+    int txn_snap_cap;
     int lsp_open;
     int lsp_dirty;
     int version;
@@ -102,6 +124,8 @@ int editor_update_highlighter(Editor *e);
 size_t editor_highlight_spans(Editor *e, size_t start_byte, size_t end_byte,
                               HighlightSpan *out, size_t max);
 void editor_cancel_group(Editor *e);
+void editor_begin_txn(Editor *e);
+void editor_end_txn(Editor *e);
 char *editor_text(Editor *e);
 char *editor_range_text(Editor *e, size_t a, size_t b);
 void editor_clear_history(Editor *e);

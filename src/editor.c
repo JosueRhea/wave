@@ -81,6 +81,7 @@ void editor_close(Editor *e) {
     free(e->path);
     ops_clear(&e->undo); free(e->undo.v);
     ops_clear(&e->redo); free(e->redo.v);
+    free(e->txn_snaps);
     free(e->vstart);
     editor_init(e);
 }
@@ -117,6 +118,93 @@ size_t editor_highlight_spans(Editor *e, size_t start_byte, size_t end_byte,
 void editor_cancel_group(Editor *e) {
     if (!e) return;
     e->group_open = 0;
+}
+
+static void txn_capture_before(Editor *e, EditorTxnSnap *s) {
+    s->cursor = e->cursor;
+    s->anchor = e->anchor;
+    s->extra_n = e->extra_n;
+    for (size_t i = 0; i < e->extra_n; i++) {
+        s->extra_cursor[i] = e->extra_cursor[i];
+        s->extra_anchor[i] = e->extra_anchor[i];
+    }
+}
+
+static void txn_capture_after(Editor *e, EditorTxnSnap *s) {
+    s->after_cursor = e->cursor;
+    s->after_anchor = e->anchor;
+    s->after_extra_n = e->extra_n;
+    for (size_t i = 0; i < e->extra_n; i++) {
+        s->after_extra_cursor[i] = e->extra_cursor[i];
+        s->after_extra_anchor[i] = e->extra_anchor[i];
+    }
+}
+
+static void txn_restore_before(Editor *e, const EditorTxnSnap *s) {
+    e->cursor = s->cursor;
+    e->anchor = s->anchor;
+    e->extra_n = s->extra_n;
+    for (size_t i = 0; i < s->extra_n; i++) {
+        e->extra_cursor[i] = s->extra_cursor[i];
+        e->extra_anchor[i] = s->extra_anchor[i];
+    }
+}
+
+static void txn_restore_after(Editor *e, const EditorTxnSnap *s) {
+    e->cursor = s->after_cursor;
+    e->anchor = s->after_anchor;
+    e->extra_n = s->after_extra_n;
+    for (size_t i = 0; i < s->after_extra_n; i++) {
+        e->extra_cursor[i] = s->after_extra_cursor[i];
+        e->extra_anchor[i] = s->after_extra_anchor[i];
+    }
+}
+
+static EditorTxnSnap *txn_snap_find(Editor *e, unsigned id) {
+    for (int i = 0; i < e->txn_snap_n; i++)
+        if (e->txn_snaps[i].id == id) return &e->txn_snaps[i];
+    return NULL;
+}
+
+void editor_begin_txn(Editor *e) {
+    if (!e) return;
+    e->group_open = 0;
+    if (e->txn_seq == 0) e->txn_seq = 1;
+    e->txn_current = e->txn_seq++;
+    if (e->txn_seq == 0) e->txn_seq = 1; /* skip 0 forever */
+
+    if (e->txn_snap_n >= e->txn_snap_cap) {
+        int cap = e->txn_snap_cap ? e->txn_snap_cap * 2 : 4;
+        if (cap > EDITOR_TXN_SNAP_MAX) cap = EDITOR_TXN_SNAP_MAX;
+        if (e->txn_snap_n >= cap) {
+            /* Drop the oldest. */
+            memmove(&e->txn_snaps[0], &e->txn_snaps[1],
+                    (size_t)(e->txn_snap_n - 1) * sizeof e->txn_snaps[0]);
+            e->txn_snap_n--;
+        } else {
+            EditorTxnSnap *n =
+                realloc(e->txn_snaps, (size_t)cap * sizeof *e->txn_snaps);
+            if (!n) {
+                e->txn_current = 0;
+                return;
+            }
+            e->txn_snaps = n;
+            e->txn_snap_cap = cap;
+        }
+    }
+
+    EditorTxnSnap *slot = &e->txn_snaps[e->txn_snap_n++];
+    memset(slot, 0, sizeof *slot);
+    slot->id = e->txn_current;
+    txn_capture_before(e, slot);
+}
+
+void editor_end_txn(Editor *e) {
+    if (!e || e->txn_current == 0) return;
+    EditorTxnSnap *s = txn_snap_find(e, e->txn_current);
+    if (s) txn_capture_after(e, s);
+    e->txn_current = 0;
+    e->group_open = 1;
 }
 
 static char *dupstr_local(const char *s) {
@@ -295,7 +383,8 @@ int utf8_encode(unsigned int cp, char out[4]) {
 static void record_insert(Editor *e, size_t pos, const char *text, size_t len) {
     if (e->group_open && e->undo.n > 0) {
         EditOp *t = &e->undo.v[e->undo.n - 1];
-        if (t->type == OP_INSERT && t->pos + t->len == pos) {
+        if (t->type == OP_INSERT && t->pos + t->len == pos &&
+            t->txn == e->txn_current) {
             t->text = realloc(t->text, t->len + len);
             memcpy(t->text + t->len, text, len);
             t->len += len;
@@ -303,7 +392,8 @@ static void record_insert(Editor *e, size_t pos, const char *text, size_t len) {
             return;
         }
     }
-    ops_push(&e->undo, (EditOp){OP_INSERT, pos, memdup_local(text, len), len, pos});
+    ops_push(&e->undo, (EditOp){OP_INSERT, pos, memdup_local(text, len), len, pos,
+                                e->txn_current});
     ops_clear(&e->redo);
 }
 
@@ -311,7 +401,8 @@ static void record_delete(Editor *e, size_t pos, const char *text, size_t len,
                           size_t cur) {
     if (e->group_open && e->undo.n > 0) {
         EditOp *t = &e->undo.v[e->undo.n - 1];
-        if (t->type == OP_DELETE && pos + len == t->pos) {
+        if (t->type == OP_DELETE && pos + len == t->pos &&
+            t->txn == e->txn_current) {
             char *nt = malloc(len + t->len);
             memcpy(nt, text, len);
             memcpy(nt + len, t->text, t->len);
@@ -321,7 +412,8 @@ static void record_delete(Editor *e, size_t pos, const char *text, size_t len,
             return;
         }
     }
-    ops_push(&e->undo, (EditOp){OP_DELETE, pos, memdup_local(text, len), len, cur});
+    ops_push(&e->undo, (EditOp){OP_DELETE, pos, memdup_local(text, len), len, cur,
+                                e->txn_current});
     ops_clear(&e->redo);
 }
 
@@ -720,15 +812,26 @@ int editor_apply_drag_selection(Editor *e, size_t anchor, float x, float y,
 int editor_undo(Editor *e) {
     e->group_open = 0;
     if (e->undo.n == 0) return 0;
-    EditOp op = e->undo.v[--e->undo.n];
-    if (op.type == OP_INSERT) {
-        buffer_delete(e->buf, op.pos, op.len);
-        e->cursor = op.pos;
+    unsigned txn = e->undo.v[e->undo.n - 1].txn;
+    do {
+        EditOp op = e->undo.v[--e->undo.n];
+        if (op.type == OP_INSERT) {
+            buffer_delete(e->buf, op.pos, op.len);
+            e->cursor = op.pos;
+        } else {
+            buffer_insert(e->buf, op.pos, op.text, op.len);
+            e->cursor = op.cur;
+        }
+        ops_push(&e->redo, op);
+    } while (txn != 0 && e->undo.n > 0 && e->undo.v[e->undo.n - 1].txn == txn);
+
+    if (txn) {
+        EditorTxnSnap *s = txn_snap_find(e, txn);
+        if (s) txn_restore_before(e, s);
+        else e->anchor = e->cursor;
     } else {
-        buffer_insert(e->buf, op.pos, op.text, op.len);
-        e->cursor = op.cur;
+        e->anchor = e->cursor;
     }
-    ops_push(&e->redo, op);
     e->dirty = 1; e->lsp_dirty = 1; e->wrap_dirty = 1;
     e->modified = 1;
     return 1;
@@ -737,15 +840,26 @@ int editor_undo(Editor *e) {
 int editor_redo(Editor *e) {
     e->group_open = 0;
     if (e->redo.n == 0) return 0;
-    EditOp op = e->redo.v[--e->redo.n];
-    if (op.type == OP_INSERT) {
-        buffer_insert(e->buf, op.pos, op.text, op.len);
-        e->cursor = op.pos + op.len;
+    unsigned txn = e->redo.v[e->redo.n - 1].txn;
+    do {
+        EditOp op = e->redo.v[--e->redo.n];
+        if (op.type == OP_INSERT) {
+            buffer_insert(e->buf, op.pos, op.text, op.len);
+            e->cursor = op.pos + op.len;
+        } else {
+            buffer_delete(e->buf, op.pos, op.len);
+            e->cursor = op.pos;
+        }
+        ops_push(&e->undo, op);
+    } while (txn != 0 && e->redo.n > 0 && e->redo.v[e->redo.n - 1].txn == txn);
+
+    if (txn) {
+        EditorTxnSnap *s = txn_snap_find(e, txn);
+        if (s) txn_restore_after(e, s);
+        else e->anchor = e->cursor;
     } else {
-        buffer_delete(e->buf, op.pos, op.len);
-        e->cursor = op.pos;
+        e->anchor = e->cursor;
     }
-    ops_push(&e->undo, op);
     e->dirty = 1; e->lsp_dirty = 1; e->wrap_dirty = 1;
     e->modified = 1;
     return 1;
