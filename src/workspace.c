@@ -147,9 +147,12 @@ Workspace *ws_open(const char *root) {
     struct stat st;
     if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) return NULL;
 
+    char resolved[4096];
+    const char *stored_root = realpath(root, resolved) ? resolved : root;
+
     Workspace *w = calloc(1, sizeof(Workspace));
-    /* normalise: drop a trailing slash so joins are clean */
-    w->root = strdup(root);
+    /* normalise: keep roots absolute so "." and symlinked prefixes display well */
+    w->root = strdup(stored_root);
     size_t rl = strlen(w->root);
     while (rl > 1 && w->root[rl - 1] == '/') w->root[--rl] = '\0';
     scan(w, w->root, "", 0);

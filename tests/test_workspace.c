@@ -48,6 +48,8 @@ static int entry_of(Workspace *w, const char *rel) {
 
 int main(void) {
     char *root = make_tree();
+    char root_real[512];
+    CHECK(realpath(root, root_real) != NULL);
     Workspace *w = ws_open(root);
     CHECK(w != NULL);
 
@@ -210,7 +212,7 @@ int main(void) {
     WsOpenContext ctx = ws_open_context(root);
     CHECK_EQ(ctx.kind, WS_OPEN_WORKSPACE);
     CHECK(ctx.workspace != NULL);
-    CHECK_STR(ws_root(ctx.workspace), root);
+    CHECK_STR(ws_root(ctx.workspace), root_real);
     CHECK_STR(ctx.file, "");
     ws_free(ctx.workspace);
 
@@ -218,11 +220,22 @@ int main(void) {
     ctx = ws_open_context(p);
     CHECK_EQ(ctx.kind, WS_OPEN_FILE);
     CHECK(ctx.workspace != NULL);
-    char parent[512];
+    char parent[512], parent_real[512];
     snprintf(parent, sizeof parent, "%s/a", root);
-    CHECK_STR(ws_root(ctx.workspace), parent);
+    CHECK(realpath(parent, parent_real) != NULL);
+    CHECK_STR(ws_root(ctx.workspace), parent_real);
     CHECK_STR(ctx.file, p);
     ws_free(ctx.workspace);
+
+    char cwd[512];
+    CHECK(getcwd(cwd, sizeof cwd) != NULL);
+    CHECK(chdir(root) == 0);
+    ctx = ws_open_context(".");
+    CHECK_EQ(ctx.kind, WS_OPEN_WORKSPACE);
+    CHECK(ctx.workspace != NULL);
+    CHECK_STR(ws_root(ctx.workspace), root_real);
+    ws_free(ctx.workspace);
+    CHECK(chdir(cwd) == 0);
 
     ctx = ws_open_context(NULL);
     CHECK_EQ(ctx.kind, WS_OPEN_NONE);

@@ -75,7 +75,9 @@ int main(void) {
     OverlayAcceptTarget target = overlay_accept_target(&overlay, ws);
     CHECK(target.has_target);
     CHECK(!target.has_location);
-    CHECK_STR(target.path, file);
+    char file_real[512];
+    snprintf(file_real, sizeof file_real, "%s/target.txt", ws_root(ws));
+    CHECK_STR(target.path, file_real);
     overlay_accept_target_free(&target);
     CHECK(!target.has_target);
     CHECK(target.path == NULL);
